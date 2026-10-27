@@ -1,6 +1,6 @@
 # SPEC-0050 — PP.6 control-plane backup and restore
 
-Status: Accepted technical contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`;
+Status: Accepted technical contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, with accepted C1 merge `ea4f705efba72421f368903be71a0e792851813f` and A10 merge `ca8fe3033ace09cf7b7a43286522dbd3e6ad326a`;
 implementation and release evidence remain gated
 Authority proposal: ADR-0189
 Issue: #975, reusing #640
@@ -547,14 +547,19 @@ sessions. Profiles without independently administered BMC fencing (including
 Demo/TestLab v1) support capture and verification only. No network fence is
 implied.
 
-**Pending conflict resolution (proposed amendment A10, not accepted).** This
+**Historical conflict resolution (A10 accepted).** This
 paragraph and the D7 profile table in
 [`PP6_TECHNICAL_CONTRACT_APPROVAL.md`](../pp/PP6_TECHNICAL_CONTRACT_APPROVAL.md#d7-activation-capability-by-deployment-profile)
 differ on whether a virtualized profile without independent BMC capability may
-materialize an inactive target. Proposed amendment A10 (§7.1) would resolve the
-difference by adding an explicit, signed, non-activating branch. Until that
-exact amendment is accepted by the named human reviewer at a new exact
-revision, this paragraph's capture/verification-only rule governs, and no
+materialize an inactive target. Accepted amendment A10 (§7.1, owner decision
+[6423776117](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423776117))
+resolves the difference by adding an explicit, signed, non-activating
+inactive branch: a virtualized `o3k-small-edge-v1` target with PostgreSQL 16
+may be materialized and verified only when a root-owned, release-signed
+installation policy explicitly selects inactive materialization, and an
+`INACTIVE_VERIFIED` record is terminal, denies operational open, and never
+permits RELEASED or startup. For every profile outside that accepted scope
+this paragraph's capture/verification-only rule still governs, and no
 implementation may create an inactive restored target.
 
 Point-in-time power-off evidence is insufficient for lasting exclusion. Before
@@ -655,17 +660,9 @@ through the accepted observe-before-retry behavior. The exact stop/fence and
 restart transition is a human approval item in ADR-0189; the restore design
 does not define an alternate Operation or lifecycle authority.
 
-### 7.1 Proposed amendment A10 isolated inactive materialization (PENDING, not accepted)
+### 7.1 Accepted amendment A10 isolated inactive materialization
 
-Status: proposed 2026-10-24, revised 2026-10-25 for #1086. This subsection is
-**not** part of the accepted contract at
-`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` and is not implementation
-authority. It becomes normative only if the named human
-reviewer records explicit acceptance of this exact revised specification,
-ADR-0189 and the PP6 technical contract at a new exact revision. PR approval or
-merge alone is not that acceptance. Until then, §6's capture/verification-only
-statement and the accepted sequence in §7 govern, and implementation must keep
-failing closed at `PREFLIGHTED`.
+Accepted for implementation/testing by owner decision [6423776117](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423776117), reviewing PR #1176 head `b69b6b9b8abe913f1da4639cadb6df29509d4cde`, merged as `ca8fe3033ace09cf7b7a43286522dbd3e6ad326a`. This is not runtime, installed, production, or final PP.6 certification; the interim reviewer was explicitly non-independent.
 
 #### 7.1.1 Purpose and profile scope
 
@@ -920,26 +917,18 @@ format are both version-bound to the accepted amendment.
 
 #### 7.1.11 Acceptance gate
 
-Implementation of this branch is forbidden until the named human reviewer
-records explicit acceptance of this exact specification revision together with
-the consistent ADR-0189 and PP6 technical-contract text. Opening, approving or
-merging the proposal PR is not that acceptance. Until acceptance,
-implementations must not persist or accept any later phase, including all
-`_INACTIVE` phases, and must remain limited to the authenticated
-`PREFLIGHTED` record. If this amendment is rejected, no inactive restore
-branch exists; only the accepted D7-first activation path and
-capture/verification remain.
+The owner-directed A10 decision is recorded at
+[issue comment 6423776117](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423776117)
+for PR #1176 reviewed head `b69b6b9b8abe913f1da4639cadb6df29509d4cde`,
+integrated as `ca8fe3033ace09cf7b7a43286522dbd3e6ad326a`, with matching ADR-0189
+and PP6 technical-contract records. It authorizes implementation and testing
+of this branch. It does not certify implementation, installed recovery,
+production readiness, independent security qualification, source takeover, or
+controller activation. All D7/D3/D4/D8 activation gates remain mandatory.
 
-### 7.2 Proposed amendment C1: durable recovery designation and installed journal trust (PENDING, not accepted)
+### 7.2 Accepted amendment C1: durable recovery designation and installed journal trust
 
-Status: proposed 2026-10-25 to close the startup-discovery and journal-trust
-gaps identified after D8 journal v1. This subsection is not part of the
-accepted contract at
-`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` and grants no implementation
-authority. It must be explicitly accepted by the named human reviewer together
-with the matching ADR-0189 and PP6 technical-contract text at one exact source
-revision. Acceptance of this amendment does not accept A10, enable any restore
-mutation, or relax the D7 activation gate.
+Accepted for implementation/testing by owner decision [6423774720](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423774720), reviewing PR #1179 head `0c0dfd4374cf0b972e2a8769ad4f9f38cea793a0`, merged as `ea4f705efba72421f368903be71a0e792851813f`. The interim reviewer was explicitly non-independent. C1 does not by itself authorize A10 or restore mutation, and does not certify runtime, installed, production, or final PP.6 evidence.
 
 #### 7.2.1 Installation-bound designation
 
@@ -1169,16 +1158,331 @@ authenticated, anti-rollback trust recovery disposition; local operator edits
 or online artifact-signing keys cannot repair trust. The previous trust state
 is preserved as evidence.
 
-This proposal defines protocol fields and provisioning behavior absent from
-the accepted contract. Exact acceptance must explicitly include or amend the
-installation-policy and state-record canonical formats and signature
-envelopes, trust certificate/revocation formats, key purposes and scopes, and the
-proposed 90-day certificate lifetime, 24-hour revocation refresh, and 30-day
-rotation overlap. No implementation may infer those fields from the existing
-artifact `backup_trust` document or treat caller-supplied revoked-key lists as
-installed trust. This amendment does not authorize any post-`PREFLIGHTED`
-journal phase; those transitions require the separately accepted A10/journal-v2
-contract. Journal v1 remains limited to its accepted `PREFLIGHTED` behavior.
+These protocol fields and provisioning behavior were explicitly accepted by
+the owner-directed C1 decision at
+[issue comment 6423774720](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423774720),
+for PR #1179 reviewed head `0c0dfd4374cf0b972e2a8769ad4f9f38cea793a0`,
+integrated as `ea4f705efba72421f368903be71a0e792851813f`, with matching ADR-0189
+and PP6 technical-contract records. This acceptance authorizes implementation
+and testing, not implementation correctness, installed recovery, production
+readiness, or independent security qualification. Implementations must not
+infer trust from the artifact `backup_trust` document or caller-supplied
+revocation lists. C1 does not authorize post-`PREFLIGHTED` journal phases;
+those require the separately accepted A10/journal-v2 branch. Journal v1 remains
+limited to its accepted `PREFLIGHTED` behavior.
+
+### 7.3 Proposed amendment C1.1: authenticated installation-policy/trust re-anchor and journal checkpoint (PENDING, not accepted)
+
+Status: proposed 2026-10-27. This subsection is **not** part of the accepted
+contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, is not covered by the
+owner-accepted C1 (§7.2, merge `ea4f705efba72421f368903be71a0e792851813f`) or
+A10 (§7.1, merge `ca8fe3033ace09cf7b7a43286522dbd3e6ad326a`) decisions, and
+grants no implementation authority. It becomes normative only if the named
+human reviewer records explicit acceptance of this exact revision together
+with the matching ADR-0189 and PP6 technical-contract text. PR approval or
+merge alone is not that acceptance. C1.1 changes no accepted C1 or A10
+technical parameter; it adds the rotation/recovery mechanism for the trust
+that C1 installs.
+
+#### 7.3.1 Conflict analysis and option comparison
+
+Accepted C1 (§7.2.3) requires the verifier to authenticate journal signatures
+against the installed purpose- and scope-bound signer certificate and current
+signed revocation state, and limits old/new signer overlap to at most 30 days.
+After a journal/evidence trust root retires, historical state and journal
+records can no longer be re-verified under current trust unless retired
+material is retained. Two options resolve this conflict:
+
+- Option B — historical policy-chain verification: retain every retired root,
+  certificate, and revocation document in the live trust bundle so all
+  historical signatures keep verifying. This keeps retired roots in the live
+  TCB, requires unbounded retention and expiry exceptions, and still needs a
+  sealing re-anchor to bound the retained chain.
+- Option A — explicit re-anchor: one installation-policy-authority-signed
+  re-anchor record and one journal checkpoint carry the authenticated
+  old-era tips forward; older signatures become audit-only material.
+
+Option A is selected: it is smaller and safer (a bounded live TCB, no
+retention or expiry exceptions, and the sealing re-anchor is the mechanism
+itself). The rest of this subsection specifies Option A.
+
+#### 7.3.2 New signed formats
+
+The frozen v1 formats (`o3k-installation-policy-v1`,
+`o3k-installation-state-v1`, `o3k-recovery-trust-v1`,
+`o3k-journal-authority-v1`, `o3k-evidence-authority-v1`,
+`o3k-recovery-revocations-v1`), journal v1, and the accepted A10 journal-v2
+formats are unchanged. C1.1 adds three RFC 8785 canonical Ed25519 formats:
+
+- `o3k-installation-reanchor-v1` — the re-anchor record R (§7.3.3);
+- `o3k-restore-journal-checkpoint-v1` — the journal checkpoint C (§7.3.4);
+- `o3k-recovery-revalidation-v1` — compromise-recovery revalidation evidence
+  (§7.3.6), used only for compromise rotation.
+
+All three use strict signature envelopes naming the algorithm and signer key
+ID over the canonical payload excluding the envelope; unknown, duplicate, or
+non-canonical fields and payloads are rejected, and every referenced digest is
+the exact SHA-256 of the referenced canonical byte encoding.
+
+#### 7.3.3 Re-anchor record R
+
+R is a distinct record kind in the **same** `o3k-installation-state-v1`
+sequence chain: it occupies the next state sequence number. It is not an
+`o3k-installation-state-v1` disposition and not a journal phase transition,
+and it changes no state value. It amends §7.2.1's uniformity rule that every
+later state record is journal-authority-signed **only** by distinguishing
+disposition records (still signed only by the offline journal authority) from
+the new re-anchor kind. R is signed only by the release-manifest-authenticated
+installation-policy authority; the journal authority never signs R.
+
+The signed payload contains:
+
+- `installation_id`, `site_id`, profile, and backend;
+- `preserved_state` — the exact current state value, carried unchanged;
+- `sequence` — exactly prior state sequence + 1;
+- `prior_record_digest` — digest of the prior state tip;
+- `prior_policy_revision` and `prior_policy_digest`, and
+  `new_policy_revision` and `new_policy_digest`;
+- `prior_trust_bundle_digest` and `new_trust_bundle_digest`;
+- prior and new per-purpose (`restore_journal`, `recovery_evidence`)
+  revocation high-waters, each binding root ID, sequence, and document digest;
+- `checkpoint_digest` — digest of C; null only when `preserved_state` is
+  `NEVER_RECOVERED`;
+- `recovery_revalidation_digest` — null for routine rotation, required for
+  compromise rotation;
+- for preserved `RECOVERY_DESIGNATED`: operation ID, artifact digest, and
+  recovery-directory identity; for preserved `RELEASED`: operation ID,
+  artifact digest, recovery-directory identity, terminal journal hash, and
+  terminal evidence digest;
+- target device/inode;
+- `signer_manifest_digest` — digest of the release-signed release manifest
+  authenticating the R signing key.
+
+The new policy revision must prior-link the old policy digest and preserve
+installation, site, and target identity; rotation never rebinds them. Replay
+with the same sequence and the same digest is idempotent; the same sequence
+with a different digest is equivocation and is rejected, as is any lower or
+stale sequence.
+
+#### 7.3.4 Journal checkpoint C
+
+C is signed by the **new** offline journal authority under the **new** current
+trust. C1.1 authorizes checkpoints for journal v1 only; checkpointing an
+accepted A10 journal-v2 chain is not designed here and requires separate
+acceptance. C is not a phase and performs no phase transition. It occupies the
+next journal sequence, with `prior_record_digest` equal to the old journal
+tip, and binds:
+
+- the prior checkpoint digest, when any prior checkpoint exists;
+- the prior state tip S0 — the state record before R, **not** R itself, so C
+  never forms a circle with R;
+- the old journal tip;
+- the journal directory path, device, and inode;
+- operation ID and artifact digest;
+- the unchanged phase;
+- old and new journal certificate key IDs and serials;
+- old and new per-purpose revocation high-waters;
+- `rotation_reason` — exactly `routine` or `compromise`;
+- the revalidation evidence digest, when `rotation_reason` is `compromise`.
+
+R binds `digest(C)`; C never binds `digest(R)`. The immutable C is published
+before R (§7.3.9); C alone grants no authority. All later journal records
+chain after C. After R+C are durably published, older state and journal
+signatures are audit-only: their authenticity is carried by the authenticated
+state tip R and journal tip C, while current-era records continue to verify
+individually under current trust. During the accepted at-most-30-day signer
+overlap, the old era is cross-checked directly where possible; retired old
+signers grant no new authorization after retirement. This bounded attestation
+replaces historical per-signature verification under current trust and is an
+explicit human security decision (§7.3.11).
+
+#### 7.3.5 Requirements by preserved state
+
+The C1 installation-state lifecycle remains exactly `NEVER_RECOVERED`,
+`RECOVERY_DESIGNATED`, and `RELEASED`; C1.1 adds no state value and no
+`QUARANTINED` installation state.
+
+- `NEVER_RECOVERED`: R only, signed by the installation-policy authority; no
+  journal dependency and no checkpoint (`checkpoint_digest` null).
+- `RECOVERY_DESIGNATED` and `RELEASED`: R and C are both required, with C
+  published first.
+
+The preserved disposition, operation, artifact, target, recovery-directory
+identity, and RELEASED terminal evidence are preserved exactly; R and C add
+no state or phase change. No new `NEVER_RECOVERED` or `RELEASED`
+self-transition is introduced. Rotation during quarantine preserves the
+applicable one of the three state values unchanged, and preserves all
+journal quarantine phases and unsigned denial markers byte-for-byte; removing
+a marker still requires the accepted signed disposition that authorizes its
+removal. An ambiguous migrated state without an authenticated old generation
+cannot rotate: it must first receive an authenticated disposition under the
+accepted C1 rules.
+
+Pre-C1.1 verifiers reject unknown R and C records and deny startup. Rotation
+is performed only after every verifier that reads the installation supports
+C1.1, including an R-only rotation for a `NEVER_RECOVERED` installation.
+
+#### 7.3.6 Routine rotation and compromise recovery
+
+Routine rotation requires the outgoing trust to be fully verified at
+quiescence: every required old-era signature verifies, and the outgoing
+signer certificates are fresh and unrevoked under the current signed
+revocation state. Compromise rotation starts with an offline-root-signed
+revocation document and protected high-water sequence increase, and the
+installation stays quarantined throughout. Compromise rotation then revokes
+the old root by a revocation document signed by the **new** trust root, which
+the new installation policy authenticates. Revocation blocks new
+authorization by the old root from that point forward and does not
+retroactively rewrite durable history; after R+C, old-era authenticity is
+carried only by a routine C or by a compromise C plus its revalidation
+evidence. All accepted fail-closed revocation behavior is preserved.
+
+A C with `rotation_reason` = `compromise` requires an
+`o3k-recovery-revalidation-v1` document signed by the **new**
+recovery-evidence authority. The evidence carries a unique 256-bit nonce and
+a proposed 300-second validity window from `issued_at` (`expires_at` =
+`issued_at` + 300 seconds; the 300-second value is a pending human decision,
+§7.3.11), and clock rollback or clock unavailability at verification denies.
+It binds: `installation_id`, `site_id`, profile, and backend; operation ID,
+artifact digest, and target identity; old and new trust root IDs and
+certificate key IDs/serials; the exact prior state, journal, and checkpoint
+tips; old and new policy digests and trust bundle digests; the observed
+target identity; `custody_record_digest` and a 2-of-3
+`recovery_quorum_event_id`; `issued_at`/`expires_at`; and an explicit
+statement that the exact tips were reviewed. To avoid circular digest
+bindings, the evidence names only the prior tips it reviewed, while R and C
+name the evidence digest; neither R nor C appears inside the evidence
+payload.
+
+The evidence authorizes exactly one R/C pair. Before that pair is accepted, a
+durable consumption record is written binding the evidence digest, the exact
+R digest, and the exact C digest; a byte-identical resume of that same pair
+is allowed, and any second or different use is rejected. The evidence is
+marked consumed only after the full authenticated publication of §7.3.9
+completes; a crash before that point allows exact retry only. Missing, stale,
+wrong-scope, or insufficient-custody evidence fails closed.
+
+Revalidation never authorizes a phase change, `RELEASED`, or activation. If
+prior `RELEASED` terminal evidence cannot be authenticated, rotation cannot
+make startup succeed. Compromise of the installation-policy authority itself
+still requires independent release-path re-provisioning; no local repair is
+permitted.
+
+#### 7.3.7 Revocation high-waters and trust freshness
+
+Revocation high-waters are monotonic only within the same root; a root change
+is bound explicitly by the old/new root IDs, sequences, and document digests
+in R and C, and numeric sequences across different roots cannot be compared.
+Unknown, revoked, or stale current-era signers are denied, and
+revocation-distribution unavailability fails closed whenever fresh trust is
+required, per the accepted C1 freshness rules.
+
+#### 7.3.8 Quiescence and concurrency
+
+Rotation quiesces all store openers using the existing `StoreAccessLock`
+(accepted D4 lifetime exclusive lock) and requires that no unsigned or
+in-flight journal signing request exists before the state and journal tips are
+observed. Rotation may occur while the installation is quarantined, but it
+cannot alter the quarantine disposition. `o3kd` and the service stay
+read-only throughout; rotation grants no operational capability. R and C
+signing requests use the accepted offline signing ceremony: each request
+carries a fresh 256-bit request nonce, a retry returns the original exact
+bytes only while the request remains valid, and presenting a new nonce for an
+already requested record is a fork and is denied.
+
+#### 7.3.9 Crash-safe publication and resume
+
+Publication is ordered and crash-safe; the current checkpoint C is always
+published before the current re-anchor R.
+
+1. verify the old generation;
+2. stage the immutable new policy, trust, and revocation records in the
+   protected state root under distinct staged names that no published verifier
+   reads;
+3. persist the immutable C in the D8 journal directory;
+4. persist R as an authenticated pending intent in the state root;
+5. atomically publish, in order: the fixed policy file, then the policy
+   high-water; the fixed trust bundle, then the trust high-water; the current
+   journal tip C; and the current state record R; archiving the prior bytes;
+6. re-read and authenticate the whole generation (final observation) before
+   reporting success, marking any revalidation evidence consumed, or retiring
+   old trust.
+
+The policy high-water is exactly `{revision, digest}`; the trust high-water is
+exactly `{bundle digest, per-root revocation sequence and digest}`. Every
+step uses a same-directory temporary file, file fsync, rename, directory
+fsync, and readback. A partial generation denies startup. The root installer
+resumes only the exact signed R/C forward: it never infers success from a
+lost acknowledgement, never performs unsigned repair, and never rolls back to
+an operational old generation. Conflicting bytes or equivocation require
+inspection. C without R, R without C where required, or any wrong, missing,
+or mismatched policy, trust, state, or journal component fails closed. Old
+trust is retired only after the full new generation is durably observed and
+authenticated.
+
+| Publication step | Crash semantics and resume rule |
+|---|---|
+| Staging | Staged bytes are inert: distinct staged names are never read by published verifiers. A crash restages from the signed R/C; staging alone never changes startup authority. |
+| Fixed policy | After the rename, the new policy is the only current policy. A crash before its high-water re-reads the policy, verifies it against R's `new_policy_digest`, and continues forward; startup on the partial generation is denied. |
+| Policy high-water | `{revision, digest}` makes the new revision durable and anti-rollback. Equal value is idempotent; any rollback or digest conflict fails closed and requires inspection. |
+| Fixed trust | The new bundle is verified against R's `new_trust_bundle_digest`; a crash re-verifies and continues forward. |
+| Trust high-water | `{bundle digest, per-root revocation sequence and digest}`. Equal sequence is idempotent only for the same digest; equivocation fails closed. |
+| Current C | C is immutable at the journal tip and chains after the old tip. A crash re-authenticates the C bytes, chaining, and trust binding, then continues to R; byte-identical resume only. |
+| Current R | R becomes the state tip only after C. A crash re-authenticates the R bytes, `sequence` = prior+1, and `checkpoint_digest`, then runs final observation. |
+| Final observation | Re-reads and authenticates the whole generation. Success, revalidation-evidence consumption, and old-trust retirement happen only here; a crash repeats the exact forward observation. |
+
+Revalidation-evidence consumption follows exact-retry semantics: if a crash
+occurs before the consumption record is marked, the byte-identical R/C pair
+may be resumed and re-accepted; any different bytes are a different use of
+single-use evidence and are rejected.
+
+#### 7.3.10 Filesystem controls and authority boundaries
+
+Filesystem controls are unchanged: the state root remains `root:o3k` mode
+`0750` with state files `0640`; the D8 journal directory remains `o3k:o3k`
+mode `0700` with files `0600`; both stay on verified local ext4 with
+canonical paths, no-follow/exclusive-create semantics, and
+owner/mode/device/inode recheck; the fixed policy and trust files remain
+root-owned, service-readable, and not service-writable.
+
+Rotation alone never clears quarantine, consumes activation nonces, grants
+sessions, leases, provider dispatch, an API listener, or activation, and does
+not change the accepted D3, D4, D7, D8, or A10 contracts. Unsigned denial
+markers are preserved byte-for-byte across rotation; removing one still
+requires the accepted signed disposition that authorizes its removal.
+Rotation is a root-authorized installer operation outside the accepted §8
+recovery CLI; C1.1 accepts no new CLI.
+
+#### 7.3.11 Pending human decisions
+
+The following C1.1 decisions are **PENDING** and are not accepted by this
+proposal:
+
+1. R is signed only by the installation-policy authority.
+2. C is signed by the new offline journal authority under new current trust.
+3. Current-era verification plus the authenticated R/C tips replaces
+   every-historical-signature verification under current trust.
+4. The compromise revalidation authority, custody record, and 2-of-3
+   recovery-quorum binding.
+5. Quiescence rules and rotation during quarantine.
+6. The 300-second revalidation-evidence validity window.
+
+#### 7.3.12 Acceptance gate
+
+C1.1 becomes normative only if the named human reviewer records explicit
+acceptance of this exact specification revision together with the consistent
+ADR-0189 and PP6 technical-contract text. Opening, approving, or merging the
+proposal PR is not that acceptance. Until acceptance, the accepted C1 rules
+govern unchanged, including per-signature verification under current trust
+and the at-most-30-day signer overlap, and no implementation may re-anchor
+trust or checkpoint the journal. Acceptance also requires future
+implementation evidence to include these negative cases: replayed or reused
+single-use revalidation evidence, including any second or different R/C pair;
+equal-sequence equivocation of R or C; a crash before and after every
+publication step in §7.3.9 with exact-forward resume only; unsigned denial
+markers preserved byte-for-byte across rotation; a pre-C1.1 verifier rejecting
+unknown R/C records and denying startup; stale, revoked, or unavailable
+current trust failing closed; and rotation granting no activation.
 
 ## 8. Operator interface
 

@@ -55,41 +55,115 @@ SQLite TestLab/portable path and is recorded in
 | Deployment | Activation policy | Independent authority required |
 |---|---|---|
 | `o3k-small-edge-v1`, physical | Supported only when configured | Redfish/BMC administered outside O3K, independent recovery host, pinned CA/certificate and source serial, plus continuous fence lease. |
-| `o3k-small-edge-v1`, virtualized | Disabled by default; no qualified integration is claimed in this package | Any future activation requires independent hypervisor power control or network isolation outside both restored-controller credentials and its host. Controller-local APIs, host-local locks and same-host agents never qualify. Until A10 is explicitly accepted, only backup/verification is allowed; if accepted, inactive materialization is limited to its signed-policy branch. |
+| `o3k-small-edge-v1`, virtualized | Inactive materialization is permitted only when the signed installation policy selects it; activation remains separately gated | Any activation requires independent hypervisor power control or network isolation outside both restored-controller credentials and its host. |
 | `o3k-demo-v1` / TestLab | Backup and verification only; restored-controller activation disabled | A later profile-specific fencing contract and exact evidence are required before enabling activation. |
 
-**Proposed amendment A10 (PENDING, not accepted).** The virtualized row's
-“inactive restore/quarantine” allowance has no corresponding path in the
-accepted SPEC-0050 §7 sequence, which requires `SOURCE_FENCED` before
-`TARGET_RESERVED`. Proposed amendment A10 would add an explicit, signed,
+**Accepted amendment A10.** Owner decision
+[6423776117](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423776117)
+accepted the exact amendment integrated as
+`ca8fe3033ace09cf7b7a43286522dbd3e6ad326a` after review of PR #1176 head
+`b69b6b9b8abe913f1da4639cadb6df29509d4cde`. The amendment adds a signed,
 non-activating branch limited to virtualized PostgreSQL `o3k-small-edge-v1`
 under a release-signed installation policy; see
-[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted)
-and the [ADR-0189 proposed amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted).
-Proposed A10 also clarifies [SPEC-0050 §8](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#8-operator-interface): the unchanged `restore resume` command revalidates and observes the same target; emptiness is required before first mutation, not after the operation's own partial mutation. Fresh D7 evidence remains required for activation resumes, while the A10 inactive branch requires its signed installation policy and never accepts activation transitions. This proposal does not change any accepted D1–D13 decision. Until the exact amendment is accepted by the named human reviewer at a new exact revision, implementation remains fail-closed at `PREFLIGHTED` and inactive target mutation is not authorized.
+[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-accepted-amendment-a10-isolated-inactive-materialization)
+and the [accepted ADR-0189 amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#accepted-amendment-a10-isolated-inactive-materialization).
+The unchanged `restore resume` command revalidates and observes the same
+target; emptiness is required before first mutation, not after the operation's
+own partial mutation. Fresh D7 evidence remains required for activation
+resumes, while the A10 inactive branch requires its signed installation policy
+and prohibits activation transitions. This decision authorizes
+implementation/testing only and does not certify installed recovery or
+production evidence.
 
-**Proposed amendment C1 (PENDING, not accepted).** SPEC-0050 §7.2 and the
-matching ADR-0189 amendment propose an installation-bound recovery designation
-that is discovered independently of `restore.json`, plus installed
+**Accepted amendment C1.** Owner decision
+[6423774720](https://github.com/o3kio/o3k/issues/1086#issuecomment-6423774720)
+accepted the amendment integrated as
+`ea4f705efba72421f368903be71a0e792851813f` after review of PR #1179 head
+`0c0dfd4374cf0b972e2a8769ad4f9f38cea793a0`. SPEC-0050 §7.2 and the matching
+ADR-0189 amendment define an installation-bound recovery designation
+discovered independently of `restore.json`, plus installed
 journal/evidence signer trust and signed revocation state with durable
 anti-rollback, freshness, rotation, and recovery rules. They also state that
 local files cannot defend against a privileged target-root attacker; that
 threat requires an independently trusted rollback-resistant anchor and startup
-verifier or remains out of scope. This is a new normative amendment to the
-accepted D8/trust contract, not a clarification already authorized by the
-technical decision at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`. It has no
-implementation authority until explicitly accepted by the named human reviewer
-against one exact revision containing SPEC-0050, ADR-0189, and this record.
+verifier or remains out of scope. The decision authorizes implementation and
+testing, not runtime correctness, installed recovery, production readiness,
+or independent security qualification.
 Authenticated `NEVER_RECOVERED` installations have no journal-trust dependency;
 recovery-designated or previously recovered installations do.
-Acceptance must explicitly include or amend the installation-policy and
-state-record canonical formats, signature envelopes, trust-document formats,
-purpose/scope bindings, and 90-day certificate, 24-hour
-revocation-refresh, and 30-day signer-overlap values. For the current packaged
+The accepted decision includes the installation-policy and state-record
+canonical formats, signature envelopes, trust-document formats, purpose/scope
+bindings, and 90-day certificate, 24-hour revocation-refresh, and 30-day
+signer-overlap values. For the current packaged
 `o3k-small-edge-v1` profile, privileged target-root attackers remain outside
 the recovery security claim without a qualified independent anchor. C1 does
 not authorize journal phases after `PREFLIGHTED`, accept A10, or authorize
 restore target mutation.
+
+**Proposed amendment C1.1 (PENDING, not accepted).** SPEC-0050 §7.3 and the
+matching ADR-0189 amendment propose an authenticated installation-policy/trust
+re-anchor and journal checkpoint so an accepted-C1 installation can rotate or
+recover its installed journal/evidence trust roots; see
+[SPEC-0050 §7.3](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#73-proposed-amendment-c11-authenticated-installation-policytrust-re-anchor-and-journal-checkpoint-pending-not-accepted).
+Conflict and option: accepted C1 verifies every historical journal/state
+signature under current trust with at most a 30-day signer overlap, so retired
+roots would otherwise stay in the live TCB with unbounded retention/expiry
+exceptions, and a sealing re-anchor would still be needed; the proposal
+selects the smaller, safer explicit re-anchor (Option A) over historical
+policy-chain verification (Option B). A signed `o3k-installation-reanchor-v1`
+record R extends the installation-state sequence — signed only by the
+release-manifest-authenticated installation-policy authority, not a
+disposition and not a phase — and a signed
+`o3k-restore-journal-checkpoint-v1` record C extends the journal sequence
+under the new trust and is published before R; C1.1 checkpoints journal v1
+only, and A10 journal-v2 checkpointing requires separate acceptance.
+`NEVER_RECOVERED` requires R only; `RECOVERY_DESIGNATED` and `RELEASED`
+require R+C; the installation-state lifecycle remains exactly those three
+values — C1.1 adds no `QUARANTINED` state — and rotation during quarantine
+preserves the applicable one of the three plus all journal quarantine phases
+and unsigned denial markers byte-for-byte, while an ambiguous migrated state
+without an authenticated old generation cannot rotate and first needs an
+authenticated disposition. Preserved disposition, operation, artifact, target,
+recovery-directory identity, and `RELEASED` terminal journal hash and evidence
+digest are unchanged, and no new `NEVER_RECOVERED`/`RELEASED` self-transition
+is introduced. Compromise rotation revokes the old root by a revocation
+signed by the new trust root authenticated by the new policy, blocking new
+old-root authorization without retroactively rewriting durable history, and
+requires `o3k-recovery-revalidation-v1` evidence under the new
+recovery-evidence authority carrying a unique 256-bit nonce with a proposed
+300-second validity (a pending human decision) that authorizes exactly one R/C
+pair through a durable consumption record written before acceptance and
+marked consumed only after full authenticated publication; byte-identical
+resume of that pair is allowed, any second or different use is rejected, and
+missing, stale, wrong-scope, or insufficient-custody evidence fails closed.
+Pre-C1.1 verifiers reject unknown R/C records and deny startup, so rotation
+happens only after every verifier supports C1.1, including R-only
+`NEVER_RECOVERED` rotation. R/C signing requests use the accepted offline
+ceremony with fresh 256-bit request nonces and exact-byte retry only. After
+R+C, older signatures are audit-only carried by the authenticated tips while
+current-era records verify individually; this bounded attestation replaces
+historical per-signature verification and is an explicit human security
+decision. Publication is crash-safe (staging under distinct staged names, then
+fixed policy, policy high-water {revision, digest}, fixed trust, trust
+high-water {bundle digest, per-root revocation sequence and digest}, current
+C, current R, final observation; same-directory temp+fsync+rename+fsync+
+readback every step), partial generations deny startup, and the installer
+resumes only the exact signed R/C forward. Filesystem controls are unchanged,
+unsigned denial markers are preserved byte-for-byte, and rotation alone never
+clears quarantine, consumes nonces, grants sessions, leases, provider
+dispatch, an API listener, or activation, or changes D3/D4/D7/D8/A10.
+Rotation is a root-authorized installer operation outside the accepted §8
+recovery CLI; C1.1 accepts no new CLI. Pending human decisions: the
+policy-authority-only R signer; the new-journal-authority C; the
+verification-posture change; the compromise revalidation authority/custody and
+300-second validity; and quiescence/rotation during quarantine. Acceptance
+requires future negative evidence: replayed or reused single-use revalidation,
+equal-sequence R/C equivocation, a crash at every publication step with
+exact-forward resume only, byte-for-byte marker preservation, old-verifier
+denial, stale trust, and no activation. This proposal has no implementation
+authority until the named human reviewer explicitly accepts one exact revision
+of SPEC-0050, ADR-0189, and this record; PR approval or merge is not that
+acceptance. It changes no accepted D1–D13, C1, or A10 parameter.
 
 ### D2 custody record
 
