@@ -38,10 +38,32 @@ pub struct RestorePreflightArgs {
 /// This check is called while the daemon holds the lifetime store-access lock
 /// and before it binds the public API listener.
 pub fn deny_startup_if_restore_state(data_dir: &Path) -> std::result::Result<(), &'static str> {
-    let prefix = crate::backup_trust::install_prefix_for(
-        data_dir,
-        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
-    );
+    deny_startup_if_restore_state_for_backend_inner(data_dir, None)
+}
+
+pub fn deny_startup_if_restore_state_for_backend(
+    data_dir: &Path,
+    backend: &str,
+) -> std::result::Result<(), &'static str> {
+    deny_startup_if_restore_state_for_backend_inner(data_dir, Some(backend))
+}
+
+fn deny_startup_if_restore_state_for_backend_inner(
+    data_dir: &Path,
+    backend: Option<&str>,
+) -> std::result::Result<(), &'static str> {
+    crate::recovery_installation::deny_operational_access_for_backend(data_dir, backend)?;
+    // Installed recovery identity is fixed by the release manifest and
+    // checked above. Never let the mutable backup/install-prefix setting
+    // redirect the legacy D8 denial-only guard used by operational callers.
+    let prefix = if rustix::process::geteuid().as_raw() == 0 {
+        PathBuf::from("/usr/local")
+    } else {
+        crate::backup_trust::install_prefix_for(
+            data_dir,
+            std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+        )
+    };
     let config_path = prefix.join("etc/o3k/restore.json");
     match fs::symlink_metadata(&config_path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -198,10 +220,11 @@ fn execute(args: &RestorePreflightArgs) -> Result<Value> {
         .as_ref()
         .ok_or_else(|| Failure::rejected("recovery-config-invalid"))?;
     let (uid, gid) = o3k_identity()?;
+    let compute_gid = o3k_compute_group_gid();
     if rustix::process::geteuid().as_raw() != 0 && rustix::process::geteuid().as_raw() != uid {
         return Err(Failure::rejected("recovery-operator-unauthorized"));
     }
-    verify_directory(&target, uid, gid)?;
+    verify_target_directory(&target, uid, gid, compute_gid, true)?;
     verify_root_ancestors(&args.target)?;
     if config.recovery_directory == args.target
         || config.recovery_directory.starts_with(&args.target)
@@ -460,14 +483,61 @@ fn ensure_empty(fd: &OwnedFd) -> Result<()> {
 fn verify_directory(fd: &OwnedFd, uid: u32, gid: u32) -> Result<()> {
     verify_directory_posture(fd, uid, gid, true)
 }
+
+/// The restore target uses the exact closed data-root posture set: routine
+/// `o3k:o3k` `0700`, or the packaged `o3k:o3k-compute` `0711` layout that
+/// lets the QEMU process traverse the data root.  The recovery/journal
+/// directories keep their strict `0700` requirement.
+fn verify_target_directory(
+    fd: &OwnedFd,
+    uid: u32,
+    gid: u32,
+    compute_gid: Option<u32>,
+    require_ext4: bool,
+) -> Result<()> {
+    let stat = fstat(fd).map_err(|_| Failure::rejected("directory-unverifiable"))?;
+    if !accepted_target_posture(
+        stat.st_uid,
+        stat.st_gid,
+        stat.st_mode & 0o7777,
+        uid,
+        gid,
+        compute_gid,
+    ) {
+        return Err(Failure::rejected("directory-owner-or-mode-rejected"));
+    }
+    verify_directory_filesystem(fd, require_ext4)
+}
+
+fn accepted_target_posture(
+    stat_uid: u32,
+    stat_gid: u32,
+    stat_mode: u32,
+    o3k_uid: u32,
+    o3k_gid: u32,
+    compute_gid: Option<u32>,
+) -> bool {
+    let routine = stat_uid == o3k_uid && stat_gid == o3k_gid && stat_mode == 0o700;
+    let packaged = compute_gid.is_some_and(|compute_gid| {
+        stat_uid == o3k_uid && stat_gid == compute_gid && stat_mode == 0o711
+    });
+    // Group/other-writable postures are never accepted.
+    routine || packaged
+}
+
 fn verify_directory_posture(fd: &OwnedFd, uid: u32, gid: u32, require_ext4: bool) -> Result<()> {
     let stat = fstat(fd).map_err(|_| Failure::rejected("directory-unverifiable"))?;
     if stat.st_uid != uid || stat.st_gid != gid || stat.st_mode & 0o7777 != 0o700 {
         return Err(Failure::rejected("directory-owner-or-mode-rejected"));
     }
+    verify_directory_filesystem(fd, require_ext4)
+}
+
+fn verify_directory_filesystem(fd: &OwnedFd, require_ext4: bool) -> Result<()> {
     if !require_ext4 {
         return Ok(());
     }
+    let stat = fstat(fd).map_err(|_| Failure::rejected("directory-unverifiable"))?;
     let filesystem =
         fstatfs(fd).map_err(|_| Failure::rejected("directory-filesystem-unverifiable"))?;
     if filesystem.f_type != 0xef53 {
@@ -595,6 +665,20 @@ fn o3k_identity() -> Result<(u32, u32)> {
     }
     Err(Failure::rejected("recovery-account-unavailable"))
 }
+
+/// The packaged QEMU-traversal group, when it exists.  Without it the
+/// packaged `0711` target posture cannot occur and only the routine `0700`
+/// posture is accepted.
+fn o3k_compute_group_gid() -> Option<u32> {
+    let groups = fs::read_to_string("/etc/group").ok()?;
+    for line in groups.lines() {
+        let parts: Vec<_> = line.split(':').collect();
+        if parts.first() == Some(&"o3k-compute") && parts.len() >= 3 {
+            return parts[2].parse().ok();
+        }
+    }
+    None
+}
 struct HashReader<R> {
     inner: R,
     hasher: Sha256,
@@ -608,6 +692,7 @@ impl<R: Read> Read for HashReader<R> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod startup_quarantine_tests {
     use super::{RecoveryConfig, deny_recovery_state};
     use std::{
@@ -707,6 +792,115 @@ mod startup_quarantine_tests {
             deny_recovery_state(&config, &target, metadata.uid(), metadata.gid(), false),
             Err("restore configuration does not identify this data directory")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn target_posture_accepts_only_the_closed_data_root_set() {
+        // (stat uid, stat gid, stat mode) against o3k=(100,100), compute=120.
+        let accepted = |u, g, m| super::accepted_target_posture(u, g, m, 100, 100, Some(120));
+        assert!(accepted(100, 100, 0o700), "routine o3k:o3k 0700");
+        assert!(accepted(100, 120, 0o711), "packaged o3k:o3k-compute 0711");
+        assert!(!accepted(100, 100, 0o711), "0711 with the wrong group");
+        assert!(!accepted(100, 120, 0o700), "0700 with the compute group");
+        assert!(
+            !accepted(100, 120, 0o731),
+            "group-writable is never accepted"
+        );
+        assert!(
+            !accepted(100, 120, 0o777),
+            "world-writable is never accepted"
+        );
+        assert!(
+            !accepted(100, 100, 0o755),
+            "world-readable is not the closed set"
+        );
+        assert!(!accepted(0, 100, 0o700), "wrong owner");
+        // Without a resolvable compute group the packaged posture cannot occur.
+        let without_compute = |u, g, m| super::accepted_target_posture(u, g, m, 100, 100, None);
+        assert!(without_compute(100, 100, 0o700));
+        assert!(!without_compute(100, 120, 0o711));
+    }
+
+    #[test]
+    fn target_directory_verification_enforces_the_closed_set() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let target = dirs.0.join("target");
+        fs::create_dir(&target)?;
+        let metadata = fs::metadata(&target)?;
+        let uid = metadata.uid() as u32;
+        let gid = metadata.gid() as u32;
+        // Cases that do not need chown: the directory keeps the caller's own
+        // group, so only the routine posture and the rejections are
+        // exercisable as an unprivileged user.
+        for (mode, compute, expect_ok) in [
+            (0o700, Some(gid + 1), true),
+            (0o711, Some(gid + 1), false), // packaged mode, wrong group
+            (0o731, Some(gid + 1), false),
+            (0o755, None, false),
+            (0o700, None, true),
+            (0o711, None, false),
+        ] {
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+            let fd = super::open_directory(&target).expect("open target");
+            let result = super::verify_target_directory(&fd, uid, gid, compute, false);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "mode {mode:o} compute {compute:?} expected_ok={expect_ok}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires root for chown"]
+    fn target_directory_packaged_posture_needs_root_group_change() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let target = dirs.0.join("target");
+        fs::create_dir(&target)?;
+        let metadata = fs::metadata(&target)?;
+        let uid = metadata.uid() as u32;
+        let gid = metadata.gid() as u32;
+        let compute_gid = gid + 1;
+        std::os::unix::fs::chown(&target, Some(uid), Some(compute_gid))
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o711))?;
+        let fd = super::open_directory(&target).expect("open target");
+        super::verify_target_directory(&fd, uid, gid, Some(compute_gid), false)
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        // The same directory is rejected when the compute group is unknown.
+        let error = format!(
+            "{:?}",
+            super::verify_target_directory(&fd, uid, gid, None, false)
+        );
+        assert!(error.contains("owner-or-mode"), "unexpected error: {error}");
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_directory_keeps_the_strict_owner_only_posture() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let recovery = dirs.0.join("recovery");
+        fs::create_dir(&recovery)?;
+        let metadata = fs::metadata(&recovery)?;
+        let uid = metadata.uid() as u32;
+        let gid = metadata.gid() as u32;
+        let open = || super::open_directory(&recovery).expect("open recovery");
+        // The packaged 0711 traversal posture is NOT accepted for the
+        // recovery directory: it stays owner-only 0700.
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o711))?;
+        let error = format!(
+            "{:?}",
+            super::verify_directory_posture(&open(), uid, gid, false)
+        );
+        assert!(error.contains("owner-or-mode"), "unexpected error: {error}");
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700))?;
+        super::verify_directory_posture(&open(), uid, gid, false)
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        // Group-writable 0700-family modes are also rejected.
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o720))?;
+        assert!(super::verify_directory_posture(&open(), uid, gid, false).is_err());
         Ok(())
     }
 

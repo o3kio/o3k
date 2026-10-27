@@ -560,6 +560,12 @@ fn execute_with_data_dir(
         // capture path below rejects `controller-active` instead of racing it.
         match StoreAccessLock::acquire(&data_dir) {
             Ok(recovery_lock) => {
+                if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+                    return BackupCreateOutcome::rejected(
+                        operation_id,
+                        "restore-recovery-state-present",
+                    );
+                }
                 if let Err(error) =
                     runtime.block_on(backup_pg::ensure_admission_restored(&pg_config))
                 {
@@ -627,6 +633,12 @@ fn execute_with_data_dir(
                         );
                     }
                 };
+                if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+                    return BackupCreateOutcome::rejected(
+                        operation_id,
+                        "restore-recovery-state-present",
+                    );
+                }
                 // Re-read under the lock. The fresh record decides the phase;
                 // a record that is now `published` follows the L5 idempotent
                 // replay instead of failing as unavailable staging.
@@ -1591,6 +1603,9 @@ fn execute_inner_postgres(
             return BackupCreateOutcome::recoverable(operation_id, "store-lock-unavailable");
         }
     };
+    if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+        return BackupCreateOutcome::rejected(operation_id, "restore-recovery-state-present");
+    }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

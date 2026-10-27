@@ -67,4 +67,7 @@ sqlx = { workspace = true }
 # o3k-store handoff primitive, including the sender-side after-send crash hook
 # the concurrency campaign relies on). Never enabled in release or production
 # builds.
-backup-test-hooks = ["o3k-store/backup-test-hooks"]
+# `o3k/backup-test-hooks` enables the o3k crate's debug-only legacy-fixture
+# seam used by the PP.6 process tests; it is compile_error-forbidden in
+# optimized (non-debug) builds by the o3k crate itself.
+backup-test-hooks = ["o3k-store/backup-test-hooks", "o3k/backup-test-hooks"]

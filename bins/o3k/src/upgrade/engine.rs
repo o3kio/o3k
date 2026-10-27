@@ -56,6 +56,18 @@ pub struct LockGuard {
     path: PathBuf,
 }
 
+pub struct StorePhaseGuard {
+    _lock: Option<o3k_store::StoreAccessLock>,
+}
+impl StorePhaseGuard {
+    pub(crate) fn empty() -> Self {
+        Self { _lock: None }
+    }
+    pub(crate) fn from_lock(lock: o3k_store::StoreAccessLock) -> Self {
+        Self { _lock: Some(lock) }
+    }
+}
+
 impl LockGuard {
     /// Wraps a lock-file path (used by the real runner and the test fake).
     #[must_use]
@@ -80,6 +92,9 @@ pub trait UpgradeIo: Send + Sync {
     async fn acquire_lock(&self) -> Result<LockGuard, String>;
     /// Releases the lock held by `guard` (the guard also releases on drop).
     async fn release_lock(&self, guard: LockGuard) -> Result<(), String>;
+    async fn acquire_store_phase_lock(&self) -> Result<StorePhaseGuard, String> {
+        Ok(StorePhaseGuard::empty())
+    }
     /// Reads the installed release manifest.
     async fn read_installed_manifest(&self) -> Result<InstalledRelease, String>;
     /// Resolves the target release: the requested version, or the newest
@@ -525,6 +540,7 @@ async fn run_upgrade_locked(
     let source_version = state.source_version.clone();
     let mut backup_id = state.backup_id.clone();
     let mut bundle: Option<VerifiedBundle> = None;
+    let mut store_phase_guard: Option<StorePhaseGuard> = None;
     let mut doctor_status: Option<String> = None;
 
     // Phase loop: each phase persists its state BEFORE its side effects and
@@ -572,13 +588,21 @@ async fn run_upgrade_locked(
                 },
                 UpgradePhase::ServicesStopped => io.stop_services().await,
                 UpgradePhase::BinariesInstalled => match &bundle {
-                    Some(verified) => io.switch_binaries(verified).await,
+                    Some(verified) => match io.acquire_store_phase_lock().await {
+                        Ok(guard) => {
+                            store_phase_guard = Some(guard);
+                            io.switch_binaries(verified).await
+                        }
+                        Err(error) => Err(error),
+                    },
                     None => Err("the verified bundle is unavailable".to_owned()),
                 },
-                UpgradePhase::MigrationsApplied => io
-                    .apply_migrations_and_start_control(backup_id.as_deref().unwrap_or(""))
-                    .await
-                    .map(|_schema| ()),
+                UpgradePhase::MigrationsApplied => {
+                    drop(store_phase_guard.take());
+                    io.apply_migrations_and_start_control(backup_id.as_deref().unwrap_or(""))
+                        .await
+                        .map(|_schema| ())
+                }
                 UpgradePhase::ServicesStarted => io.start_compute().await,
                 UpgradePhase::HealthVerified => io.verify_public_api().await,
                 UpgradePhase::DoctorPassed => {
@@ -1124,6 +1148,10 @@ mod tests {
         api: Result<(), String>,
         commit: Result<(), String>,
         rollback: Result<(), String>,
+        /// Mirrors the real entry deny: when set, `rollback_to_backup` denies
+        /// at its mutation entry (before stopping services or touching the
+        /// database), exactly like `SystemUpgradeIo`.
+        rollback_entry_deny: Option<String>,
         commit_chain: Option<PathBuf>,
     }
 
@@ -1157,6 +1185,7 @@ mod tests {
                 api: Ok(()),
                 commit: Ok(()),
                 rollback: Ok(()),
+                rollback_entry_deny: None,
                 commit_chain: None,
             }
         }
@@ -1291,6 +1320,9 @@ mod tests {
 
         async fn rollback_to_backup(&self, backup_id: &str) -> Result<(), String> {
             self.record_owned(format!("rollback:{backup_id}"));
+            if let Some(reason) = &self.rollback_entry_deny {
+                return Err(reason.clone());
+            }
             self.rollback.clone()
         }
     }
@@ -1582,6 +1614,33 @@ mod tests {
             return;
         };
         assert!(state.is_none(), "a successful rollback clears the state");
+        cleanup(&paths);
+    }
+
+    /// A restore-quarantine deny at the rollback mutation entry fails the
+    /// upgrade without performing a rollback and preserves the failed state
+    /// for an operator disposition (the automatic rollback path has no fresh
+    /// acquire_lock, so the entry itself must deny).
+    #[tokio::test]
+    async fn rollback_entry_deny_fails_without_rollback() {
+        let paths = sandbox();
+        let mut io = FakeUpgradeIo::happy();
+        io.switch = Err("rename failed".to_owned());
+        io.rollback_entry_deny =
+            Some("upgrade or rollback denied by restore quarantine: designated".to_owned());
+        let outcome = run_upgrade_with_paths(&io, &upgrade_args(), &paths).await;
+        assert_eq!(outcome.status, UpgradeStatus::Failed);
+        assert!(
+            !outcome.rollback_performed,
+            "a denied rollback must not be reported as performed"
+        );
+        assert_eq!(io.calls("rollback:backup-1"), 1, "the entry was attempted");
+        assert!(outcome.error.is_some(), "deny surfaces an error");
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("restore quarantine"),
+            "unexpected error: {error}"
+        );
         cleanup(&paths);
     }
 

@@ -42,6 +42,16 @@ const MAX_RELEASE_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// Product profiles accepted by the backup artifact contract.
 pub const SUPPORTED_PROFILE_IDS: [&str; 2] = ["o3k-demo-v1", "o3k-small-edge-v1"];
+pub const FIXED_RELEASE_MANIFEST_PATH: &str = "/usr/local/share/o3k/release-manifest.json";
+pub const C1_INSTALLATION_POLICY_PATH: &str = "/etc/o3k/installation-policy.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct C1ReleaseAuthority {
+    pub key_id: String,
+    pub ed25519_public_key: String,
+    pub policy_format: String,
+    pub policy_path: String,
+}
 
 /// Exact release identity a backup artifact must match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +128,51 @@ impl BackupReleaseIdentity {
             schema_version,
         })
     }
+
+    pub fn c1_authority_from_manifest(bytes: &[u8]) -> Result<C1ReleaseAuthority, String> {
+        let value: Value = serde_json::from_slice(bytes)
+            .map_err(|_| "installed release manifest is not valid JSON".to_owned())?;
+        let manifest = value
+            .as_object()
+            .ok_or_else(|| "installed release manifest is not a JSON object".to_owned())?;
+        let authority = manifest
+            .get("installation_policy_authority")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "C1 release authority is missing".to_owned())?;
+        let key_id = authority
+            .get("key_id")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "C1 policy key_id is missing".to_owned())?;
+        let public_key = authority
+            .get("ed25519_public_key")
+            .and_then(Value::as_str)
+            .filter(|v| {
+                v.len() == 64
+                    && v.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+            .ok_or_else(|| "C1 policy public key is missing or invalid".to_owned())?;
+        let policy_format = manifest
+            .get("installation_policy_format")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "C1 policy format is missing".to_owned())?;
+        let policy_path = manifest
+            .get("installation_policy_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "C1 policy path is missing".to_owned())?;
+        if policy_format != "o3k-installation-policy-v1"
+            || policy_path != C1_INSTALLATION_POLICY_PATH
+        {
+            return Err("C1 installation policy format or path is not supported".to_owned());
+        }
+        Ok(C1ReleaseAuthority {
+            key_id: key_id.to_owned(),
+            ed25519_public_key: public_key.to_owned(),
+            policy_format: policy_format.to_owned(),
+            policy_path: policy_path.to_owned(),
+        })
+    }
 }
 
 /// Reads the exact release identity from the installed release manifest.
@@ -151,6 +206,32 @@ pub fn read_installed_release_manifest(prefix: &Path) -> Result<Vec<u8>, String>
     let manifest = prefix.join("share/o3k/release-manifest.json");
     read_trusted_manifest(&manifest)
         .map_err(|error| format!("cannot read {}: {error}", manifest.display()))
+}
+
+pub fn read_fixed_installed_release_manifest() -> Result<Vec<u8>, String> {
+    let path = Path::new(FIXED_RELEASE_MANIFEST_PATH);
+    let mut current = Path::new("/").to_path_buf();
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            current.push(name);
+            let metadata = std::fs::symlink_metadata(&current)
+                .map_err(|e| format!("cannot read {FIXED_RELEASE_MANIFEST_PATH}: {e}"))?;
+            if metadata.is_symlink()
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err(format!(
+                    "cannot read {FIXED_RELEASE_MANIFEST_PATH}: untrusted root path"
+                ));
+            }
+        }
+    }
+    read_trusted_manifest(path)
+        .map_err(|error| format!("cannot read {FIXED_RELEASE_MANIFEST_PATH}: {error}"))
+}
+
+pub fn fixed_c1_release_authority() -> Result<C1ReleaseAuthority, String> {
+    BackupReleaseIdentity::c1_authority_from_manifest(&read_fixed_installed_release_manifest()?)
 }
 
 /// Bounded, no-follow read of the installed release manifest.

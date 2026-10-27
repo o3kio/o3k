@@ -553,6 +553,15 @@ pub struct AuthenticatedJournal {
     chain_sha256: String,
 }
 
+impl AuthenticatedJournal {
+    /// The authenticated terminal-reached phase of the chain.  Callers must
+    /// not treat this label as authority; signature, freshness and branch
+    /// checks already ran, and an unaccepted phase never grants progress.
+    pub fn phase(&self) -> RestorePhase {
+        self.phase
+    }
+}
+
 /// Canonical RFC 8785 bytes of a signing request.
 pub fn canonical_request(request: &SigningRequest) -> Result<Vec<u8>, JournalError> {
     validate_request(request)?;
@@ -695,6 +704,40 @@ pub fn authenticate_chain(
         signed_hash: previous_hash,
         chain_sha256: hex::encode(Sha256::digest(bytes)),
     })
+}
+
+/// Authenticates journal v1 using the installed purpose-bound certificate and
+/// fresh signed revocation state. Caller-supplied public keys cannot enter this
+/// boundary. v1 remains PREFLIGHTED-only.
+pub fn authenticate_installed_chain(
+    bytes: &[u8],
+    policy: &crate::recovery_identity::InstallationPolicy,
+    trust: &crate::recovery_trust::VerifiedTrust,
+    operation_id: Uuid,
+    artifact_sha256: &str,
+) -> Result<AuthenticatedJournal, JournalError> {
+    let envelope: JournalEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| JournalError::InvalidFormat)?;
+    let first = envelope
+        .transitions
+        .first()
+        .ok_or(JournalError::InvalidFormat)?;
+    let key_id = &first.request.journal_authority_id;
+    let key = trust.journal_key(key_id).ok_or(JournalError::KeyRevoked)?;
+    let authenticated = authenticate_chain(bytes, key_id, key)?;
+    if envelope.transitions.iter().any(|transition| {
+        let request = &transition.request;
+        request.site_id != policy.site_id
+            || request.target_installation_id != policy.installation_id
+            || request.target_device != policy.target_device
+            || request.target_inode != policy.target_inode
+            || request.operation_id != operation_id
+            || request.artifact_sha256 != artifact_sha256
+            || request.intended_transition != RestorePhase::Preflighted
+    }) {
+        return Err(JournalError::InvalidSequence);
+    }
+    Ok(authenticated)
 }
 
 /// Refuses a journal signer whose key ID appears in the release-provided

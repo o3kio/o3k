@@ -187,10 +187,23 @@ esac
 # O3K_RELEASE_ARTIFACT_SHA256 (checked against the .sha256 when both exist) or
 # O3K_RELEASE_ARTIFACT_TARBALL (the digest is computed from that tarball).
 RELEASE_ARTIFACT_SHA256="${O3K_RELEASE_ARTIFACT_SHA256:-}"
+C1_INSTALLATION_POLICY_ENABLED="${O3K_C1_INSTALLATION_POLICY_ENABLED:-0}"
+C1_POLICY_KEY_ID="${O3K_C1_INSTALLATION_POLICY_KEY_ID:-}"
+C1_POLICY_PUBLIC_KEY="${O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY:-}"
+C1_POLICY_PATH="/etc/o3k/installation-policy.json"
+C1_POLICY_FORMAT="o3k-installation-policy-v1"
+if [[ "$C1_INSTALLATION_POLICY_ENABLED" == 1 ]]; then
+  [[ "$C1_POLICY_KEY_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "invalid C1 policy key id" >&2; exit 2; }
+  [[ "$C1_POLICY_PUBLIC_KEY" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid C1 policy public key" >&2; exit 2; }
+fi
 if [[ -z "$RELEASE_ARTIFACT_SHA256" && -n "${O3K_RELEASE_ARTIFACT_TARBALL:-}" ]]; then
   [[ -f "$O3K_RELEASE_ARTIFACT_TARBALL" ]] \
     || { echo "release artifact tarball is missing: $O3K_RELEASE_ARTIFACT_TARBALL" >&2; exit 2; }
   RELEASE_ARTIFACT_SHA256="$(sha256sum "$O3K_RELEASE_ARTIFACT_TARBALL" | awk '{print $1}')"
+fi
+C1_MANIFEST_FIELDS=
+if [[ "$C1_INSTALLATION_POLICY_ENABLED" == 1 ]]; then
+  C1_MANIFEST_FIELDS=",\"installation_policy_format\":\"$C1_POLICY_FORMAT\",\"installation_policy_path\":\"$C1_POLICY_PATH\",\"installation_policy_authority\":{\"key_id\":\"$C1_POLICY_KEY_ID\",\"ed25519_public_key\":\"$C1_POLICY_PUBLIC_KEY\"}"
 fi
 if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
   [[ "$RELEASE_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
@@ -205,13 +218,13 @@ fi
 # covers the installer record too. schema_version is the max migration prefix
 # computed above; upgrade_from.min_version is the operator-declared fence.
 if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
-  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","release_artifact_sha256":"%s","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
+  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","release_artifact_sha256":"%s","schema_version":"%s","upgrade_from":{"min_version":"%s"}%s}\n' \
     "$VERSION" "$PROFILE" "$PROFILE_ID" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
-    "$RELEASE_ARTIFACT_SHA256" "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
+    "$RELEASE_ARTIFACT_SHA256" "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" "$C1_MANIFEST_FIELDS" >"$OUT_DIR/manifest.json"
 else
-  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
+  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}%s}\n' \
     "$VERSION" "$PROFILE" "$PROFILE_ID" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
-    "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
+    "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" "$C1_MANIFEST_FIELDS" >"$OUT_DIR/manifest.json"
 fi
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$OUT_DIR"

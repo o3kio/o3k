@@ -1266,6 +1266,16 @@ impl UpgradeIo for SystemUpgradeIo {
         ))
     }
 
+    async fn acquire_store_phase_lock(
+        &self,
+    ) -> Result<crate::upgrade::engine::StorePhaseGuard, String> {
+        crate::restore_preflight::deny_startup_if_restore_state(&self.data_dir)
+            .map_err(|reason| format!("upgrade denied by recovery quarantine: {reason}"))?;
+        o3k_store::StoreAccessLock::acquire(&self.data_dir)
+            .map(crate::upgrade::engine::StorePhaseGuard::from_lock)
+            .map_err(|error| format!("upgrade cannot acquire store lock: {error}"))
+    }
+
     async fn release_lock(&self, _guard: LockGuard) -> Result<(), String> {
         // Dropping the guard removes the lock file.
         Ok(())
@@ -1820,6 +1830,17 @@ impl UpgradeIo for SystemUpgradeIo {
     }
 
     async fn rollback_to_backup(&self, backup_id: &str) -> Result<(), String> {
+        // The real rollback mutation entry.  Refuse restore-designated or
+        // quarantined installations before stopping services, replacing
+        // binaries, or restoring the database snapshot.  The automatic
+        // post-failure rollback inside `run_upgrade` reaches this entry
+        // without a fresh `acquire_lock`, so the deny must live here and not
+        // only in the lock path.  The check is read-only and runs before the
+        // store-access lock taken for the snapshot restore: no lock-order
+        // change and no second authority.
+        crate::restore_preflight::deny_startup_if_restore_state(&self.data_dir).map_err(
+            |reason| format!("upgrade or rollback denied by restore quarantine: {reason}"),
+        )?;
         let dir = self.backup_dir.join(backup_id);
         let bytes = std::fs::read(dir.join("backup.json"))
             .map_err(|error| format!("cannot read the backup manifest: {error}"))?;
@@ -1868,6 +1889,8 @@ impl UpgradeIo for SystemUpgradeIo {
         }
         if manifest.db_restore_required_on_rollback {
             let snapshot = dir.join("o3k.sqlite.backup");
+            let _store_lock = o3k_store::StoreAccessLock::acquire(&self.data_dir)
+                .map_err(|error| format!("rollback cannot acquire store lock: {error}"))?;
             let database = self.database_path();
             let _ = std::fs::remove_file(database.with_extension("sqlite-wal"));
             let _ = std::fs::remove_file(database.with_extension("sqlite-shm"));
