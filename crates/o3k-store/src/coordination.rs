@@ -8,6 +8,17 @@ use crate::{PostgresStore, SqliteStore, StoreError, is_sqlite_busy};
 
 pub type FencingToken = u64;
 
+fn sqlite_lease_ttl_modifier(ttl: Duration) -> String {
+    let ttl_millis = ttl.as_millis();
+    let fractional_millisecond = !ttl.subsec_nanos().is_multiple_of(1_000_000);
+    let rounded_millis = ttl_millis + u128::from(fractional_millisecond);
+    format!(
+        "+{}.{:03} seconds",
+        rounded_millis / 1_000,
+        rounded_millis % 1_000
+    )
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -736,8 +747,7 @@ impl CoordinationRepository for SqliteStore {
         controller_epoch: &ControllerEpoch,
         ttl: Duration,
     ) -> Result<LeaseAcquireOutcome, StoreError> {
-        let ttl_secs = ttl.as_secs_f64();
-        let ttl_mod = format!("+{ttl_secs} seconds");
+        let ttl_mod = sqlite_lease_ttl_modifier(ttl);
 
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
@@ -937,8 +947,7 @@ impl CoordinationRepository for SqliteStore {
         fencing_token: FencingToken,
         ttl: Duration,
     ) -> Result<bool, StoreError> {
-        let ttl_secs = ttl.as_secs_f64();
-        let ttl_mod = format!("+{ttl_secs} seconds");
+        let ttl_mod = sqlite_lease_ttl_modifier(ttl);
 
         let result = sqlx::query(
             r#"
@@ -1079,8 +1088,27 @@ impl CoordinationRepository for SqliteStore {
 
 #[cfg(test)]
 mod sqlite_work_lease_precision_tests {
-    use super::{ControllerEpoch, ControllerId, CoordinationRepository, LeaseAcquireOutcome};
+    use super::{
+        ControllerEpoch, ControllerId, CoordinationRepository, LeaseAcquireOutcome,
+        sqlite_lease_ttl_modifier,
+    };
     use std::time::Duration;
+
+    #[test]
+    fn sqlite_lease_ttl_rounds_up_to_supported_timestamp_precision() {
+        assert_eq!(
+            sqlite_lease_ttl_modifier(Duration::from_micros(500)),
+            "+0.001 seconds"
+        );
+        assert_eq!(
+            sqlite_lease_ttl_modifier(Duration::from_millis(1_999)),
+            "+1.999 seconds"
+        );
+        assert_eq!(
+            sqlite_lease_ttl_modifier(Duration::from_secs(2)),
+            "+2.000 seconds"
+        );
+    }
 
     #[tokio::test]
     async fn sqlite_work_lease_renewal_preserves_fractional_seconds()
