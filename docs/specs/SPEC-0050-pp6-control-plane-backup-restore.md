@@ -1615,6 +1615,22 @@ The migration implementation must use the durable same-directory
 fsync/rename/readback discipline and D8 recovery guard; this amendment does
 not itself implement that publisher.
 
+The root migrator first verifies the complete v1 state, both policies and
+release manifests, the migration event inputs, and the new v2-capable verifier.
+Before publishing any v2 selector or policy bytes, it acquires the existing
+exclusive D8 recovery/maintenance guard, stops listeners, controllers,
+workers, timers, and maintenance processes, and blocks startup, upgrade, and
+rollback execution. It stages and verifies the new release manifest and
+v2-capable verifier while this exclusion remains held. Only then may the
+migrator publish the exact-forward v1-to-v2 state/policy generation. It may
+release the guard only after authenticated readback proves the selected v2
+policy and every installed startup, upgrade, and rollback path uses a
+v2-capable verifier. A crash or partial publication leaves D8 exclusion in
+force; no old process or verifier may resume against a v2-selected state.
+Recovery under the guard can only complete the already authenticated exact
+forward migration or remain denied. This ordering does not add a second guard
+authority or allow an automatic upgrade to select v2.
+
 Old verifiers continue to support v1 exactly. On a v2 policy or migration
 event they reject the unknown format/event and deny startup before store
 access. Upgrade must not replace an old verifier or release manifest until it

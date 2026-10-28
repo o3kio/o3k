@@ -772,7 +772,11 @@ def proposed_policy_migration_permitted(*, old_format: str, new_format: str,
                                        journal_v2_exists: bool,
                                        signer_key_unchanged: bool,
                                        identity_preserved: bool,
-                                       migration_event_valid: bool) -> bool:
+                                       migration_event_valid: bool,
+                                       d8_guard_held: bool,
+                                       consumers_stopped: bool,
+                                       startup_blocked: bool,
+                                       v2_verifier_staged: bool) -> bool:
     """Proposed format-migration contract predicate only."""
     if (old_format != "o3k-installation-policy-v1"
             or new_format != "o3k-installation-policy-v2"
@@ -780,7 +784,9 @@ def proposed_policy_migration_permitted(*, old_format: str, new_format: str,
             or new_prior_digest != old_digest
             or signer_manifest_digest != new_release_manifest_digest
             or journal_v2_exists or not signer_key_unchanged
-            or not identity_preserved or not migration_event_valid):
+            or not identity_preserved or not migration_event_valid
+            or not d8_guard_held or not consumers_stopped
+            or not startup_blocked or not v2_verifier_staged):
         return False
     if state == "NEVER_RECOVERED":
         return not checkpoint_present
@@ -922,7 +928,9 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
                     new_release_manifest_digest="b" * 64,
                     state="NEVER_RECOVERED", checkpoint_present=False,
                     journal_v2_exists=False, signer_key_unchanged=True,
-                    identity_preserved=True, migration_event_valid=True)
+                    identity_preserved=True, migration_event_valid=True,
+                    d8_guard_held=True, consumers_stopped=True,
+                    startup_blocked=True, v2_verifier_staged=True)
         self.assertTrue(proposed_policy_migration_permitted(**base))
         self.assertEqual(proposed_policy_format_epoch(base["old_format"]), 1)
         self.assertEqual(proposed_policy_format_epoch(base["new_format"]), 2)
@@ -934,6 +942,8 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
             {"old_format": "o3k-installation-policy-v2"},
             {"journal_v2_exists": True}, {"signer_key_unchanged": False},
             {"identity_preserved": False}, {"migration_event_valid": False},
+            {"d8_guard_held": False}, {"consumers_stopped": False},
+            {"startup_blocked": False}, {"v2_verifier_staged": False},
             {"state": "RECOVERY_DESIGNATED"},
         ):
             with self.subTest(overrides=overrides):
@@ -949,7 +959,9 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
                     new_release_manifest_digest="b" * 64,
                     state="RECOVERY_DESIGNATED", checkpoint_present=True,
                     journal_v2_exists=False, signer_key_unchanged=True,
-                    identity_preserved=True, migration_event_valid=True)
+                    identity_preserved=True, migration_event_valid=True,
+                    d8_guard_held=True, consumers_stopped=True,
+                    startup_blocked=True, v2_verifier_staged=True)
         self.assertTrue(proposed_policy_migration_permitted(**base))
         self.assertFalse(proposed_policy_migration_permitted(
             **{**base, "checkpoint_present": False}))

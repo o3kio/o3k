@@ -581,7 +581,9 @@ prior/new policy and release bindings, preserves recovery state, continues
 policy anti-rollback across formats, makes old verifiers fail closed, and
 prohibits downgrade rollback. Existing v1 installations remain supported
 without A10. Active journal-v2 chains cannot rotate policy or be checkpointed
-under C1.1.
+under C1.1. Migration holds the existing D8 guard, quiesces consumers, stages
+the v2-capable verifier before the state-chain format switch, and retains
+startup exclusion through authenticated readback.
 
 The proposal creates no runtime authority and authorizes no database or
 restore-target mutation. It has not been accepted by the prior A10, C1, or

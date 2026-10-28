@@ -235,6 +235,8 @@ the owner records **ACCEPT**, **AMEND**, or **REJECT** against the exact
 reviewed PR head. The proposal makes the authenticated installation-state
 chain the only active-format selector (initial state selects v1; one valid
 migration event selects v2) and fixes format epochs at v1=`1`, v2=`2`.
+Migration also requires the existing D8 guard, quiesced consumers, blocked
+startup, and a staged v2-capable verifier before the selector changes.
 ADR-0190's non-independent single-maintainer review
 disclosure remains in force. Neither PR approval nor merge alone constitutes
 that technical decision. No implementation may rely on v2 before that
