@@ -7,6 +7,12 @@ LOG_DIR=/var/log/o3k
 BINARY=
 COMPUTE_BINARY=
 O3K_BINARY=
+C1_POLICY_INPUT=
+C1_STATE_INPUT=
+C1_TRUST_INPUT=
+C1_PREPARE_ONLY=0
+C1_MIGRATE=0
+C1_BACKEND=sqlite
 NETWORK_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
@@ -38,6 +44,12 @@ while (($#)); do
     --binary) BINARY="$2"; shift 2;;
     --compute-binary) COMPUTE_BINARY="$2"; shift 2;;
     --o3k-binary) O3K_BINARY="$2"; shift 2;;
+    --c1-policy) C1_POLICY_INPUT="$2"; shift 2;;
+    --c1-state) C1_STATE_INPUT="$2"; shift 2;;
+    --c1-trust) C1_TRUST_INPUT="$2"; shift 2;;
+    --c1-prepare-only) C1_PREPARE_ONLY=1; shift;;
+    --c1-migrate) C1_MIGRATE=1; shift;;
+    --c1-backend) C1_BACKEND="$2"; shift 2;;
     --network-binary) NETWORK_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --release-artifact-sha256) RELEASE_ARTIFACT_SHA256="$2"; shift 2;;
@@ -138,7 +150,7 @@ if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compu
 # tests to avoid in-script release builds). In a release bundle a missing
 # bin/o3k fails closed instead of compiling.
 if [[ -z "$O3K_BINARY" ]]; then
-  if [[ -x "$ROOT_DIR/bin/o3k" ]]; then
+  if [[ -f "$ROOT_DIR/bin/o3k" && -x "$ROOT_DIR/bin/o3k" ]]; then
     O3K_BINARY="$ROOT_DIR/bin/o3k"
   else
     if [[ "$RELEASE_BUNDLE" == 1 ]]; then
@@ -480,6 +492,45 @@ if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
     share/o3k/SHA256SUMS 0644
   INSTALLED_FILES+=(share/o3k/SHA256SUMS)
 fi
+# C1 requires externally supplied signed documents; never synthesize state.
+if [[ -f "$PREFIX/share/o3k/release-manifest.json" ]] && python3 - "$PREFIX/share/o3k/release-manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream: value = json.load(stream)
+sys.exit(0 if "installation_policy_authority" in value else 1)
+PY
+then
+  [[ "$PREFIX" == /usr/local ]] || { echo "C1 release requires /usr/local" >&2; exit 1; }
+  # Post-install C1 steps always use the INSTALLED binary, never a source-tree
+  # or build-directory path: provisioning decisions must come from the release
+  # artifact that systemd will start.
+  INSTALLED_O3K="$PREFIX/bin/o3k"
+  [[ -x "$INSTALLED_O3K" ]] || { echo "installed o3k binary is not executable: $INSTALLED_O3K" >&2; exit 1; }
+  if [[ "$C1_PREPARE_ONLY" != 1 ]]; then
+    [[ -n "$C1_POLICY_INPUT" && -n "$C1_STATE_INPUT" && -n "$C1_TRUST_INPUT" ]] || {
+      cat >&2 <<'JOURNEY'
+C1 release requires offline-signed policy/state/trust inputs.
+Two-step journey:
+  1. Prepare:  sudo packaging/install.sh --c1-prepare-only [--c1-backend sqlite|postgresql]
+               creates the recovery parent and per-installation directories
+               and prints the unsigned provisioning descriptor for the
+               offline signer.
+  2. Sign:     take the descriptor to the disconnected offline signer and
+               produce the signed policy/state/trust documents bound to it.
+  3. Install:  sudo packaging/install.sh --c1-policy POLICY --c1-state STATE --c1-trust TRUST
+               (pre-C1 installations additionally pass --c1-migrate, which
+               runs the legacy-evidence absence check before NEVER_RECOVERED)
+JOURNEY
+      exit 2; }
+    for input in "$C1_POLICY_INPUT" "$C1_STATE_INPUT" "$C1_TRUST_INPUT"; do [[ -f "$input" && ! -L "$input" ]] || { echo "invalid C1 input: $input" >&2; exit 1; }; done
+    install -d -o root -g root -m 0755 /var/lib/o3k-recovery-state /var/lib/o3k-recovery
+    install -o root -g o3k -m 0640 "$C1_POLICY_INPUT" /etc/o3k/installation-policy.json
+    install -o root -g o3k -m 0640 "$C1_TRUST_INPUT" /etc/o3k/recovery-trust.json
+    C1_MODE_FLAG=()
+    if [[ "$C1_MIGRATE" == 1 ]]; then C1_MODE_FLAG=(--mode legacy-migration); fi
+    "$INSTALLED_O3K" installation-provision --policy "$C1_POLICY_INPUT" --state "$C1_STATE_INPUT" --trust "$C1_TRUST_INPUT" "${C1_MODE_FLAG[@]}"
+  fi
+fi
+
 # Backup trust template (no key material). Operators copy it to the root-owned
 # /etc/o3k/backup-trust.json and replace every placeholder; the loader validates
 # the file posture and rejects incomplete or malformed values. The installer
@@ -870,8 +921,10 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
       /etc/systemd/system/o3k-network.service 0644
   fi
   systemctl daemon-reload
-  systemctl enable --now o3kd.service
-  if [[ "$PROFILE" == libvirt ]]; then
+  if [[ "$C1_PREPARE_ONLY" != 1 ]]; then
+    systemctl enable --now o3kd.service
+  fi
+  if [[ "$PROFILE" == libvirt && "$C1_PREPARE_ONLY" != 1 ]]; then
     if [[ "$DEFER_COMPUTE_START" -eq 1 ]]; then
       systemctl enable o3k-compute.service
     else
@@ -907,6 +960,26 @@ if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
   # self-manages its group via the agent's explicit 2730/0660 modes.
   install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache"
   install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache/overlays"
+fi
+if [[ "$C1_PREPARE_ONLY" == 1 ]]; then
+  if [[ ! -f "$PREFIX/share/o3k/release-manifest.json" ]]; then
+    echo "--c1-prepare-only requires an installed release manifest at $PREFIX/share/o3k/release-manifest.json" >&2
+    exit 2
+  fi
+  if ! python3 - "$PREFIX/share/o3k/release-manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream: value = json.load(stream)
+sys.exit(0 if "installation_policy_authority" in value else 1)
+PY
+  then
+    echo "--c1-prepare-only requires a C1 release: installation_policy_authority is missing from the release manifest" >&2
+    exit 2
+  fi
+  if [[ ! -x "$PREFIX/bin/o3k" ]]; then
+    echo "--c1-prepare-only requires the installed o3k binary at $PREFIX/bin/o3k" >&2
+    exit 2
+  fi
+  "$PREFIX/bin/o3k" recovery-provision-prepare --data-root "$DATA_DIR" --backend "$C1_BACKEND"
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
 echo "backup data directory: a non-root $RUN_USER service user resolves $DATA_DIR automatically when it owns that directory (the packaged posture), even though $ENV_FILE is root:root 0600 and unreadable to it; set O3K_DATA_DIR to override"

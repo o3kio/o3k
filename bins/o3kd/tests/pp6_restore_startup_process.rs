@@ -323,6 +323,58 @@ fn real_o3kd_quarantines_before_listener_or_store_open() -> Result<(), Box<dyn s
 
 #[test]
 #[ignore = "requires root; run explicitly with --ignored"]
+fn real_o3k_rollback_denies_under_restore_quarantine() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = RootFixture::new()?;
+    fixture.prepare_layout()?;
+    let (uid, gid) = o3k_identity()?;
+    let recovery = fixture.0.join("recovery");
+    fs::create_dir(&recovery)?;
+    chown(&recovery, uid, gid)?;
+    fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        recovery.join("restore-journal.json"),
+        b"quarantine-evidence",
+    )?;
+    chown(&recovery.join("restore-journal.json"), uid, gid)?;
+    fs::set_permissions(
+        recovery.join("restore-journal.json"),
+        fs::Permissions::from_mode(0o600),
+    )?;
+    fixture.install_restore_config(&recovery)?;
+
+    // The real rollback mutation entry must inherit the legacy restore-state
+    // deny through deny_startup_if_restore_state: denial before any snapshot,
+    // store, or service mutation.
+    let o3k_binary = Path::new(env!("CARGO_BIN_EXE_o3kd")).with_file_name("o3k");
+    let output = Command::new(o3k_binary)
+        .arg("rollback")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("O3K_INSTALL_PREFIX", fixture.prefix())
+        .env("O3K_UPGRADE_PREFIX", fixture.prefix())
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "rollback succeeded under restore quarantine"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("restore quarantine"),
+        "unexpected rollback output: {text}"
+    );
+    assert!(
+        !fixture.data_dir().join("o3k.sqlite").exists(),
+        "rollback created or opened the canonical SQLite store"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires root; run explicitly with --ignored"]
 fn real_o3kd_lock_contention_denies_before_listener_or_store_open()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = RootFixture::new()?;

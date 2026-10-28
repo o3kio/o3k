@@ -1171,18 +1171,16 @@ revocation lists. C1 does not authorize post-`PREFLIGHTED` journal phases;
 those require the separately accepted A10/journal-v2 branch. Journal v1 remains
 limited to its accepted `PREFLIGHTED` behavior.
 
-### 7.3 Proposed amendment C1.1: authenticated installation-policy/trust re-anchor and journal checkpoint (PENDING, not accepted)
+### 7.3 Accepted amendment C1.1: authenticated installation-policy/trust re-anchor and journal checkpoint
 
-Status: proposed 2026-10-27. This subsection is **not** part of the accepted
-contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, is not covered by the
-owner-accepted C1 (§7.2, merge `ea4f705efba72421f368903be71a0e792851813f`) or
-A10 (§7.1, merge `ca8fe3033ace09cf7b7a43286522dbd3e6ad326a`) decisions, and
-grants no implementation authority. It becomes normative only if the named
-human reviewer records explicit acceptance of this exact revision together
-with the matching ADR-0189 and PP6 technical-contract text. PR approval or
-merge alone is not that acceptance. C1.1 changes no accepted C1 or A10
-technical parameter; it adds the rotation/recovery mechanism for the trust
-that C1 installs.
+Accepted for implementation/testing on 2026-10-27 by owner decision
+[6440284521](https://github.com/o3kio/o3k/issues/1086#issuecomment-6440284521),
+reviewing PR #1187 head `df52e28471fee99b09807135a3823c6f8bd5326e`, merged as
+`4d9d5108f4995b270144c3b29ad54704a62e61c8`. This is owner-directed,
+non-independent architecture/technical acceptance under ADR-0190, not runtime,
+installed, production, or independent-security qualification. C1.1 changes no
+accepted C1 or A10 technical parameter; it adds the rotation/recovery mechanism
+for the trust that C1 installs.
 
 #### 7.3.1 Conflict analysis and option comparison
 
@@ -1340,9 +1338,9 @@ evidence. All accepted fail-closed revocation behavior is preserved.
 A C with `rotation_reason` = `compromise` requires an
 `o3k-recovery-revalidation-v1` document signed by the **new**
 recovery-evidence authority. The evidence carries a unique 256-bit nonce and
-a proposed 300-second validity window from `issued_at` (`expires_at` =
-`issued_at` + 300 seconds; the 300-second value is a pending human decision,
-§7.3.11), and clock rollback or clock unavailability at verification denies.
+an accepted 300-second validity window from `issued_at` (`expires_at` =
+`issued_at` + 300 seconds), and clock rollback or clock unavailability at
+verification denies.
 It binds: `installation_id`, `site_id`, profile, and backend; operation ID,
 artifact digest, and target identity; old and new trust root IDs and
 certificate key IDs/serials; the exact prior state, journal, and checkpoint
@@ -1453,10 +1451,11 @@ requires the accepted signed disposition that authorizes its removal.
 Rotation is a root-authorized installer operation outside the accepted §8
 recovery CLI; C1.1 accepts no new CLI.
 
-#### 7.3.11 Pending human decisions
+#### 7.3.11 Accepted human decisions
 
-The following C1.1 decisions are **PENDING** and are not accepted by this
-proposal:
+Owner decision
+[6440284521](https://github.com/o3kio/o3k/issues/1086#issuecomment-6440284521)
+explicitly accepted all six choices:
 
 1. R is signed only by the installation-policy authority.
 2. C is signed by the new offline journal authority under new current trust.
@@ -1467,22 +1466,18 @@ proposal:
 5. Quiescence rules and rotation during quarantine.
 6. The 300-second revalidation-evidence validity window.
 
-#### 7.3.12 Acceptance gate
+#### 7.3.12 Implementation evidence gate
 
-C1.1 becomes normative only if the named human reviewer records explicit
-acceptance of this exact specification revision together with the consistent
-ADR-0189 and PP6 technical-contract text. Opening, approving, or merging the
-proposal PR is not that acceptance. Until acceptance, the accepted C1 rules
-govern unchanged, including per-signature verification under current trust
-and the at-most-30-day signer overlap, and no implementation may re-anchor
-trust or checkpoint the journal. Acceptance also requires future
-implementation evidence to include these negative cases: replayed or reused
+The exact-revision acceptance authorizes implementation and testing only.
+Implementation evidence must include these negative cases: replayed or reused
 single-use revalidation evidence, including any second or different R/C pair;
 equal-sequence equivocation of R or C; a crash before and after every
 publication step in §7.3.9 with exact-forward resume only; unsigned denial
 markers preserved byte-for-byte across rotation; a pre-C1.1 verifier rejecting
 unknown R/C records and denying startup; stale, revoked, or unavailable
-current trust failing closed; and rotation granting no activation.
+current trust failing closed; and rotation granting no activation. Passing
+these tests does not replace the installed-candidate, real offline-signer,
+supported-systemd-host, or independent-security gates.
 
 ## 8. Operator interface
 

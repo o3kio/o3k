@@ -100,11 +100,16 @@ the recovery security claim without a qualified independent anchor. C1 does
 not authorize journal phases after `PREFLIGHTED`, accept A10, or authorize
 restore target mutation.
 
-**Proposed amendment C1.1 (PENDING, not accepted).** SPEC-0050 §7.3 and the
-matching ADR-0189 amendment propose an authenticated installation-policy/trust
-re-anchor and journal checkpoint so an accepted-C1 installation can rotate or
-recover its installed journal/evidence trust roots; see
-[SPEC-0050 §7.3](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#73-proposed-amendment-c11-authenticated-installation-policytrust-re-anchor-and-journal-checkpoint-pending-not-accepted).
+**Accepted amendment C1.1.** Owner decision
+[6440284521](https://github.com/o3kio/o3k/issues/1086#issuecomment-6440284521)
+accepted SPEC-0050 §7.3 and the matching ADR-0189 amendment at PR #1187 head
+`df52e28471fee99b09807135a3823c6f8bd5326e`, integrated as
+`4d9d5108f4995b270144c3b29ad54704a62e61c8`. This owner-directed,
+non-independent decision authorizes implementation/testing only. The amendment
+adds an authenticated installation-policy/trust re-anchor and journal checkpoint
+so an accepted-C1 installation can rotate or recover its installed
+journal/evidence trust roots; see
+[SPEC-0050 §7.3](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#73-accepted-amendment-c11-authenticated-installation-policytrust-re-anchor-and-journal-checkpoint).
 Conflict and option: accepted C1 verifies every historical journal/state
 signature under current trust with at most a 30-day signer overlap, so retired
 roots would otherwise stay in the live TCB with unbounded retention/expiry
@@ -130,8 +135,8 @@ is introduced. Compromise rotation revokes the old root by a revocation
 signed by the new trust root authenticated by the new policy, blocking new
 old-root authorization without retroactively rewriting durable history, and
 requires `o3k-recovery-revalidation-v1` evidence under the new
-recovery-evidence authority carrying a unique 256-bit nonce with a proposed
-300-second validity (a pending human decision) that authorizes exactly one R/C
+recovery-evidence authority carrying a unique 256-bit nonce with an accepted
+300-second validity that authorizes exactly one R/C
 pair through a durable consumption record written before acceptance and
 marked consumed only after full authenticated publication; byte-identical
 resume of that pair is allowed, any second or different use is rejected, and
@@ -153,17 +158,16 @@ unsigned denial markers are preserved byte-for-byte, and rotation alone never
 clears quarantine, consumes nonces, grants sessions, leases, provider
 dispatch, an API listener, or activation, or changes D3/D4/D7/D8/A10.
 Rotation is a root-authorized installer operation outside the accepted §8
-recovery CLI; C1.1 accepts no new CLI. Pending human decisions: the
-policy-authority-only R signer; the new-journal-authority C; the
+recovery CLI; C1.1 accepts no new CLI. The owner decision explicitly accepts
+the policy-authority-only R signer; the new-journal-authority C; the
 verification-posture change; the compromise revalidation authority/custody and
-300-second validity; and quiescence/rotation during quarantine. Acceptance
-requires future negative evidence: replayed or reused single-use revalidation,
+300-second validity; and quiescence/rotation during quarantine. Implementation
+evidence must include replayed or reused single-use revalidation,
 equal-sequence R/C equivocation, a crash at every publication step with
 exact-forward resume only, byte-for-byte marker preservation, old-verifier
-denial, stale trust, and no activation. This proposal has no implementation
-authority until the named human reviewer explicitly accepts one exact revision
-of SPEC-0050, ADR-0189, and this record; PR approval or merge is not that
-acceptance. It changes no accepted D1–D13, C1, or A10 parameter.
+denial, stale trust, and no activation. The decision changes no accepted
+D1–D13, C1, or A10 parameter and does not satisfy any runtime, installed,
+production, or independent-security gate.
 
 ### D2 custody record
 

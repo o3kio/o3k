@@ -1016,7 +1016,7 @@ pub fn expected_backup_executor_from(
 pub async fn build_composition(
     config: o3k_config::Config,
 ) -> Result<Composition, Box<dyn std::error::Error>> {
-    let startup_guard = acquire_startup_guard(&config.data_dir)?;
+    let startup_guard = acquire_startup_guard(&config.data_dir, config.database_backend)?;
     build_composition_with_guard(config, startup_guard).await
 }
 
@@ -1024,10 +1024,17 @@ pub async fn build_composition(
 /// recovery state before callers bind an API listener or open canonical state.
 pub fn acquire_startup_guard(
     data_dir: &Path,
+    backend: o3k_config::DatabaseBackend,
 ) -> Result<o3k_store::StoreAccessLock, Box<dyn std::error::Error>> {
     let guard = o3k_store::StoreAccessLock::acquire(data_dir)?;
-    o3k::restore_preflight::deny_startup_if_restore_state(data_dir)
-        .map_err(std::io::Error::other)?;
+    o3k::restore_preflight::deny_startup_if_restore_state_for_backend(
+        data_dir,
+        match backend {
+            o3k_config::DatabaseBackend::Sqlite => "sqlite",
+            o3k_config::DatabaseBackend::Postgres => "postgresql",
+        },
+    )
+    .map_err(std::io::Error::other)?;
     Ok(guard)
 }
 
@@ -1047,8 +1054,14 @@ pub async fn build_composition_with_guard(
     // Repeat the denial check under the retained lock at the store-opening
     // boundary. This also protects direct composition callers that do not use
     // the process entry point's pre-bind gate.
-    o3k::restore_preflight::deny_startup_if_restore_state(&config.data_dir)
-        .map_err(std::io::Error::other)?;
+    o3k::restore_preflight::deny_startup_if_restore_state_for_backend(
+        &config.data_dir,
+        match config.database_backend {
+            o3k_config::DatabaseBackend::Sqlite => "sqlite",
+            o3k_config::DatabaseBackend::Postgres => "postgresql",
+        },
+    )
+    .map_err(std::io::Error::other)?;
     // An interrupted backup is denial-only forensic metadata (SPEC-0050 §7):
     // its presence blocks replacement-controller startup before any canonical
     // state is opened; its absence proves nothing and is never treated as

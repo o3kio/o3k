@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -24,6 +25,69 @@ enum Commands {
     },
     /// Print the binary and installed release versions
     Version,
+    /// Initialize authenticated C1 recovery metadata during installation
+    #[command(hide = true)]
+    InstallationProvision {
+        #[arg(long)]
+        policy: std::path::PathBuf,
+        #[arg(long)]
+        state: std::path::PathBuf,
+        #[arg(long)]
+        trust: std::path::PathBuf,
+        /// new-install (default) or legacy-migration with the thorough
+        /// legacy-evidence absence check
+        #[arg(long, default_value = "new-install")]
+        mode: String,
+    },
+    /// Create per-installation recovery directories and emit the unsigned,
+    /// non-secret provisioning descriptor for the offline signer (root-only)
+    #[command(hide = true)]
+    RecoveryProvisionPrepare {
+        #[arg(long)]
+        data_root: Option<std::path::PathBuf>,
+        #[arg(long, default_value = "sqlite")]
+        backend: String,
+    },
+    /// Install a root-signed, monotonic recovery revocation update
+    #[command(hide = true)]
+    RecoveryTrustUpdate {
+        #[arg(long)]
+        policy: std::path::PathBuf,
+        #[arg(long)]
+        trust: std::path::PathBuf,
+    },
+    /// Persist an offline journal-authority-signed recovery designation
+    /// before any target mutation (root-only; never opens the store)
+    #[command(hide = true)]
+    RecoveryDesignate {
+        #[arg(long)]
+        state: std::path::PathBuf,
+    },
+    /// Persist an offline journal-authority-signed RELEASED disposition
+    /// (root-only; fails closed until accepted terminal evidence exists)
+    #[command(hide = true)]
+    RecoveryRelease {
+        #[arg(long)]
+        state: std::path::PathBuf,
+    },
+    /// Persist a C1.1 authenticated installation-policy/trust re-anchor and
+    /// journal checkpoint (root-only installer operation; grants no
+    /// activation, never clears quarantine, and accepts no new CLI authority)
+    #[command(hide = true)]
+    RecoveryReanchor {
+        #[arg(long)]
+        reanchor: std::path::PathBuf,
+        #[arg(long)]
+        checkpoint: Option<std::path::PathBuf>,
+        #[arg(long)]
+        policy: std::path::PathBuf,
+        #[arg(long)]
+        trust: std::path::PathBuf,
+        #[arg(long)]
+        revalidation: Option<std::path::PathBuf>,
+        #[arg(long)]
+        custody_record: Option<std::path::PathBuf>,
+    },
     /// Upgrade the installation
     Upgrade {
         /// Target release version (e.g. v0.4.0)
@@ -188,6 +252,180 @@ fn main() -> ExitCode {
     match cli.command {
         Commands::Doctor { json } => run_doctor(json),
         Commands::Version => run_version(),
+        Commands::InstallationProvision {
+            policy,
+            state,
+            trust,
+            mode,
+        } => {
+            let Some(mode) = o3k::recovery_provision::ProvisionMode::parse(&mode) else {
+                eprintln!("invalid installation provision mode: {mode}");
+                return ExitCode::from(2);
+            };
+            match o3k::recovery_provision::provision_with_mode(&policy, &state, &trust, mode) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("installation provisioning failed: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryProvisionPrepare { data_root, backend } => {
+            let data_root = data_root.unwrap_or_else(|| Path::new("/var/lib/o3k").to_path_buf());
+            match o3k::recovery_prepare::prepare(&data_root, &backend) {
+                Ok(descriptor) => match serde_json::to_string(&descriptor) {
+                    Ok(line) => {
+                        println!("{line}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(_) => ExitCode::from(3),
+                },
+                Err(o3k::recovery_prepare::PrepareError::NotRoot) => {
+                    eprintln!("recovery provisioning preparation requires root");
+                    ExitCode::from(2)
+                }
+                Err(error) => {
+                    eprintln!("recovery provisioning preparation failed: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryTrustUpdate { policy, trust } => {
+            match o3k::recovery_trust_update::update(&policy, &trust) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("recovery trust update failed: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryDesignate { state } => {
+            let installed = match o3k::recovery_installation::InstalledRecovery::load(Path::new(
+                "/var/lib/o3k",
+            )) {
+                Ok(installed) => installed,
+                Err(reason) => {
+                    eprintln!("recovery designation rejected: {reason}");
+                    return ExitCode::from(2);
+                }
+            };
+            let signed = match std::fs::read(&state) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("recovery designation state is unreadable: {error}");
+                    return ExitCode::from(2);
+                }
+            };
+            match installed.persist_designation(&signed) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(reason) => {
+                    eprintln!("recovery designation failed: {reason}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryRelease { state } => {
+            let installed = match o3k::recovery_installation::InstalledRecovery::load(Path::new(
+                "/var/lib/o3k",
+            )) {
+                Ok(installed) => installed,
+                Err(reason) => {
+                    eprintln!("recovery release rejected: {reason}");
+                    return ExitCode::from(2);
+                }
+            };
+            let signed = match std::fs::read(&state) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("recovery release state is unreadable: {error}");
+                    return ExitCode::from(2);
+                }
+            };
+            match installed.persist_release(&signed) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(reason) => {
+                    eprintln!("recovery release failed: {reason}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryReanchor {
+            reanchor,
+            checkpoint,
+            policy,
+            trust,
+            revalidation,
+            custody_record,
+        } => {
+            // The plan builder authenticates a complete generation and
+            // verifies the signed R/C against the durable prior bytes for an
+            // exact-forward resume; a full startup load here would deny the
+            // legitimate partial generation after a crash.
+            let installed = match o3k::recovery_installation::InstalledRecovery::load_partial(
+                Path::new("/var/lib/o3k"),
+            ) {
+                Ok(installed) => installed,
+                Err(reason) => {
+                    eprintln!("recovery rotation rejected: {reason}");
+                    return ExitCode::from(2);
+                }
+            };
+            let read_input =
+                |path: &std::path::PathBuf, label: &str| -> Result<Vec<u8>, ExitCode> {
+                    std::fs::read(path).map_err(|error| {
+                        eprintln!("recovery rotation {label} is unreadable: {error}");
+                        ExitCode::from(2)
+                    })
+                };
+            let signed_reanchor = match read_input(&reanchor, "re-anchor record") {
+                Ok(bytes) => bytes,
+                Err(code) => return code,
+            };
+            let signed_checkpoint = match &checkpoint {
+                Some(path) => match read_input(path, "checkpoint") {
+                    Ok(bytes) => Some(bytes),
+                    Err(code) => return code,
+                },
+                None => None,
+            };
+            let new_policy = match read_input(&policy, "installation policy") {
+                Ok(bytes) => bytes,
+                Err(code) => return code,
+            };
+            let new_trust_bundle = match read_input(&trust, "recovery trust bundle") {
+                Ok(bytes) => bytes,
+                Err(code) => return code,
+            };
+            let signed_revalidation = match &revalidation {
+                Some(path) => match read_input(path, "revalidation evidence") {
+                    Ok(bytes) => Some(bytes),
+                    Err(code) => return code,
+                },
+                None => None,
+            };
+            let custody_record = match &custody_record {
+                Some(path) => match read_input(path, "custody record") {
+                    Ok(bytes) => Some(bytes),
+                    Err(code) => return code,
+                },
+                None => None,
+            };
+            let inputs = o3k::recovery_reanchor::RotationInputs {
+                signed_reanchor,
+                signed_checkpoint,
+                new_policy,
+                new_trust_bundle,
+                signed_revalidation,
+                custody_record,
+            };
+            match o3k::recovery_reanchor::rotate(&installed, &inputs) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(reason) => {
+                    eprintln!("recovery rotation failed: {reason}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Commands::Upgrade {
             to,
             check,

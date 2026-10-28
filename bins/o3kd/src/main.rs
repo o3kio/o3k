@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Acquire the lifetime store guard and reject restore quarantine before
     // opening even an API listener. Keep the exact guard through composition
     // and daemon shutdown.
-    let startup_guard = composition::acquire_startup_guard(&data_dir)?;
+    let startup_guard = composition::acquire_startup_guard(&data_dir, config.database_backend)?;
     // Bind before composition starts workers or opens canonical storage, so a
     // bind failure cannot leave detached background tasks behind the lock.
     let listener = TcpListener::bind(listen_addr).await?;
