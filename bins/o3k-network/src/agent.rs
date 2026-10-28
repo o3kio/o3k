@@ -1078,13 +1078,15 @@ mod tests {
         let work_key = "network-agent:agent-a";
         let controller_a = ControllerId::new("controller-a");
         let epoch_a = ControllerEpoch::new("epoch-a");
+        // The SQLite test store persists lease deadlines at whole-second
+        // precision; use a multi-second TTL so setup time cannot consume it.
         let lease_a = match store
             .acquire_work_lease(
                 work_key,
                 "network_agent_control",
                 &controller_a,
                 &epoch_a,
-                Duration::from_millis(500),
+                Duration::from_secs(5),
             )
             .await
             .expect("controller A lease")
@@ -1152,7 +1154,7 @@ mod tests {
                 remove: false,
             }
         };
-        let remote_expiry = now_ms().expect("clock") + 500;
+        let remote_expiry = now_ms().expect("clock") + 5_000;
         service
             .accept_lease(&lease(
                 &controller_a.to_string(),
@@ -1168,7 +1170,7 @@ mod tests {
                     &controller_a,
                     &epoch_a,
                     lease_a.fencing_token,
-                    Duration::from_millis(500),
+                    Duration::from_secs(5),
                 )
                 .await
                 .expect("renew coordination lease")
@@ -1178,7 +1180,7 @@ mod tests {
                 &controller_a.to_string(),
                 &epoch_a.to_string(),
                 lease_a.fencing_token,
-                now_ms().expect("clock") + 500,
+                now_ms().expect("clock") + 5_000,
             ))
             .expect("renew agent-side controller lease");
         service
@@ -1190,7 +1192,7 @@ mod tests {
             .expect("A mutation");
         assert_eq!(mutation_count.load(Ordering::SeqCst), 1);
 
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        tokio::time::sleep(Duration::from_millis(6_100)).await;
         let controller_b = ControllerId::new("controller-b");
         let epoch_b = ControllerEpoch::new("epoch-b");
         let lease_b = match store
