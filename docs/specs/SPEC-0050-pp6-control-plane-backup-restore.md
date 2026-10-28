@@ -1499,7 +1499,12 @@ envelope. Unknown, duplicate, missing, malformed, or non-canonical fields,
 unknown enum values, a wrong signer, and any scope mismatch are rejected.
 The payload requires every v1 identity, path, device/inode, trust-key,
 revision, prior-policy-digest, and signer field, with unchanged meanings, and
-adds all of. The proposed strict schema is
+adds the fields listed below. A v2 policy is only created by the explicit
+v1-to-v2 migration in §7.4.2; there is no v2 genesis or direct-install
+shortcut. A new installation first establishes the ordinary v1 policy and
+state, then completes the same explicit migration before A10 can be selected.
+Therefore `policy_revision` is at least 2 and is exactly the prior v1 policy
+revision plus one. The proposed strict schema is
 [`o3k-installation-policy-v2.proposed.schema.json`](../../contracts/o3k-installation-policy-v2.proposed.schema.json):
 
 | Field | Required value and binding |
@@ -1570,8 +1575,10 @@ sequence + 1; `prior_record_digest` is the exact prior state tip digest;
 `NEVER_RECOVERED`. Other states require a verified C1.1 journal-v1 checkpoint
 digest. All digests are lowercase SHA-256 of exact canonical signed bytes,
 except release-manifest digests, which hash exact authenticated manifest
-bytes. The envelope uses the existing installation-policy signer, algorithm,
-and strict canonical signature rules. The proposed migration schema is
+bytes. `signer_manifest_digest` equals `new_release_manifest_sha256`; the
+migration event is verified with the policy signer authenticated by that new
+manifest. The envelope uses the existing installation-policy signer,
+algorithm, and strict canonical signature rules. The proposed migration schema is
 [`o3k-installation-policy-migration-v1.proposed.schema.json`](../../contracts/o3k-installation-policy-migration-v1.proposed.schema.json).
 
 For `NEVER_RECOVERED`, migration binds the authenticated state tip and has no

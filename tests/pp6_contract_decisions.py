@@ -736,6 +736,7 @@ def proposed_policy_v2_permitted(payload: dict, manifest: dict,
         and payload.get("source_commit") == manifest.get("source_commit")
         and payload.get("release_manifest_sha256") ==
             manifest.get("exact_bytes_sha256")
+        and payload.get("policy_revision", 0) >= 2
         and payload.get("policy_path") == "/etc/o3k/installation-policy.json"
         and payload.get("signer_key_id") == envelope_key_id
         and authority.get("format") == "o3k-installation-policy-v2"
@@ -754,6 +755,8 @@ def proposed_policy_v2_permitted(payload: dict, manifest: dict,
 def proposed_policy_migration_permitted(*, old_format: str, new_format: str,
                                        old_revision: int, new_revision: int,
                                        old_digest: str, new_prior_digest: str,
+                                       signer_manifest_digest: str,
+                                       new_release_manifest_digest: str,
                                        state: str, checkpoint_present: bool,
                                        journal_v2_exists: bool,
                                        signer_key_unchanged: bool,
@@ -764,6 +767,7 @@ def proposed_policy_migration_permitted(*, old_format: str, new_format: str,
             or new_format != "o3k-installation-policy-v2"
             or new_revision != old_revision + 1
             or new_prior_digest != old_digest
+            or signer_manifest_digest != new_release_manifest_digest
             or journal_v2_exists or not signer_key_unchanged
             or not identity_preserved or not migration_event_valid):
         return False
@@ -848,6 +852,7 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
             ("backend_version", "15"), ("deployment", "physical"),
             ("restore_branch_authorization", "activation"),
             ("release_identity", "9" * 64),
+            ("policy_revision", 1),
             ("release_manifest_sha256", "8" * 64),
             ("journal_inode", 0), ("recovery_state_root", ""),
             ("recovery_state_inode", 0), ("journal_directory", ""),
@@ -876,12 +881,15 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
                     new_format="o3k-installation-policy-v2",
                     old_revision=7, new_revision=8,
                     old_digest="a" * 64, new_prior_digest="a" * 64,
+                    signer_manifest_digest="b" * 64,
+                    new_release_manifest_digest="b" * 64,
                     state="NEVER_RECOVERED", checkpoint_present=False,
                     journal_v2_exists=False, signer_key_unchanged=True,
                     identity_preserved=True, migration_event_valid=True)
         self.assertTrue(proposed_policy_migration_permitted(**base))
         for overrides in (
             {"new_revision": 7}, {"new_prior_digest": "b" * 64},
+            {"signer_manifest_digest": "c" * 64},
             {"new_format": "o3k-installation-policy-v1"},
             {"old_format": "o3k-installation-policy-v2"},
             {"journal_v2_exists": True}, {"signer_key_unchanged": False},
@@ -897,6 +905,8 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
                     new_format="o3k-installation-policy-v2",
                     old_revision=7, new_revision=8,
                     old_digest="a" * 64, new_prior_digest="a" * 64,
+                    signer_manifest_digest="b" * 64,
+                    new_release_manifest_digest="b" * 64,
                     state="RECOVERY_DESIGNATED", checkpoint_present=True,
                     journal_v2_exists=False, signer_key_unchanged=True,
                     identity_preserved=True, migration_event_valid=True)
