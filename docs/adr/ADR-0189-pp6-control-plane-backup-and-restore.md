@@ -573,13 +573,15 @@ freeze v1, add a release-manifest-authenticated
 authorization with full recovery-state and protected-journal identity.
 
 The proposal selects a new signed policy format over a separately signed
-selection extension because it keeps one manifest-selected format/path/signer
-and one exact policy digest as the A10 authority. It adds a migration event to
-the existing installation-state sequence with exact prior/new policy and
-release bindings, preserves recovery state, continues policy anti-rollback
-across formats, makes old verifiers fail closed, and prohibits downgrade
-rollback. Existing v1 installations remain supported without A10. Active
-journal-v2 chains cannot rotate policy or be checkpointed under C1.1.
+selection extension because the authenticated installation-state chain selects
+the format, while the release manifest authorizes each supported
+format/path/signer; one exact policy digest remains the A10 authority. It adds
+a migration event to the existing installation-state sequence with exact
+prior/new policy and release bindings, preserves recovery state, continues
+policy anti-rollback across formats, makes old verifiers fail closed, and
+prohibits downgrade rollback. Existing v1 installations remain supported
+without A10. Active journal-v2 chains cannot rotate policy or be checkpointed
+under C1.1.
 
 The proposal creates no runtime authority and authorizes no database or
 restore-target mutation. It has not been accepted by the prior A10, C1, or

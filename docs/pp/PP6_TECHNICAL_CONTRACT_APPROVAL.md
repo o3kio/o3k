@@ -232,7 +232,10 @@ The accepted revision above does not include the proposed
 That proposal resolves the gap between A10's explicit inactive-branch and
 deployment bindings and C1's frozen v1 schema. It remains unaccepted until
 the owner records **ACCEPT**, **AMEND**, or **REJECT** against the exact
-reviewed PR head. ADR-0190's non-independent single-maintainer review
+reviewed PR head. The proposal makes the authenticated installation-state
+chain the only active-format selector (initial state selects v1; one valid
+migration event selects v2) and fixes format epochs at v1=`1`, v2=`2`.
+ADR-0190's non-independent single-maintainer review
 disclosure remains in force. Neither PR approval nor merge alone constitutes
 that technical decision. No implementation may rely on v2 before that
 decision.

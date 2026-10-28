@@ -1536,9 +1536,16 @@ release-authenticated manifest. The v2 authority must use the existing
 installation-policy purpose; this amendment creates no new trust root or
 reuses the key for journal, evidence, artifact, decryption, or release
 signing. A release that omits the v2 authority cannot provision v2 policy.
-Installers and verifiers accept only the exact manifest-selected format and
-path. They never select a format from policy input, mutable configuration, or
-the presence of extra files.
+The authenticated installation-state chain, not the release manifest or
+policy input, selects the active policy format: the initial verified
+installation state selects v1, and only a fully verified
+`o3k-installation-policy-migration-v1` event selects v2. A release manifest
+authorizes the format-specific verifier, fixed path, and signer; it does not
+change the active format. Thus a manifest containing both authority entries
+does not make a v2 policy active before migration. A missing, conflicting, or
+ambiguous state selector denies every consumer before listener or store access.
+Installers and verifiers never select a format from policy input, mutable
+configuration, or the presence of extra files.
 
 #### 7.4.2 Format migration and compatibility
 
@@ -1593,10 +1600,13 @@ entire lifetime; recovery must finish under that digest or remain denied
 until a separately accepted journal-v2 checkpoint/migration decision exists.
 
 Policy revision and anti-rollback high-water continue across formats. The
-migration record advances the existing state sequence; the v2 policy revision
-is exactly prior revision + 1 and links the exact v1 policy digest. Durable
-high-water records the policy format epoch, revision, and digest; once v2 is
-published, any v1 policy, lower revision, equal-revision different digest,
+format epoch is fixed: v1 is epoch `1` and v2 is epoch `2`; no other epoch or
+format is accepted. The only allowed transition is epoch `1` to epoch `2`,
+authorized by exactly one valid migration event. The migration record advances
+the existing state sequence; the v2 policy revision is exactly prior revision
++ 1 and links the exact v1 policy digest. Durable high-water records the policy
+format epoch, revision, and digest; once v2 is published, any v1 policy, lower
+revision, equal-revision different digest,
 missing migration event, or stale state tip is a downgrade/equivocation and
 denies startup, maintenance, upgrade, and rollback. Publication of a partial
 or mixed v1/v2 generation denies every consumer; only byte-identical

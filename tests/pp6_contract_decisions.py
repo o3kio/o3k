@@ -719,11 +719,15 @@ POLICY_V2_REQUIRED = {
 
 
 def proposed_policy_v2_permitted(payload: dict, manifest: dict,
-                                 envelope_key_id: str) -> bool:
+                                 envelope_key_id: str, *,
+                                 selected_policy_format: str,
+                                 migration_event_valid: bool) -> bool:
     """Proposed A10.1 contract predicate; it is not runtime authority."""
     authority = manifest.get("installation_policy_v2_authority", {})
     return (
-        set(payload) == POLICY_V2_REQUIRED
+        selected_policy_format == "o3k-installation-policy-v2"
+        and migration_event_valid
+        and set(payload) == POLICY_V2_REQUIRED
         and payload.get("format") == "o3k-installation-policy-v2"
         and payload.get("profile") == "o3k-small-edge-v1"
         and payload.get("backend") == "postgresql"
@@ -750,6 +754,13 @@ def proposed_policy_v2_permitted(payload: dict, manifest: dict,
             "journal_inode", "policy_revision", "prior_policy_digest",
             "release_manifest_sha256"))
     )
+
+
+def proposed_policy_format_epoch(policy_format: str) -> int | None:
+    return {
+        "o3k-installation-policy-v1": 1,
+        "o3k-installation-policy-v2": 2,
+    }.get(policy_format)
 
 
 def proposed_policy_migration_permitted(*, old_format: str, new_format: str,
@@ -843,7 +854,9 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
             "signer_manifest_digest",
         })
         self.assertTrue(proposed_policy_v2_permitted(
-            self.payload, self.manifest, "policy-key-1"))
+            self.payload, self.manifest, "policy-key-1",
+            selected_policy_format="o3k-installation-policy-v2",
+            migration_event_valid=True))
         for field, value in (
             ("restore_branch_authorization", None),
             ("restore_branch_authorization", "future-value"),
@@ -860,21 +873,45 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
             with self.subTest(field=field):
                 payload = {**self.payload, field: value}
                 self.assertFalse(proposed_policy_v2_permitted(
-                    payload, self.manifest, "policy-key-1"))
+                    payload, self.manifest, "policy-key-1",
+                    selected_policy_format="o3k-installation-policy-v2",
+                    migration_event_valid=True))
         self.assertFalse(proposed_policy_v2_permitted(
-            {**self.payload, "unknown": True}, self.manifest, "policy-key-1"))
+            {**self.payload, "unknown": True}, self.manifest, "policy-key-1",
+            selected_policy_format="o3k-installation-policy-v2",
+            migration_event_valid=True))
         self.assertFalse(proposed_policy_v2_permitted(
-            self.payload, self.manifest, "wrong-key"))
+            self.payload, self.manifest, "wrong-key",
+            selected_policy_format="o3k-installation-policy-v2",
+            migration_event_valid=True))
         wrong_manifest_authority = {**self.manifest,
             "installation_policy_v2_authority": {
                 **self.manifest["installation_policy_v2_authority"],
                 "key_id": "mixed-key"}}
         self.assertFalse(proposed_policy_v2_permitted(
-            self.payload, wrong_manifest_authority, "policy-key-1"))
+            self.payload, wrong_manifest_authority, "policy-key-1",
+            selected_policy_format="o3k-installation-policy-v2",
+            migration_event_valid=True))
         no_v2_manifest_authority = {key: value for key, value in self.manifest.items()
                                     if key != "installation_policy_v2_authority"}
         self.assertFalse(proposed_policy_v2_permitted(
-            self.payload, no_v2_manifest_authority, "policy-key-1"))
+            self.payload, no_v2_manifest_authority, "policy-key-1",
+            selected_policy_format="o3k-installation-policy-v2",
+            migration_event_valid=True))
+        # The release can authenticate v2 while the durable installation
+        # state still selects v1. Manifest capability alone grants no A10.
+        self.assertFalse(proposed_policy_v2_permitted(
+            self.payload, self.manifest, "policy-key-1",
+            selected_policy_format="o3k-installation-policy-v1",
+            migration_event_valid=False))
+        self.assertFalse(proposed_policy_v2_permitted(
+            self.payload, self.manifest, "policy-key-1",
+            selected_policy_format="ambiguous",
+            migration_event_valid=True))
+        self.assertFalse(proposed_policy_v2_permitted(
+            self.payload, self.manifest, "policy-key-1",
+            selected_policy_format="o3k-installation-policy-v2",
+            migration_event_valid=False))
 
     def test_v1_does_not_select_a10_and_policy_migration_is_monotonic(self):
         base = dict(old_format="o3k-installation-policy-v1",
@@ -887,6 +924,9 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
                     journal_v2_exists=False, signer_key_unchanged=True,
                     identity_preserved=True, migration_event_valid=True)
         self.assertTrue(proposed_policy_migration_permitted(**base))
+        self.assertEqual(proposed_policy_format_epoch(base["old_format"]), 1)
+        self.assertEqual(proposed_policy_format_epoch(base["new_format"]), 2)
+        self.assertIsNone(proposed_policy_format_epoch("o3k-installation-policy-v3"))
         for overrides in (
             {"new_revision": 7}, {"new_prior_digest": "b" * 64},
             {"signer_manifest_digest": "c" * 64},
