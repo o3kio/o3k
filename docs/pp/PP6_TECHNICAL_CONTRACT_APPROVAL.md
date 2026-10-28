@@ -224,3 +224,15 @@ change the accepted contract. The review was non-independent and named
 |---|---|---|---|---|
 | Architecture + technical/security (interim, non-independent) | **ACCEPTED** | `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` | D2/D4/D7/D8/D9/D10/D12/D13 technical contract only; residual risk and implementation/evidence conditions remain; SPEC-0051 excluded | 2026-10-18 |
 | Protected integration | **MERGED** | `d666497c174c7297aa5feb8438a56a0ad898008f` | PR #1156; integration does not enlarge exact-head acceptance | 2026-10-18 |
+
+## Proposed A10.1 policy amendment — decision pending
+
+The accepted revision above does not include the proposed
+`o3k-installation-policy-v2` schema or migration authority in SPEC-0050 §7.4.
+That proposal resolves the gap between A10's explicit inactive-branch and
+deployment bindings and C1's frozen v1 schema. It remains unaccepted until
+the owner records **ACCEPT**, **AMEND**, or **REJECT** against the exact
+reviewed PR head. ADR-0190's non-independent single-maintainer review
+disclosure remains in force. Neither PR approval nor merge alone constitutes
+that technical decision. No implementation may rely on v2 before that
+decision.

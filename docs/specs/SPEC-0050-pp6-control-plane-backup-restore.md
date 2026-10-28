@@ -1479,6 +1479,184 @@ current trust failing closed; and rotation granting no activation. Passing
 these tests does not replace the installed-candidate, real offline-signer,
 supported-systemd-host, or independent-security gates.
 
+### 7.4 Proposed amendment A10.1 — versioned signed installation policy
+
+**Decision status: proposed; not accepted normative authority.** This narrow
+contract correction resolves the mismatch between A10's required explicit
+inactive-branch selection and C1's frozen `o3k-installation-policy-v1`, which
+has no deployment field or A10 authorization field. The v1 schema, signature
+meaning, fixed path, and current C1/C1.1 verifier behavior remain frozen.
+Option A, a new signed policy format, is selected over a detached selection
+extension: the release manifest can authenticate one exact policy format,
+path, and signer, and one policy digest can bind the entire recovery identity.
+A detached extension would create a second independently rotated authority
+and a partial-publication state without reducing the required migration rules.
+
+#### 7.4.1 `o3k-installation-policy-v2`
+
+The new format is RFC 8785 canonical JSON in the existing strict Ed25519
+envelope. Unknown, duplicate, missing, malformed, or non-canonical fields,
+unknown enum values, a wrong signer, and any scope mismatch are rejected.
+The payload requires every v1 identity, path, device/inode, trust-key,
+revision, prior-policy-digest, and signer field, with unchanged meanings, and
+adds all of. The proposed strict schema is
+[`o3k-installation-policy-v2.proposed.schema.json`](../../contracts/o3k-installation-policy-v2.proposed.schema.json):
+
+| Field | Required value and binding |
+| --- | --- |
+| `backend_version` | `16`; exact PostgreSQL major |
+| `deployment` | `virtualized`; no default or inference |
+| `restore_branch_authorization` | `inactive-materialization-only`; the only v2 value in this decision |
+| `release_version` | Exact release version from the authenticated manifest |
+| `source_commit` | Exact source commit from the authenticated manifest |
+| `release_manifest_sha256` | SHA-256 of the exact installed, release-authenticated manifest bytes |
+
+For this v2 authorization, `profile` is exactly `o3k-small-edge-v1`,
+`backend` is exactly `postgresql`, and `release_identity` is the exact
+`release_artifact_sha256` in the manifest. The policy binds the exact
+installation and site IDs, target data-root device/inode, recovery-state
+root device/inode, protected journal directory device/inode, trust-bundle
+digest and purpose-separated public keys, and monotonic revision chain.
+`signer_key_id` must equal the envelope key ID and the policy key authenticated
+for v2 by the release manifest. There is no default to A10: v1, absent v2
+selection, another profile/backend/deployment, unknown values, or any missing
+binding denies A10 before journal access or target access.
+
+The release-signed manifest retains its existing v1 authority fields with
+their exact meaning and adds a strict `installation_policy_v2_authority`
+object containing `format` (exactly `o3k-installation-policy-v2`), the fixed
+policy path (`/etc/o3k/installation-policy.json`), `key_id`, and
+`ed25519_public_key`. Both authority entries are part of the same
+release-authenticated manifest. The v2 authority must use the existing
+installation-policy purpose; this amendment creates no new trust root or
+reuses the key for journal, evidence, artifact, decryption, or release
+signing. A release that omits the v2 authority cannot provision v2 policy.
+Installers and verifiers accept only the exact manifest-selected format and
+path. They never select a format from policy input, mutable configuration, or
+the presence of extra files.
+
+#### 7.4.2 Format migration and compatibility
+
+An installation with v1 policy remains operational under its supported v1
+release and C1/C1.1 rules, with A10 unavailable. Migration to v2 is an
+explicit root-installer operation, never an automatic upgrade side effect.
+It preserves installation/site IDs, target identity, recovery state, trust
+scope, protected recovery-state and journal paths/inodes, and the exact prior
+policy bytes. It increments the existing policy revision by one and sets
+`prior_policy_digest` to SHA-256 of those exact v1 bytes. A v2 migration
+record, `o3k-installation-policy-migration-v1`, is a distinct signed event in
+the existing monotonic installation-state sequence; it binds the prior and
+new policy format/revision/digest, prior and new exact release-manifest
+digest, prior and new exact release identity, state-chain sequence and prior
+tip digest, preserved recovery state and target identity, and any required
+C1.1 journal-v1 checkpoint digest. It is signed by the installation-policy
+authority authenticated by the new release manifest. Both old and new policy
+signatures and manifests must independently verify before migration. The
+policy signer key ID and public key are held constant across this format
+migration; key rotation remains a separate C1.1 operation. No migration
+event changes `NEVER_RECOVERED`, `RECOVERY_DESIGNATED`, or `RELEASED`.
+
+The migration payload has exactly these fields: `format`, `installation_id`,
+`site_id`, `sequence`, `prior_record_digest`, `preserved_state`,
+`prior_policy_format`, `prior_policy_revision`, `prior_policy_digest`,
+`new_policy_format`, `new_policy_revision`, `new_policy_digest`,
+`prior_release_manifest_sha256`, `new_release_manifest_sha256`,
+`prior_release_identity`, `new_release_identity`, `target_device`,
+`target_inode`, `trust_bundle_digest`, `checkpoint_digest`, and
+`signer_manifest_digest`. `format` is exactly
+`o3k-installation-policy-migration-v1`; `sequence` is exactly prior state
+sequence + 1; `prior_record_digest` is the exact prior state tip digest;
+`preserved_state` is unchanged; and `checkpoint_digest` is null only for
+`NEVER_RECOVERED`. Other states require a verified C1.1 journal-v1 checkpoint
+digest. All digests are lowercase SHA-256 of exact canonical signed bytes,
+except release-manifest digests, which hash exact authenticated manifest
+bytes. The envelope uses the existing installation-policy signer, algorithm,
+and strict canonical signature rules. The proposed migration schema is
+[`o3k-installation-policy-migration-v1.proposed.schema.json`](../../contracts/o3k-installation-policy-migration-v1.proposed.schema.json).
+
+For `NEVER_RECOVERED`, migration binds the authenticated state tip and has no
+journal checkpoint. For `RECOVERY_DESIGNATED` or `RELEASED` with journal v1,
+migration requires the accepted C1.1 checkpoint and preserves all existing
+state, operation, artifact, quarantine, and denial-marker bindings. A
+missing/ambiguous state or incomplete C1.1 generation denies migration. Any
+existing journal-v2 chain, including terminal `INACTIVE_VERIFIED`, denies
+policy migration and policy rotation: C1.1 does not authorize journal-v2
+checkpointing. A journal-v2 chain binds the exact v2 policy digest for its
+entire lifetime; recovery must finish under that digest or remain denied
+until a separately accepted journal-v2 checkpoint/migration decision exists.
+
+Policy revision and anti-rollback high-water continue across formats. The
+migration record advances the existing state sequence; the v2 policy revision
+is exactly prior revision + 1 and links the exact v1 policy digest. Durable
+high-water records the policy format epoch, revision, and digest; once v2 is
+published, any v1 policy, lower revision, equal-revision different digest,
+missing migration event, or stale state tip is a downgrade/equivocation and
+denies startup, maintenance, upgrade, and rollback. Publication of a partial
+or mixed v1/v2 generation denies every consumer; only byte-identical
+exact-forward completion of the already authenticated migration may resume.
+The migration implementation must use the durable same-directory
+fsync/rename/readback discipline and D8 recovery guard; this amendment does
+not itself implement that publisher.
+
+Old verifiers continue to support v1 exactly. On a v2 policy or migration
+event they reject the unknown format/event and deny startup before store
+access. Upgrade must not replace an old verifier or release manifest until it
+has authenticated the complete migration preconditions. Rollback to a
+verifier that cannot validate v2 is denied before stopping services or
+replacing any installed file; v2-aware startup, maintenance, upgrade, rollback,
+and systemd paths must all share the same recovery-state exclusion.
+
+C1.1 `o3k-installation-reanchor-v1` remains a v1-to-v1 re-anchor and must
+reject a changed policy format. It cannot verify or authorize v1-to-v2
+migration; the new migration event does that explicitly after verifying both
+release manifests and both policy signatures. C1.1 `o3k-restore-journal-
+checkpoint-v1` remains a journal-v1 checkpoint only. This decision provides
+no v2-to-v2 policy re-anchor or routine release-policy rotation. After v2
+migration, a release update or rollback that would change the exact bound
+release identity is denied until a separate policy-reanchor contract is
+accepted. This restriction preserves the exact-release binding and is a
+known availability/maintenance limitation.
+
+#### 7.4.3 A10 journal binding and rotation
+
+The initial signed A10 `PREFLIGHTED` journal-v2 record binds
+`restore_branch=inactive`, installation ID, site ID, exact profile/backend/
+backend-version/deployment, exact operation and artifact identities, target
+identity, and SHA-256 of the exact canonical signed v2 policy document.
+Every later record repeats or cryptographically inherits that policy digest
+and the immutable branch. Missing/unsupported policy selection denies before
+the journal can reserve a target. Policy rotation or release migration is
+denied while any A10 journal-v2 chain exists; records may not be rebound to a
+new policy. A later journal-v2 checkpoint or chain migration requires a
+separate explicit normative decision. C1.1 checkpoint authority remains
+limited to journal v1. No policy rotation is supported while any journal-v2
+chain exists, and this decision defines no same-format v2 policy rotation.
+
+#### 7.4.4 Required negative contract tests and residual risk
+
+Contract tests must reject absent/unknown selection, v1-to-A10 fallback,
+wrong profile/backend/major/deployment, altered release-manifest digest,
+release-identity mismatch, wrong or mixed signing authority, missing recovery
+or journal identity, stale/equal-conflicting policy revision, broken prior
+digest, unsupported format/event, mixed or partial migration generations,
+old-verifier startup, rollback to an old verifier, and policy rotation during
+any journal-v2 chain. They must preserve ordinary v1 behavior when A10 is not
+selected, preserve C1.1's journal-v1-only checkpoint boundary, and show that
+neither policy selection nor `INACTIVE_VERIFIED` grants API readiness,
+controller lease, reconciliation, provider dispatch, or activation.
+
+The remaining risks are compromise of the release-signing or
+installation-policy authority, root-level alteration of local state without
+an independently trusted anti-rollback anchor, unavailable offline custody,
+and interrupted migration. These remain fail-closed availability risks; this
+proposal adds no local rollback defense beyond the accepted D8/C1.1 state and
+high-water controls and grants no target-mutation authority. ADR-0190's
+non-independent single-maintainer review disclosure remains applicable; this
+proposal has not received an owner-directed technical decision. It is not
+accepted until the owner records ACCEPT / AMEND / REJECT against the exact
+reviewed PR head. The decision authorizes only contract work; runtime
+implementation remains gated until that decision.
+
 ## 8. Operator interface
 
 The accepted operator surface is host-local `o3k` CLI only; there is no HTTP

@@ -559,6 +559,35 @@ release evidence remain separately gated.
     dispatch and resolving in-flight canonical Operations without treating an
     already activated target as a pre-activation quarantine.
 
+### Proposed amendment A10.1 — versioned signed installation policy
+
+**Status: proposed for an owner-directed decision; not accepted normative
+authority.** The accepted A10 contract requires a release-signed installation
+policy to select its inactive branch and bind deployment, while frozen C1
+`o3k-installation-policy-v1` has neither a deployment field nor A10 branch
+selection. A10 journal-v2 therefore cannot obtain this authority from the
+accepted v1 schema. SPEC-0050 §7.4 proposes the smallest versioned correction:
+freeze v1, add a release-manifest-authenticated
+`o3k-installation-policy-v2` for only virtualized PostgreSQL 16
+`o3k-small-edge-v1`, and require an explicit `inactive-materialization-only`
+authorization with full recovery-state and protected-journal identity.
+
+The proposal selects a new signed policy format over a separately signed
+selection extension because it keeps one manifest-selected format/path/signer
+and one exact policy digest as the A10 authority. It adds a migration event to
+the existing installation-state sequence with exact prior/new policy and
+release bindings, preserves recovery state, continues policy anti-rollback
+across formats, makes old verifiers fail closed, and prohibits downgrade
+rollback. Existing v1 installations remain supported without A10. Active
+journal-v2 chains cannot rotate policy or be checkpointed under C1.1.
+
+The proposal creates no runtime authority and authorizes no database or
+restore-target mutation. It has not been accepted by the prior A10, C1, or
+C1.1 decisions; the owner must record ACCEPT / AMEND / REJECT against the
+exact reviewed PR head. ADR-0190's non-independent single-maintainer review
+disclosure remains explicit; GitHub review/merge alone is not normative
+acceptance.
+
 ## Historical architecture-proposal worksheet (2026-10-17)
 
 This worksheet preserves the review state before the technical decision. Its

@@ -704,5 +704,231 @@ class ContractDecisionPrototypeTests(unittest.TestCase):
             baseline))
 
 
+POLICY_V2_REQUIRED = {
+    "format", "installation_id", "site_id", "profile", "backend",
+    "backend_version", "deployment", "restore_branch_authorization",
+    "release_identity", "release_version", "source_commit",
+    "release_manifest_sha256", "data_root", "target_device", "target_inode",
+    "policy_revision", "prior_policy_digest", "policy_path",
+    "trust_bundle_path", "trust_bundle_digest", "recovery_state_root",
+    "recovery_state_device", "recovery_state_inode", "journal_directory",
+    "journal_device", "journal_inode", "journal_trust_root_id",
+    "journal_trust_root_public_key", "evidence_trust_root_id",
+    "evidence_trust_root_public_key", "signer_key_id",
+}
+
+
+def proposed_policy_v2_permitted(payload: dict, manifest: dict,
+                                 envelope_key_id: str) -> bool:
+    """Proposed A10.1 contract predicate; it is not runtime authority."""
+    authority = manifest.get("installation_policy_v2_authority", {})
+    return (
+        set(payload) == POLICY_V2_REQUIRED
+        and payload.get("format") == "o3k-installation-policy-v2"
+        and payload.get("profile") == "o3k-small-edge-v1"
+        and payload.get("backend") == "postgresql"
+        and payload.get("backend_version") == "16"
+        and payload.get("deployment") == "virtualized"
+        and payload.get("restore_branch_authorization") ==
+            "inactive-materialization-only"
+        and payload.get("release_identity") == manifest.get("release_artifact_sha256")
+        and payload.get("release_version") == manifest.get("version")
+        and payload.get("source_commit") == manifest.get("source_commit")
+        and payload.get("release_manifest_sha256") ==
+            manifest.get("exact_bytes_sha256")
+        and payload.get("policy_path") == "/etc/o3k/installation-policy.json"
+        and payload.get("signer_key_id") == envelope_key_id
+        and authority.get("format") == "o3k-installation-policy-v2"
+        and authority.get("path") == payload.get("policy_path")
+        and authority.get("key_id") == envelope_key_id
+        and bool(authority.get("ed25519_public_key"))
+        and all(payload.get(field) not in (None, "", 0) for field in (
+            "installation_id", "site_id", "target_device", "target_inode",
+            "recovery_state_root", "recovery_state_device",
+            "recovery_state_inode", "journal_directory", "journal_device",
+            "journal_inode", "policy_revision", "prior_policy_digest",
+            "release_manifest_sha256"))
+    )
+
+
+def proposed_policy_migration_permitted(*, old_format: str, new_format: str,
+                                       old_revision: int, new_revision: int,
+                                       old_digest: str, new_prior_digest: str,
+                                       state: str, checkpoint_present: bool,
+                                       journal_v2_exists: bool,
+                                       signer_key_unchanged: bool,
+                                       identity_preserved: bool,
+                                       migration_event_valid: bool) -> bool:
+    """Proposed format-migration contract predicate only."""
+    if (old_format != "o3k-installation-policy-v1"
+            or new_format != "o3k-installation-policy-v2"
+            or new_revision != old_revision + 1
+            or new_prior_digest != old_digest
+            or journal_v2_exists or not signer_key_unchanged
+            or not identity_preserved or not migration_event_valid):
+        return False
+    if state == "NEVER_RECOVERED":
+        return not checkpoint_present
+    if state in {"RECOVERY_DESIGNATED", "RELEASED"}:
+        return checkpoint_present
+    return False
+
+
+class ProposedInstallationPolicyV2Tests(unittest.TestCase):
+    """Proposed A10.1 contract tests; not implementation or acceptance."""
+
+    def setUp(self):
+        self.manifest = {
+            "version": "v0.4.0-rc.5",
+            "source_commit": "a" * 40,
+            "release_artifact_sha256": "1" * 64,
+            "exact_bytes_sha256": "2" * 64,
+            "installation_policy_v2_authority": {
+                "format": "o3k-installation-policy-v2",
+                "path": "/etc/o3k/installation-policy.json",
+                "key_id": "policy-key-1",
+                "ed25519_public_key": "3" * 64,
+            },
+        }
+        self.payload = {
+            "format": "o3k-installation-policy-v2",
+            "installation_id": "install-1", "site_id": "site-1",
+            "profile": "o3k-small-edge-v1", "backend": "postgresql",
+            "backend_version": "16", "deployment": "virtualized",
+            "restore_branch_authorization": "inactive-materialization-only",
+            "release_identity": "1" * 64,
+            "release_version": "v0.4.0-rc.5", "source_commit": "a" * 40,
+            "release_manifest_sha256": "2" * 64,
+            "data_root": "/var/lib/o3k", "target_device": 1,
+            "target_inode": 2, "policy_revision": 2,
+            "prior_policy_digest": "4" * 64,
+            "policy_path": "/etc/o3k/installation-policy.json",
+            "trust_bundle_path": "/etc/o3k/recovery/trust.json",
+            "trust_bundle_digest": "5" * 64,
+            "recovery_state_root": "/var/lib/o3k-recovery-state/install-1",
+            "recovery_state_device": 3, "recovery_state_inode": 4,
+            "journal_directory": "/var/lib/o3k-recovery/install-1",
+            "journal_device": 5, "journal_inode": 6,
+            "journal_trust_root_id": "journal-root",
+            "journal_trust_root_public_key": "6" * 64,
+            "evidence_trust_root_id": "evidence-root",
+            "evidence_trust_root_public_key": "7" * 64,
+            "signer_key_id": "policy-key-1",
+        }
+
+    def test_v2_schema_and_exact_release_manifest_authority(self):
+        import json
+        from pathlib import Path
+
+        schema_path = (Path(__file__).resolve().parents[1] / "contracts" /
+                       "o3k-installation-policy-v2.proposed.schema.json")
+        schema = json.loads(schema_path.read_text())
+        self.assertEqual(set(schema["properties"]["payload"]["required"]),
+                         POLICY_V2_REQUIRED)
+        migration_schema_path = (Path(__file__).resolve().parents[1] / "contracts" /
+                                 "o3k-installation-policy-migration-v1.proposed.schema.json")
+        migration_schema = json.loads(migration_schema_path.read_text())
+        self.assertEqual(set(migration_schema["properties"]["payload"]["required"]), {
+            "format", "installation_id", "site_id", "sequence",
+            "prior_record_digest", "preserved_state", "prior_policy_format",
+            "prior_policy_revision", "prior_policy_digest", "new_policy_format",
+            "new_policy_revision", "new_policy_digest",
+            "prior_release_manifest_sha256", "new_release_manifest_sha256",
+            "prior_release_identity", "new_release_identity", "target_device",
+            "target_inode", "trust_bundle_digest", "checkpoint_digest",
+            "signer_manifest_digest",
+        })
+        self.assertTrue(proposed_policy_v2_permitted(
+            self.payload, self.manifest, "policy-key-1"))
+        for field, value in (
+            ("restore_branch_authorization", None),
+            ("restore_branch_authorization", "future-value"),
+            ("format", "o3k-installation-policy-v1"),
+            ("profile", "o3k-demo-v1"), ("backend", "sqlite"),
+            ("backend_version", "15"), ("deployment", "physical"),
+            ("restore_branch_authorization", "activation"),
+            ("release_identity", "9" * 64),
+            ("release_manifest_sha256", "8" * 64),
+            ("journal_inode", 0), ("recovery_state_root", ""),
+            ("recovery_state_inode", 0), ("journal_directory", ""),
+        ):
+            with self.subTest(field=field):
+                payload = {**self.payload, field: value}
+                self.assertFalse(proposed_policy_v2_permitted(
+                    payload, self.manifest, "policy-key-1"))
+        self.assertFalse(proposed_policy_v2_permitted(
+            {**self.payload, "unknown": True}, self.manifest, "policy-key-1"))
+        self.assertFalse(proposed_policy_v2_permitted(
+            self.payload, self.manifest, "wrong-key"))
+        wrong_manifest_authority = {**self.manifest,
+            "installation_policy_v2_authority": {
+                **self.manifest["installation_policy_v2_authority"],
+                "key_id": "mixed-key"}}
+        self.assertFalse(proposed_policy_v2_permitted(
+            self.payload, wrong_manifest_authority, "policy-key-1"))
+        no_v2_manifest_authority = {key: value for key, value in self.manifest.items()
+                                    if key != "installation_policy_v2_authority"}
+        self.assertFalse(proposed_policy_v2_permitted(
+            self.payload, no_v2_manifest_authority, "policy-key-1"))
+
+    def test_v1_does_not_select_a10_and_policy_migration_is_monotonic(self):
+        base = dict(old_format="o3k-installation-policy-v1",
+                    new_format="o3k-installation-policy-v2",
+                    old_revision=7, new_revision=8,
+                    old_digest="a" * 64, new_prior_digest="a" * 64,
+                    state="NEVER_RECOVERED", checkpoint_present=False,
+                    journal_v2_exists=False, signer_key_unchanged=True,
+                    identity_preserved=True, migration_event_valid=True)
+        self.assertTrue(proposed_policy_migration_permitted(**base))
+        for overrides in (
+            {"new_revision": 7}, {"new_prior_digest": "b" * 64},
+            {"new_format": "o3k-installation-policy-v1"},
+            {"old_format": "o3k-installation-policy-v2"},
+            {"journal_v2_exists": True}, {"signer_key_unchanged": False},
+            {"identity_preserved": False}, {"migration_event_valid": False},
+            {"state": "RECOVERY_DESIGNATED"},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertFalse(proposed_policy_migration_permitted(
+                    **{**base, **overrides}))
+
+    def test_recovery_state_requires_checkpoint_and_v2_chain_is_not_rotatable(self):
+        base = dict(old_format="o3k-installation-policy-v1",
+                    new_format="o3k-installation-policy-v2",
+                    old_revision=7, new_revision=8,
+                    old_digest="a" * 64, new_prior_digest="a" * 64,
+                    state="RECOVERY_DESIGNATED", checkpoint_present=True,
+                    journal_v2_exists=False, signer_key_unchanged=True,
+                    identity_preserved=True, migration_event_valid=True)
+        self.assertTrue(proposed_policy_migration_permitted(**base))
+        self.assertFalse(proposed_policy_migration_permitted(
+            **{**base, "checkpoint_present": False}))
+        self.assertFalse(proposed_policy_migration_permitted(
+            **{**base, "journal_v2_exists": True}))
+
+    def test_old_verifier_and_downgrade_fail_closed(self):
+        def startup_permitted(*, policy_format, verifier_formats,
+                              migration_event_valid, downgrade):
+            return (policy_format in verifier_formats and migration_event_valid
+                    and not downgrade)
+
+        self.assertTrue(startup_permitted(
+            policy_format="o3k-installation-policy-v1",
+            verifier_formats={"o3k-installation-policy-v1"},
+            migration_event_valid=True, downgrade=False))
+        self.assertFalse(startup_permitted(
+            policy_format="o3k-installation-policy-v2",
+            verifier_formats={"o3k-installation-policy-v1"},
+            migration_event_valid=True, downgrade=False))
+        self.assertFalse(startup_permitted(
+            policy_format="o3k-installation-policy-v1",
+            verifier_formats={"o3k-installation-policy-v2"},
+            migration_event_valid=True, downgrade=True))
+        self.assertFalse(startup_permitted(
+            policy_format="o3k-installation-policy-v2",
+            verifier_formats={"o3k-installation-policy-v2"},
+            migration_event_valid=False, downgrade=False))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
