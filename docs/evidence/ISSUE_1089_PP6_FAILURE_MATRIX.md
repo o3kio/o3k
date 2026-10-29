@@ -1,7 +1,11 @@
 # #1089 PP.6 resource-pressure and operator-error matrix
 
 Status: coverage map for [#1089](https://github.com/o3kio/o3k/issues/1089),
-updated 2026-10-25 against protected `main` `f9ae93406b99cbdefcc3337f6fc1756763fdf363`. This is not acceptance evidence and does not close #1089.
+updated 2026-10-29 against protected `main`
+`95a46181b6597509496f9abc829163ae612adb2f`. This update corrects the journal
+implementation status after C1/C1.1 merged; it does not upgrade the journal
+failure criterion to PASS. This is not acceptance evidence and does not close
+#1089.
 Each row names the test or CI lane that exercises a case and its state:
 
 - **Merged**: on `main` and run by CI.
@@ -29,7 +33,7 @@ Each row names the test or CI lane that exercises a case and its state:
 | Case | Evidence | State |
 | --- | --- | --- |
 | Backup destination missing, unreadable, unsafe, overlapping the store, or replaced after validation | `bins/o3k/src/backup_create.rs` destination-validation/revalidation tests; `tests/pp6_backup_artifact.sh` destination and swap cases | Merged (source/unit and process coverage); real filesystem-full destination evidence NOT_RUN |
-| Recovery-journal write failure leaves the restore phase unchanged and fails closed before activation | No restore-journal implementation exists | Gated |
+| Recovery-journal write/fsync/rename failure leaves a restore phase unchanged and denies startup/activation | C1/C1.1 signed journal-v1 persistence exists on protected main (#1177 merge `bdf77c934014e4987df5a59c6e3de03a56a1934b`; C1.1 integration #1188 merge `107ded898df4b2da6ca6c4d3c5672cc2a7afd453`); no protected failure-injection evidence proves this criterion for the A10 inactive journal-v2 path. The dirty `/home/ubuntu/o3k-a10-v2` journal-v2 worktree is not evidence. | Gated for the A10 inactive restore path; add failure-injection coverage after the exact-head A10.1 decision and Phase B integration. |
 | Malformed configuration: positional argument, malformed TOML file, invalid listen address, PostgreSQL backend without URL, weak signing key. Each exits before serving, echoes no secret, and leaves the data directory unchanged | `bins/o3kd/tests/pp6_config_input_process.rs` | Merged |
 | Invalid CloudProfile writes: malformed body, unknown field, ID mismatch, invalid profile, stale and reused generation, missing content type, unavailable store; state and audit unchanged | `rejected_cloud_profile_writes_preserve_profile_and_audit`, `cloud_profile_write_reports_unavailable_store_as_503` in `bins/o3kd/src/native_adapters/composition_profile.rs` (#1134; supersedes #1106) | Merged |
 | Capacity rejection leaves Placement, network pool and volume state consistent | `unavailable_and_insufficient_hosts_are_skipped` (`o3k-scheduler`), `exhausted_network_pool_preserves_state_and_allows_retry_after_release` (`o3k-network`), `native_volume_capacity_failure_is_durable_and_skips_follow_up_work` (`o3k-api`) (#1129) | Merged |
@@ -51,6 +55,6 @@ Each row names the test or CI lane that exercises a case and its state:
 ## Remaining work for #1089
 
 1. The SQLite lock/busy cancellation regression is merged in #1132; the final pending-operation assertions were added in #1135.
-2. A real destination-filesystem-full backup run remains NOT_RUN in this environment. Recovery-journal write failure remains gated on the accepted ADR-0189/SPEC-0050 contracts and restore implementation in #1084–#1086.
+2. A real destination-filesystem-full backup run remains NOT_RUN in this environment. C1/C1.1 journal-v1 code exists, but injected write/fsync/rename failure evidence for inactive restore remains gated on exact-head A10.1 acceptance and Phase B integration; do not describe the journal implementation as absent.
 3. Linux file-descriptor pressure is merged in #1138, and the corrected #1140 memory-pressure lane is merged with protected evidence. The memory result is bounded SQLite store evidence only; provider state and foreign-state preservation remain `not_exercised`.
 4. Per-run envelopes for the criterion 2 cases.
