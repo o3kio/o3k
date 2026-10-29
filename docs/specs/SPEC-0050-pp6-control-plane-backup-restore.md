@@ -1638,7 +1638,8 @@ The first publication that changes the selected recovery format is an atomic
 replacement of the existing `state.json` tip with the fully signed
 `o3k-installation-policy-migration-v1` event. The migrator fsyncs the new file,
 renames it in the protected state directory, fsyncs that directory, and reads
-back and authenticates the exact event before changing any other active file.
+back and authenticates the exact event before changing any remaining active
+recovery-generation file.
 Until that directory fsync/readback succeeds, it performs no subsequent
 recovery-generation publication. Before this selector publication, supported
 executable files are replaced from the already authenticated exact release
@@ -1649,8 +1650,10 @@ throughout executable replacement. Every crash during that replacement is
 therefore still governed by the unchanged v1 selector. A crash before the
 selector rename leaves the old v1 state tip; a crash between rename and
 directory fsync can recover only the old tip or the complete new tip. In the
-former case, every other active v1 byte is still unchanged. In the latter
-case, the selector is durable and migration has started. There is no crash
+former case, the active v1 policy, high-water and release manifest remain
+unchanged, and the installed executables are the authenticated dual-verifier
+candidate. In the latter case, the selector is durable and migration has
+started. There is no crash
 image in which a v2 active policy or manifest exists with only the old v1
 selector.
 
