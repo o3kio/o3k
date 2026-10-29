@@ -1630,9 +1630,12 @@ preparation, the migrator makes the installed `o3k-compute` executable
 non-executable and durably reads back that mode, then stops and masks its
 systemd unit. It verifies the unit is inactive and masked and that no process
 with the installed executable's device/inode remains, including processes not
-started by systemd. Failure of any check aborts before migration writes. This
-closes new systemd and direct `execve` starts while quiescence is established;
-it does not terminate an already-running process merely by changing mode. If
+started by systemd. Mode change is durable only after file and parent-directory
+fsync plus identity/mode readback; the persistent systemd mask is verified on
+disk to resolve to `/dev/null` after daemon reload. Failure of any check aborts
+before migration writes. This closes new systemd and direct `execve` starts
+while quiescence is established; it does not terminate an already-running
+process merely by changing mode. If
 preparation crashes before D8 acquisition, the v1 selector and complete active
 v1 policy generation are unchanged, so any process not yet stopped remains
 only under ordinary v1 rules; no A10 migration has started. After verified
