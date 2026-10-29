@@ -1025,6 +1025,44 @@ class A10PublicationOrderContractTests(unittest.TestCase):
             "The migration event remains the durable denial selector",
             section)
 
+    def test_selector_crash_intervals_have_negative_contract_vectors(self):
+        spec = (Path(__file__).resolve().parents[1] / "docs/specs" /
+                "SPEC-0050-pp6-control-plane-backup-restore.md").read_text()
+        section = spec.split("### 7.4 Accepted amendment A10.1", 1)[1].split(
+            "### 7.5", 1)[0]
+        crash_matrix = section.split("| Crash boundary |", 1)[1].split(
+            "\nThe rows that mention", 1)[0]
+        vectors = section.split(
+            "Deterministic negative contract vectors for the protected/implementation test",
+            1
+        )[1]
+
+        for boundary in (
+            "Selector temp file written/fsynced, before `state.json` rename",
+            "`state.json` renamed, before recovery-state directory fsync",
+            "Selector directory fsync/readback complete; before v2 active policy publication",
+            "After v2 policy, before v2 high-water",
+            "After v2 high-water, before new manifest",
+        ):
+            with self.subTest(boundary=boundary):
+                self.assertIn(boundary, crash_matrix)
+
+        expected_vectors = {
+            "D8-A10-01": "Ignore temp as authority",
+            "D8-A10-02": "active state tip remains v1",
+            "D8-A10-04": "denies incomplete bindings",
+            "D8-A10-05": "deny before store",
+            "D8-A10-06": "high-water mismatch",
+            "D8-A10-07": "manifest digest/release binding",
+            "D8-A10-10": "No partial repair; deny",
+        }
+        for vector, expected in expected_vectors.items():
+            with self.subTest(vector=vector):
+                line = next(
+                    line for line in vectors.splitlines()
+                    if line.startswith(f"| {vector} |"))
+                self.assertIn(expected, line)
+
     def test_accepted_policy_schemas_do_not_claim_owner_decision_is_pending(self):
         root = Path(__file__).resolve().parents[1] / "contracts"
         for name in ("o3k-installation-policy-v2.proposed.schema.json",
@@ -1034,6 +1072,18 @@ class A10PublicationOrderContractTests(unittest.TestCase):
                 description = schema["description"].lower()
                 self.assertIn("accepted a10.1 schema", description)
                 self.assertNotIn("until owner accept", description)
+
+    def test_pp6_status_projections_match_the_recorded_a10_decision(self):
+        root = Path(__file__).resolve().parents[1]
+        approval = (root / "docs/pp/PP6_TECHNICAL_CONTRACT_APPROVAL.md").read_text()
+        failure_matrix = (root / "docs/evidence/ISSUE_1089_PP6_FAILURE_MATRIX.md").read_text()
+        completion_matrix = (root / "docs/evidence/PP6_COMPLETION_MATRIX.md").read_text()
+        self.assertIn("A10.1 policy amendment — exact-head decision recorded", approval)
+        self.assertIn("issuecomment-6504152604", approval)
+        self.assertNotIn("Proposed A10.1 policy amendment — decision pending", approval)
+        self.assertNotIn("gated on exact-head A10.1 acceptance", failure_matrix)
+        self.assertNotIn("exact-head A10.1 acceptance plus preserved Phase B", completion_matrix)
+        self.assertIn("accepted A10.1 plus protected merge of the PR #1193", completion_matrix)
 
 
 if __name__ == "__main__":

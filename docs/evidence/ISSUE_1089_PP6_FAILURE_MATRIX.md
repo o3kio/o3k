@@ -55,6 +55,6 @@ Each row names the test or CI lane that exercises a case and its state:
 ## Remaining work for #1089
 
 1. The SQLite lock/busy cancellation regression is merged in #1132; the final pending-operation assertions were added in #1135.
-2. A real destination-filesystem-full backup run remains NOT_RUN in this environment. C1/C1.1 journal-v1 code exists, but injected write/fsync/rename failure evidence for inactive restore remains gated on exact-head A10.1 acceptance and Phase B integration; do not describe the journal implementation as absent.
+2. A real destination-filesystem-full backup run remains NOT_RUN in this environment. C1/C1.1 journal-v1 code exists. A10.1 contract acceptance is recorded at PR #1192 exact head `c8ab0a6f1b21bddc70ef46e34357f62ad64e6db4`; injected write/fsync/rename failure evidence for inactive restore remains gated on the PR #1193 exact-head clarification, Phase B integration, and a suitable bounded filesystem.
 3. Linux file-descriptor pressure is merged in #1138, and the corrected #1140 memory-pressure lane is merged with protected evidence. The memory result is bounded SQLite store evidence only; provider state and foreign-state preservation remain `not_exercised`.
 4. Per-run envelopes for the criterion 2 cases.

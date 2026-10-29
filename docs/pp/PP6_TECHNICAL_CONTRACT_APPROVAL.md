@@ -225,19 +225,22 @@ change the accepted contract. The review was non-independent and named
 | Architecture + technical/security (interim, non-independent) | **ACCEPTED** | `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` | D2/D4/D7/D8/D9/D10/D12/D13 technical contract only; residual risk and implementation/evidence conditions remain; SPEC-0051 excluded | 2026-10-18 |
 | Protected integration | **MERGED** | `d666497c174c7297aa5feb8438a56a0ad898008f` | PR #1156; integration does not enlarge exact-head acceptance | 2026-10-18 |
 
-## Proposed A10.1 policy amendment — decision pending
+## A10.1 policy amendment — exact-head decision recorded
 
-The accepted revision above does not include the proposed
-`o3k-installation-policy-v2` schema or migration authority in SPEC-0050 §7.4.
-That proposal resolves the gap between A10's explicit inactive-branch and
-deployment bindings and C1's frozen v1 schema. It remains unaccepted until
-the owner records **ACCEPT**, **AMEND**, or **REJECT** against the exact
-reviewed PR head. The proposal makes the authenticated installation-state
-chain the only active-format selector (initial state selects v1; one valid
-migration event selects v2) and fixes format epochs at v1=`1`, v2=`2`.
-Migration also requires the existing D8 guard, quiesced consumers, blocked
-startup, and a staged v2-capable verifier before the selector changes.
-ADR-0190's non-independent single-maintainer review
-disclosure remains in force. Neither PR approval nor merge alone constitutes
-that technical decision. No implementation may rely on v2 before that
-decision.
+The owner recorded **ACCEPT** for the `o3k-installation-policy-v2` schema and
+migration authority in SPEC-0050 §7.4 at [PR #1192 comment
+#6504152604](https://github.com/o3kio/o3k/pull/1192#issuecomment-6504152604),
+reviewing exact PR head `c8ab0a6f1b21bddc70ef46e34357f62ad64e6db4`, merged as
+`e14601645ba85bb039c41b31c85b7619cb522d67`. This accepted contract makes the
+authenticated installation-state chain the only active-format selector
+(initial state selects v1; one valid migration event selects v2), fixes
+format epochs at v1=`1`, v2=`2`, and requires D8, consumer quiescence, blocked
+startup, and a staged v2-capable verifier before selection. The review remains
+non-independent under ADR-0190 and does not establish runtime, installed,
+production, independent-security, target-mutation, activation, or final PP.6
+evidence.
+
+Review then found an internal conflict in the accepted text's publication
+order. PR #1193 corrects that conflict and requires its own exact-head owner
+disposition and protected merge before policy-v2 implementation begins. PR
+approval or merge alone is not that normative decision.
