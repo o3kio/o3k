@@ -148,10 +148,35 @@ fn doctor_json_emits_contract_json_without_an_install() {
     assert_eq!(value["overall_status"], "unhealthy");
     assert_eq!(checks[0]["id"], "database.accessible");
     assert_eq!(checks[0]["status"], "FAIL");
-    assert_eq!(
-        checks[0]["summary"],
-        "canonical store access denied: store-access lock unavailable"
-    );
+    assert!(checks[0]["summary"].is_string());
+    let summary = checks[0]["summary"].as_str().unwrap_or_default();
+    let fixed_manifest =
+        std::path::Path::new(o3k::upgrade::release_identity::FIXED_RELEASE_MANIFEST_PATH);
+    let fixed_manifest_requires_selector = match std::fs::read(fixed_manifest) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map(|manifest| {
+                [
+                    "installation_policy_authority",
+                    "installation_policy_format",
+                    "installation_policy_path",
+                ]
+                .iter()
+                .any(|field| manifest.get(field).is_some())
+            })
+            .unwrap_or(true),
+        Err(_) => fixed_manifest.exists(),
+    };
+    if fixed_manifest_requires_selector {
+        assert_eq!(
+            summary,
+            "canonical store access denied: installation authority: installed executable cannot select a different data root"
+        );
+    } else {
+        assert_eq!(
+            summary,
+            "canonical store access denied: store-access lock unavailable"
+        );
+    }
 }
 
 /// `o3k doctor` (human output) exits 0 or 1 and ends with the OVERALL line.

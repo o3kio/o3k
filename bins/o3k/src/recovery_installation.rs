@@ -90,7 +90,7 @@ pub fn deny_operator_startup_access(configured_data_dir: &Path) -> Result<()> {
 pub fn verify_operator_installation_selector(configured_data_dir: &Path) -> Result<()> {
     let executable =
         std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
-    if fixed_release_manifest_present()?
+    if fixed_release_manifest_requires_selector()?
         || executable == Path::new("/usr/local/bin/o3k")
         || configured_data_dir == Path::new("/var/lib/o3k")
     {
@@ -113,7 +113,7 @@ fn deny_installed_executable_access(
         configured_data_dir,
         &executable,
         installed_executable,
-        fixed_release_manifest_present()?,
+        fixed_release_manifest_requires_selector()?,
     )
 }
 
@@ -136,12 +136,28 @@ fn deny_installed_executable_access_for(
     }
 }
 
-fn fixed_release_manifest_present() -> Result<bool> {
-    match fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err("installed release manifest cannot be observed"),
-    }
+fn fixed_release_manifest_requires_selector() -> Result<bool> {
+    let manifest = match release_identity::read_fixed_installed_release_manifest() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return match fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(_) => Err("installed release manifest cannot be observed"),
+            };
+        }
+    };
+    let value = match serde_json::from_slice::<serde_json::Value>(&manifest) {
+        Ok(value) => value,
+        Err(_) => return Ok(true),
+    };
+    Ok([
+        "installation_policy_authority",
+        "installation_policy_format",
+        "installation_policy_path",
+    ]
+    .iter()
+    .any(|field| value.get(field).is_some()))
 }
 
 /// Compute is an independent consumer of the installation selector. Installed
