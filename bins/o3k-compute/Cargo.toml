@@ -17,6 +17,7 @@ libvirt = ["o3k-libvirt/libvirt"]
 async-trait.workspace = true
 axum.workspace = true
 o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
+o3k = { path = "../o3k" }
 o3k-console = { path = "../../crates/o3k-console" }
 o3k-dhcp = { path = "../../crates/o3k-dhcp" }
 o3k-libvirt = { path = "../../crates/o3k-libvirt" }

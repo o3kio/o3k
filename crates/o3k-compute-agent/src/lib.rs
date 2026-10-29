@@ -3926,6 +3926,7 @@ fn command_action_name(command: &proto::Command) -> &'static str {
 /// Returns a finite, payload-free category for a failed command execution.
 fn command_execution_error_kind(error: &AgentError) -> &'static str {
     match error {
+        AgentError::StartupAdmission(_) => "startup_admission",
         AgentError::InvalidConfiguration(_) => "configuration",
         AgentError::IdentityStore(_) => "identity_store",
         AgentError::Transport(_) => "transport",
@@ -4351,21 +4352,51 @@ impl AgentClient {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        self.run_with_executor_after_registration(shutdown, executor, || async { Ok(()) })
+            .await
+    }
+
+    /// Runs the agent with a one-shot startup admission callback. The callback
+    /// is invoked only after the control plane has authenticated and validated
+    /// the registration response, and before any artifact state is opened or
+    /// readiness is published. A failed admission is terminal for this
+    /// process; reconnects never repeat startup side effects.
+    pub async fn run_with_executor_after_registration<F, C, Fut>(
+        &self,
+        shutdown: F,
+        executor: Arc<dyn CommandExecutor>,
+        startup_admission: C,
+    ) -> Result<(), AgentError>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+        C: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), AgentError>> + Send + 'static,
+    {
         tokio::pin!(shutdown);
         let agent_id = load_or_create_identity(&self.config.identity_file)?;
         let mut journal = CommandJournal::open(&self.config.identity_file, &agent_id)?;
+        let mut startup_admission = Some(startup_admission);
         let mut delay = Duration::from_millis(250);
         loop {
             self.ready
                 .store(false, std::sync::atomic::Ordering::Release);
             *self.epoch.write().await = None;
             let result = self
-                .connect_once(&agent_id, shutdown.as_mut(), executor.clone(), &mut journal)
+                .connect_once(
+                    &agent_id,
+                    shutdown.as_mut(),
+                    executor.clone(),
+                    &mut journal,
+                    &mut startup_admission,
+                )
                 .await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     warn!(error = ?error, "compute-agent control connection lost");
+                    if matches!(&error, AgentError::StartupAdmission(_)) {
+                        return Err(error);
+                    }
                 }
             }
             tokio::select! { () = &mut shutdown => return Ok(()), () = time::sleep(delay) => {} }
@@ -4373,15 +4404,18 @@ impl AgentClient {
         }
     }
 
-    async fn connect_once<F>(
+    async fn connect_once<F, C, Fut>(
         &self,
         agent_id: &str,
         mut shutdown: Pin<&mut F>,
         executor: Arc<dyn CommandExecutor>,
         journal: &mut CommandJournal,
+        startup_admission: &mut Option<C>,
     ) -> Result<(), AgentError>
     where
         F: std::future::Future<Output = ()> + Send,
+        C: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), AgentError>> + Send + 'static,
     {
         let persisted_state =
             load_administrative_state(&administrative_state_file(&self.config.identity_file))?;
@@ -4471,6 +4505,11 @@ impl AgentClient {
             }
         };
         validate_register_response(&register, agent_id, &epoch)?;
+        if let Some(admission) = startup_admission.take() {
+            admission()
+                .await
+                .map_err(|error| AgentError::StartupAdmission(error.to_string()))?;
+        }
         // Publish the validated epoch before `ready` flips to true so a
         // concurrent loopback /readyz can never observe ready-without-epoch
         // (issue #617).

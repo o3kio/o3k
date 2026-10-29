@@ -53,6 +53,17 @@ pub struct C1ReleaseAuthority {
     pub policy_path: String,
 }
 
+/// Release-manifest authority for the accepted v2 policy format. The
+/// manifest authorizes this verifier and signer; the authenticated
+/// installation-state chain remains the active-format selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct C1V2ReleaseAuthority {
+    pub key_id: String,
+    pub ed25519_public_key: String,
+    pub policy_format: String,
+    pub policy_path: String,
+}
+
 /// Exact release identity a backup artifact must match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupReleaseIdentity {
@@ -167,6 +178,54 @@ impl BackupReleaseIdentity {
             return Err("C1 installation policy format or path is not supported".to_owned());
         }
         Ok(C1ReleaseAuthority {
+            key_id: key_id.to_owned(),
+            ed25519_public_key: public_key.to_owned(),
+            policy_format: policy_format.to_owned(),
+            policy_path: policy_path.to_owned(),
+        })
+    }
+
+    pub fn c1_v2_authority_from_manifest(bytes: &[u8]) -> Result<C1V2ReleaseAuthority, String> {
+        let value: Value = serde_json::from_slice(bytes)
+            .map_err(|_| "installed release manifest is not valid JSON".to_owned())?;
+        let manifest = value
+            .as_object()
+            .ok_or_else(|| "installed release manifest is not a JSON object".to_owned())?;
+        let authority = manifest
+            .get("installation_policy_v2_authority")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "C1 v2 release authority is missing".to_owned())?;
+        if authority.len() != 4 {
+            return Err("C1 v2 release authority has unknown or missing fields".to_owned());
+        }
+        let key_id = authority
+            .get("key_id")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "C1 v2 policy key_id is missing".to_owned())?;
+        let public_key = authority
+            .get("ed25519_public_key")
+            .and_then(Value::as_str)
+            .filter(|v| {
+                v.len() == 64
+                    && v.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+            .ok_or_else(|| "C1 v2 policy public key is missing or invalid".to_owned())?;
+        let policy_format = authority
+            .get("format")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "C1 v2 policy format is missing".to_owned())?;
+        let policy_path = authority
+            .get("policy_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "C1 v2 policy path is missing".to_owned())?;
+        if policy_format != "o3k-installation-policy-v2"
+            || policy_path != C1_INSTALLATION_POLICY_PATH
+        {
+            return Err("C1 v2 installation policy format or path is not supported".to_owned());
+        }
+        Ok(C1V2ReleaseAuthority {
             key_id: key_id.to_owned(),
             ed25519_public_key: public_key.to_owned(),
             policy_format: policy_format.to_owned(),

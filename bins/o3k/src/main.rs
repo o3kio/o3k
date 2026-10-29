@@ -258,6 +258,9 @@ fn main() -> ExitCode {
             trust,
             mode,
         } => {
+            if !require_selector_if_installed() {
+                return ExitCode::from(1);
+            }
             let Some(mode) = o3k::recovery_provision::ProvisionMode::parse(&mode) else {
                 eprintln!("invalid installation provision mode: {mode}");
                 return ExitCode::from(2);
@@ -271,6 +274,9 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryProvisionPrepare { data_root, backend } => {
+            if !require_selector_if_installed() {
+                return ExitCode::from(1);
+            }
             let data_root = data_root.unwrap_or_else(|| Path::new("/var/lib/o3k").to_path_buf());
             match o3k::recovery_prepare::prepare(&data_root, &backend) {
                 Ok(descriptor) => match serde_json::to_string(&descriptor) {
@@ -291,6 +297,9 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryTrustUpdate { policy, trust } => {
+            if !require_maintenance_selector() {
+                return ExitCode::from(1);
+            }
             match o3k::recovery_trust_update::update(&policy, &trust) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
@@ -300,6 +309,9 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryDesignate { state } => {
+            if !require_maintenance_selector() {
+                return ExitCode::from(1);
+            }
             let installed = match o3k::recovery_installation::InstalledRecovery::load(Path::new(
                 "/var/lib/o3k",
             )) {
@@ -325,6 +337,9 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryRelease { state } => {
+            if !require_maintenance_selector() {
+                return ExitCode::from(1);
+            }
             let installed = match o3k::recovery_installation::InstalledRecovery::load(Path::new(
                 "/var/lib/o3k",
             )) {
@@ -357,6 +372,9 @@ fn main() -> ExitCode {
             revalidation,
             custody_record,
         } => {
+            if !require_maintenance_selector() {
+                return ExitCode::from(1);
+            }
             // The plan builder authenticates a complete generation and
             // verifies the signed R/C against the durable prior bytes for an
             // exact-forward resume; a full startup load here would deny the
@@ -511,6 +529,9 @@ fn main() -> ExitCode {
         #[cfg(target_os = "linux")]
         Commands::Restore { command } => match command {
             RestoreCommand::Preflight { artifact, target } => {
+                if !require_selector_if_installed() {
+                    return ExitCode::from(1);
+                }
                 o3k::restore_preflight::run_restore_preflight(
                     &o3k::restore_preflight::RestorePreflightArgs { artifact, target },
                 )
@@ -521,16 +542,76 @@ fn main() -> ExitCode {
             BackupCommand::Create {
                 destination,
                 operation_id,
-            } => o3k::backup_create::run_backup_create(&o3k::backup_create::BackupCreateArgs {
-                destination,
-                operation_id,
-            }),
+            } => {
+                if o3k::backup_create::validate_destination(&destination).is_ok()
+                    && !require_selector_if_installed()
+                {
+                    return ExitCode::from(1);
+                }
+                o3k::backup_create::run_backup_create(&o3k::backup_create::BackupCreateArgs {
+                    destination,
+                    operation_id,
+                })
+            }
             BackupCommand::Verify { artifact } => {
+                if !require_selector_if_installed() {
+                    return ExitCode::from(1);
+                }
                 o3k::backup_verify::run_backup_verify(&o3k::backup_verify::BackupVerifyArgs {
                     artifact,
                 })
             }
         },
+    }
+}
+
+fn require_maintenance_selector() -> bool {
+    match o3k::recovery_installation::verify_operator_installation_selector(Path::new(
+        "/var/lib/o3k",
+    )) {
+        Ok(()) => true,
+        Err(reason) => {
+            eprintln!("o3k maintenance: installation authority denied: {reason}");
+            false
+        }
+    }
+}
+
+fn require_selector_if_installed() -> bool {
+    let installed_executable =
+        std::env::current_exe().is_ok_and(|path| path == Path::new("/usr/local/bin/o3k"));
+    let manifest_claims_c1 =
+        match o3k::upgrade::release_identity::read_fixed_installed_release_manifest() {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) => {
+                    value.get("installation_policy_format").is_some()
+                        || value.get("installation_policy_path").is_some()
+                        || value.get("installation_policy_authority").is_some()
+                        || value.get("installation_policy_v2_authority").is_some()
+                }
+                Err(_) => {
+                    eprintln!("o3k maintenance: installed release manifest is malformed");
+                    return false;
+                }
+            },
+            Err(_) => false,
+        };
+    if !installed_executable && !manifest_claims_c1 {
+        return true;
+    }
+    if let Some(data_dir) = std::env::var_os("O3K_DATA_DIR") {
+        let data_dir = Path::new(&data_dir);
+        match o3k::recovery_installation::verify_operator_installation_selector(data_dir) {
+            Ok(()) => true,
+            Err(reason) => {
+                eprintln!("o3k maintenance: installation authority denied: {reason}");
+                false
+            }
+        }
+    } else {
+        // Without an explicit TestLab root, the command resolves to the
+        // canonical installed data root and must use its protected authority.
+        require_maintenance_selector()
     }
 }
 
@@ -603,6 +684,10 @@ fn run_doctor(json: bool) -> ExitCode {
         Arc::new(SystemHttpClient),
         Arc::new(SqlxDoctorDb),
     );
+    if let Err(reason) = o3k::recovery_installation::deny_operator_startup_access(&context.data_dir)
+    {
+        return doctor_access_denied(json, &format!("installation authority: {reason}"));
+    }
     if let Err(reason) = o3k::restore_preflight::deny_startup_if_restore_state(&context.data_dir) {
         return doctor_access_denied(json, &format!("recovery quarantine: {reason}"));
     }
@@ -666,6 +751,12 @@ fn run_upgrade_cli(
     assume_yes: bool,
     json: bool,
 ) -> ExitCode {
+    if let Err(reason) =
+        o3k::recovery_installation::deny_operator_startup_access(Path::new("/var/lib/o3k"))
+    {
+        eprintln!("o3k upgrade: installation authority denied: {reason}");
+        return ExitCode::from(1);
+    }
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,
@@ -690,6 +781,12 @@ fn run_upgrade_cli(
 }
 
 fn run_rollback_cli(json: bool) -> ExitCode {
+    if let Err(reason) =
+        o3k::recovery_installation::deny_operator_startup_access(Path::new("/var/lib/o3k"))
+    {
+        eprintln!("o3k rollback: installation authority denied: {reason}");
+        return ExitCode::from(1);
+    }
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,

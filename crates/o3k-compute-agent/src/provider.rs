@@ -744,6 +744,7 @@ async fn recover_artifact_transfers(
 
 fn map_agent_error(error: AgentError) -> ProviderError {
     match error {
+        AgentError::StartupAdmission(_) => ProviderError::InvalidRequest,
         AgentError::Protocol(message) => {
             let message = message.to_ascii_lowercase();
             if message.contains("unavailable")
