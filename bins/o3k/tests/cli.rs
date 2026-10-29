@@ -157,6 +157,7 @@ fn doctor_json_emits_contract_json_without_an_install() {
             .map(|manifest| {
                 [
                     "installation_policy_authority",
+                    "installation_policy_v2_authority",
                     "installation_policy_format",
                     "installation_policy_path",
                 ]

@@ -27,7 +27,10 @@ fn direct_executable_denies_invalid_fixed_installed_selector_before_side_effects
     for path in [&data, &network, &tls] {
         fs::create_dir(path).expect("create side-effect sentinel");
     }
-    fs::write(&manifest, br#"{"version":"old","source_commit":"wrong"}"#)
+    fs::write(
+        &manifest,
+        br#"{"version":"old","source_commit":"wrong","installation_policy_format":"o3k-installation-policy-v1"}"#,
+    )
         .expect("write invalid release manifest");
     fs::write(&policy, b"invalid-selector\n").expect("write invalid selector");
     let binary = env::var("CARGO_BIN_EXE_o3k-compute").expect("Cargo-provided compute binary");

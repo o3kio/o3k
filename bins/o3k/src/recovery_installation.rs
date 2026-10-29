@@ -136,7 +136,10 @@ fn deny_installed_executable_access_for(
     }
 }
 
-fn fixed_release_manifest_requires_selector() -> Result<bool> {
+/// Reports whether the fixed installed manifest marks this installation as
+/// selector-managed. Legacy source-built release fixtures have no policy
+/// authority fields and retain their isolated TestLab data roots.
+pub fn fixed_release_manifest_requires_selector() -> Result<bool> {
     let manifest = match release_identity::read_fixed_installed_release_manifest() {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -147,34 +150,36 @@ fn fixed_release_manifest_requires_selector() -> Result<bool> {
             };
         }
     };
-    let value = match serde_json::from_slice::<serde_json::Value>(&manifest) {
+    Ok(manifest_requires_selector(&manifest))
+}
+
+fn manifest_requires_selector(manifest: &[u8]) -> bool {
+    let value = match serde_json::from_slice::<serde_json::Value>(manifest) {
         Ok(value) => value,
-        Err(_) => return Ok(true),
+        Err(_) => return true,
     };
-    Ok([
+    [
         "installation_policy_authority",
+        "installation_policy_v2_authority",
         "installation_policy_format",
         "installation_policy_path",
     ]
     .iter()
-    .any(|field| value.get(field).is_some()))
+    .any(|field| value.get(field).is_some())
 }
 
 /// Compute is an independent consumer of the installation selector. Installed
 /// binaries use the fixed canonical installation root, never an environment
 /// supplied compute-data directory, so direct execution cannot choose a
-/// different selector path. Source-built TestLab binaries without an installed
-/// release manifest retain their existing non-installed behavior.
+/// different selector path. Source-built TestLab binaries paired with a valid
+/// legacy manifest that has no selector-authority fields retain their existing
+/// non-installed behavior.
 pub fn deny_compute_startup_access() -> Result<()> {
     let executable =
         std::env::current_exe().map_err(|_| "compute executable identity is unavailable")?;
-    let installed_manifest_present =
-        match fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH) {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => return Err("installed release manifest cannot be observed"),
-        };
-    if executable != Path::new("/usr/local/bin/o3k-compute") && !installed_manifest_present {
+    if executable != Path::new("/usr/local/bin/o3k-compute")
+        && !fixed_release_manifest_requires_selector()?
+    {
         return Ok(());
     }
     deny_operational_access(Path::new("/var/lib/o3k"))
@@ -1899,6 +1904,17 @@ mod tests {
             result,
             Err("installed executable cannot select a different data root")
         );
+    }
+
+    #[test]
+    fn v2_only_release_authority_requires_selector_for_every_consumer() {
+        assert!(manifest_requires_selector(
+            br#"{"installation_policy_v2_authority":{"key_id":"policy-v2"}}"#
+        ));
+        assert!(!manifest_requires_selector(
+            br#"{"version":"0.4.0-rc.5","source_commit":"legacy-source-fixture"}"#
+        ));
+        assert!(manifest_requires_selector(b"not-json"));
     }
 
     fn key_hex(key: &ed25519_dalek::VerifyingKey) -> String {
