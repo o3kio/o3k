@@ -458,5 +458,51 @@ mod tests {
             ),
             Err(SelectorError::Binding)
         ));
+
+        let other_key = SigningKey::from_bytes(&[10u8; 32]);
+        assert!(matches!(
+            verify_migration(
+                &bytes,
+                "policy",
+                &other_key.verifying_key(),
+                &MigrationBindings {
+                    prior_sequence: 4,
+                    prior_tip_digest: &"1".repeat(64),
+                    prior_policy_digest: &"2".repeat(64),
+                    prior_policy_revision: 5,
+                    new_policy_digest: &"3".repeat(64),
+                    prior_manifest_digest: &"4".repeat(64),
+                    new_manifest_digest: &"5".repeat(64),
+                    target_device: 7,
+                    target_inode: 8,
+                    trust_digest: &"6".repeat(64),
+                },
+            ),
+            Err(SelectorError::Signature)
+        ));
+
+        let mut wrong_release = migration.clone();
+        wrong_release.prior_release_identity.profile_id = "wrong-profile".into();
+        let wrong_release_bytes = signed(MIGRATION_FORMAT, &wrong_release, &key, "policy");
+        assert!(
+            verify_migration(
+                &wrong_release_bytes,
+                "policy",
+                &key.verifying_key(),
+                &MigrationBindings {
+                    prior_sequence: 4,
+                    prior_tip_digest: &"1".repeat(64),
+                    prior_policy_digest: &"2".repeat(64),
+                    prior_policy_revision: 5,
+                    new_policy_digest: &"3".repeat(64),
+                    prior_manifest_digest: &"4".repeat(64),
+                    new_manifest_digest: &"5".repeat(64),
+                    target_device: 7,
+                    target_inode: 8,
+                    trust_digest: &"6".repeat(64),
+                },
+            )
+            .is_err()
+        );
     }
 }

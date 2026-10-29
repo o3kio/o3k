@@ -1374,6 +1374,43 @@ fn validate_command_with_deadline(
     Ok(())
 }
 
+#[cfg(test)]
+mod startup_admission_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn startup_admission_is_consumed_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let mut admission = Some(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+
+        assert!(run_startup_admission(&mut admission).await.is_ok());
+        assert!(run_startup_admission(&mut admission).await.is_ok());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(admission.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_admission_error_is_terminal() {
+        let mut admission = Some(|| async { Err(AgentError::Protocol("denied".to_owned())) });
+
+        let result = run_startup_admission(&mut admission).await;
+        assert!(matches!(result, Err(AgentError::StartupAdmission(_))));
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(is_terminal_startup_admission_error)
+        );
+        assert!(admission.is_none());
+    }
+}
+
 fn validate_command_action(
     command: &proto::Command,
     require_live_transfers: bool,
@@ -4394,7 +4431,7 @@ impl AgentClient {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     warn!(error = ?error, "compute-agent control connection lost");
-                    if matches!(&error, AgentError::StartupAdmission(_)) {
+                    if is_terminal_startup_admission_error(&error) {
                         return Err(error);
                     }
                 }
@@ -4505,11 +4542,7 @@ impl AgentClient {
             }
         };
         validate_register_response(&register, agent_id, &epoch)?;
-        if let Some(admission) = startup_admission.take() {
-            admission()
-                .await
-                .map_err(|error| AgentError::StartupAdmission(error.to_string()))?;
-        }
+        run_startup_admission(&mut *startup_admission).await?;
         // Publish the validated epoch before `ready` flips to true so a
         // concurrent loopback /readyz can never observe ready-without-epoch
         // (issue #617).
@@ -4764,6 +4797,23 @@ impl AgentClient {
             }
         }
     }
+}
+
+fn is_terminal_startup_admission_error(error: &AgentError) -> bool {
+    matches!(error, AgentError::StartupAdmission(_))
+}
+
+async fn run_startup_admission<C, Fut>(startup_admission: &mut Option<C>) -> Result<(), AgentError>
+where
+    C: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), AgentError>> + Send + 'static,
+{
+    if let Some(admission) = startup_admission.take() {
+        admission()
+            .await
+            .map_err(|error| AgentError::StartupAdmission(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn install_crypto_provider() {

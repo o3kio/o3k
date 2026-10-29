@@ -44,49 +44,42 @@ mount --bind "$POLICY" /etc/o3k/installation-policy.json
 mount --bind "$DATA" /var/lib/o3k
 exec "$BIN"
 "#;
-    let status = Command::new("unshare")
-        .args([
-            "--mount",
-            "--fork",
-            "--propagation",
-            "private",
-            "sh",
-            "-c",
-            script,
-        ])
-        .env("BIN", binary)
-        .env("MANIFEST", &manifest)
-        .env("POLICY", &policy)
-        .env("DATA", &data)
-        .env("O3K_COMPUTE_DATA_DIR", &data)
-        .env("O3K_COMPUTE_NETWORK_ROOT", &network)
-        .env("O3K_COMPUTE_TLS_DIR", &tls)
-        .env("O3K_COMPUTE_CONTROL_ENDPOINT", "https://127.0.0.1:1")
-        .env("O3K_COMPUTE_HEALTH_ADDR", "127.0.0.1:1")
-        .env("RUST_LOG", "off")
-        .output()
-        .expect("invoke unshare");
-    assert!(
-        !status.status.success(),
-        "invalid selector must deny startup"
-    );
-    assert!(
-        fs::read_dir(&data)
-            .expect("inspect data sentinel")
-            .next()
-            .is_none()
-    );
-    assert!(
-        fs::read_dir(&network)
-            .expect("inspect network sentinel")
-            .next()
-            .is_none()
-    );
-    assert!(
-        fs::read_dir(&tls)
-            .expect("inspect TLS sentinel")
-            .next()
-            .is_none()
-    );
+    for attempt in 1..=2 {
+        let status = Command::new("unshare")
+            .args([
+                "--mount",
+                "--fork",
+                "--propagation",
+                "private",
+                "sh",
+                "-c",
+                script,
+            ])
+            .env("BIN", &binary)
+            .env("MANIFEST", &manifest)
+            .env("POLICY", &policy)
+            .env("DATA", &data)
+            .env("O3K_COMPUTE_DATA_DIR", &data)
+            .env("O3K_COMPUTE_NETWORK_ROOT", &network)
+            .env("O3K_COMPUTE_TLS_DIR", &tls)
+            .env("O3K_COMPUTE_CONTROL_ENDPOINT", "https://127.0.0.1:1")
+            .env("O3K_COMPUTE_HEALTH_ADDR", "127.0.0.1:1")
+            .env("RUST_LOG", "off")
+            .output()
+            .expect("invoke unshare");
+        assert!(
+            !status.status.success(),
+            "invalid selector must deny startup on attempt {attempt}"
+        );
+        for (name, path) in [("data", &data), ("network", &network), ("TLS", &tls)] {
+            assert!(
+                fs::read_dir(path)
+                    .expect("inspect side-effect sentinel")
+                    .next()
+                    .is_none(),
+                "{name} sentinel changed on restart attempt {attempt}"
+            );
+        }
+    }
     let _ = fs::remove_dir_all(root);
 }
