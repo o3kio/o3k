@@ -1739,16 +1739,17 @@ If any supported path still contains a v1-only executable, the migrator must
 not publish the selector. A crash while executable replacement is incomplete
 leaves the active v1 generation unchanged; both old and new executables may
 then operate only under v1 rules. After all installed paths are verified as
-v2-capable, the migrator atomically publishes the v2 policy, policy
-high-water, and new release manifest from the byte-identical staged inputs,
-with file fsync, same-directory rename, directory fsync, authenticated
-readback, and exact binding checks at each boundary. The migration event is
-then the durable denial for every newly installed verifier, including the
-compute service. While any required byte or verifier is absent or mixed, the
-v2 verifier fails before the side effects listed above. Only after the
-complete coherent generation and every boot, systemd, CLI operational,
-maintenance, upgrade, rollback, and provider entry point have been read back
-and shown to use the v2 verifier may the migrator release the D8 guard.
+v2-capable, the already durable selector event permits the migrator to
+atomically publish the v2 policy, policy high-water, and new release manifest
+from the byte-identical staged inputs, with file fsync, same-directory rename,
+directory fsync, authenticated readback, and exact binding checks at each
+boundary. The migration event remains the durable denial selector for every
+newly installed verifier, including the compute service. While any required
+byte or verifier is absent or mixed, the v2 verifier fails before the side
+effects listed above. Only after the complete coherent generation and every
+boot, systemd, CLI operational, maintenance, upgrade, rollback, and provider
+entry point have been read back and shown to use the v2 verifier may the
+migrator release the D8 guard.
 Systemd may restart a service after a crash; the verifier gate, rather than
 systemd ordering or the flock, must deny unsafe startup.
 

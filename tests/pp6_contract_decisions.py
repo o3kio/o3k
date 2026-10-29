@@ -1006,5 +1006,24 @@ class ProposedInstallationPolicyV2Tests(unittest.TestCase):
             migration_event_valid=False, downgrade=False))
 
 
+class A10PublicationOrderContractTests(unittest.TestCase):
+    def test_active_policy_publication_follows_durable_state_selector(self):
+        spec = (Path(__file__).resolve().parents[1] / "docs/specs" /
+                "SPEC-0050-pp6-control-plane-backup-restore.md").read_text()
+        section = spec.split("### 7.4 Proposed amendment A10.1", 1)[1].split(
+            "### 7.5", 1)[0]
+        selector = section.index(
+            "The first publication that changes the selected recovery format")
+        policy_publication = section.index(
+            "the already durable selector event permits the migrator to")
+        self.assertLess(selector, policy_publication)
+        self.assertNotIn(
+            "The migration event is then the durable denial",
+            section)
+        self.assertIn(
+            "The migration event remains the durable denial selector",
+            section)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
