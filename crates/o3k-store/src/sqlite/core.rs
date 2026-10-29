@@ -1352,7 +1352,7 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         let result = async {
-            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > datetime('now') AS active FROM work_leases WHERE work_key=?")
+            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > strftime('%Y-%m-%d %H:%M:%f', 'now') AS active FROM work_leases WHERE work_key=?")
                 .bind(realm_work_key).fetch_optional(&mut *connection).await.map_err(StoreError::Database)?.ok_or(StoreError::Fenced)?;
             if lease.get::<String, _>("owner_controller_id") != controller_id
                 || lease.get::<String, _>("owner_controller_epoch") != controller_epoch
@@ -1474,7 +1474,7 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         let result = async {
-            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > datetime('now') AS active FROM work_leases WHERE work_key=?")
+            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > strftime('%Y-%m-%d %H:%M:%f', 'now') AS active FROM work_leases WHERE work_key=?")
                 .bind(realm_work_key).fetch_optional(&mut *connection).await.map_err(StoreError::Database)?;
             let Some(lease) = lease else { return Err(StoreError::Fenced); };
             if lease.get::<String, _>("owner_controller_id") != controller_id
@@ -1529,7 +1529,7 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         let result = async {
-            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > datetime('now') AS active FROM work_leases WHERE work_key=?")
+            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > strftime('%Y-%m-%d %H:%M:%f', 'now') AS active FROM work_leases WHERE work_key=?")
                 .bind(realm_work_key).fetch_optional(&mut *connection).await.map_err(StoreError::Database)?;
             let Some(lease) = lease else { return Err(StoreError::Fenced); };
             if lease.get::<String, _>("owner_controller_id") != controller_id
