@@ -8,6 +8,17 @@ use crate::{PostgresStore, SqliteStore, StoreError, is_sqlite_busy};
 
 pub type FencingToken = u64;
 
+fn sqlite_lease_ttl_modifier(ttl: Duration) -> String {
+    let ttl_millis = ttl.as_millis();
+    let fractional_millisecond = !ttl.subsec_nanos().is_multiple_of(1_000_000);
+    let rounded_millis = ttl_millis + u128::from(fractional_millisecond);
+    format!(
+        "+{}.{:03} seconds",
+        rounded_millis / 1_000,
+        rounded_millis % 1_000
+    )
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -736,8 +747,7 @@ impl CoordinationRepository for SqliteStore {
         controller_epoch: &ControllerEpoch,
         ttl: Duration,
     ) -> Result<LeaseAcquireOutcome, StoreError> {
-        let ttl_secs = ttl.as_secs();
-        let ttl_mod = format!("+{ttl_secs} seconds");
+        let ttl_mod = sqlite_lease_ttl_modifier(ttl);
 
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
@@ -745,7 +755,7 @@ impl CoordinationRepository for SqliteStore {
             r#"
             SELECT work_key, work_kind, owner_controller_id, owner_controller_epoch,
                    fencing_token, lease_until, created_at, updated_at,
-                   (lease_until < datetime('now')) AS is_expired
+                   (lease_until < strftime('%Y-%m-%d %H:%M:%f', 'now')) AS is_expired
             FROM work_leases
             WHERE work_key = ?1;
             "#,
@@ -778,7 +788,7 @@ impl CoordinationRepository for SqliteStore {
                         work_key, work_kind, owner_controller_id, owner_controller_epoch,
                         fencing_token, lease_until, created_at, updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', ?6), datetime('now'), datetime('now'));
+                    VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%d %H:%M:%f', 'now', ?6), datetime('now'), datetime('now'));
                     "#,
                 )
                 .bind(work_key)
@@ -831,7 +841,7 @@ impl CoordinationRepository for SqliteStore {
                     sqlx::query(
                         r#"
                         UPDATE work_leases
-                        SET lease_until = datetime('now', ?2),
+                        SET lease_until = strftime('%Y-%m-%d %H:%M:%f', 'now', ?2),
                             updated_at = datetime('now')
                         WHERE work_key = ?1;
                         "#,
@@ -875,7 +885,7 @@ impl CoordinationRepository for SqliteStore {
                         SET owner_controller_id = ?2,
                             owner_controller_epoch = ?3,
                             fencing_token = fencing_token + 1,
-                            lease_until = datetime('now', ?4),
+                            lease_until = strftime('%Y-%m-%d %H:%M:%f', 'now', ?4),
                             updated_at = datetime('now')
                         WHERE work_key = ?1;
                         "#,
@@ -937,19 +947,18 @@ impl CoordinationRepository for SqliteStore {
         fencing_token: FencingToken,
         ttl: Duration,
     ) -> Result<bool, StoreError> {
-        let ttl_secs = ttl.as_secs();
-        let ttl_mod = format!("+{ttl_secs} seconds");
+        let ttl_mod = sqlite_lease_ttl_modifier(ttl);
 
         let result = sqlx::query(
             r#"
             UPDATE work_leases
-            SET lease_until = datetime('now', ?5),
+            SET lease_until = strftime('%Y-%m-%d %H:%M:%f', 'now', ?5),
                 updated_at = datetime('now')
             WHERE work_key = ?1
               AND owner_controller_id = ?2
               AND owner_controller_epoch = ?3
               AND fencing_token = ?4
-              AND lease_until >= datetime('now');
+              AND lease_until >= strftime('%Y-%m-%d %H:%M:%f', 'now');
             "#,
         )
         .bind(work_key)
@@ -1074,5 +1083,71 @@ impl CoordinationRepository for SqliteStore {
         }
 
         Ok(sessions)
+    }
+}
+
+#[cfg(test)]
+mod sqlite_work_lease_precision_tests {
+    use super::{
+        ControllerEpoch, ControllerId, CoordinationRepository, LeaseAcquireOutcome,
+        sqlite_lease_ttl_modifier,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn sqlite_lease_ttl_rounds_up_to_supported_timestamp_precision() {
+        assert_eq!(
+            sqlite_lease_ttl_modifier(Duration::from_micros(500)),
+            "+0.001 seconds"
+        );
+        assert_eq!(
+            sqlite_lease_ttl_modifier(Duration::from_millis(1_999)),
+            "+1.999 seconds"
+        );
+        assert_eq!(
+            sqlite_lease_ttl_modifier(Duration::from_secs(2)),
+            "+2.000 seconds"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_work_lease_renewal_preserves_fractional_seconds()
+    -> Result<(), crate::StoreError> {
+        let store = crate::testkit::open_memory().await?;
+        let work_key = "sqlite-fractional-lease";
+        let controller_a = ControllerId::new("controller-a");
+        let epoch_a = ControllerEpoch::new("epoch-a");
+        let ttl = Duration::from_millis(1_999);
+        let LeaseAcquireOutcome::Acquired { lease } = store
+            .acquire_work_lease(work_key, "test", &controller_a, &epoch_a, ttl)
+            .await?
+        else {
+            return Err(crate::StoreError::Corrupt(
+                "new fractional SQLite work lease was unexpectedly busy".into(),
+            ));
+        };
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert!(
+            store
+                .renew_work_lease(work_key, &controller_a, &epoch_a, lease.fencing_token, ttl,)
+                .await?
+        );
+
+        let controller_b = ControllerId::new("controller-b");
+        let epoch_b = ControllerEpoch::new("epoch-b");
+        assert!(matches!(
+            store
+                .acquire_work_lease(
+                    work_key,
+                    "test",
+                    &controller_b,
+                    &epoch_b,
+                    Duration::from_secs(30),
+                )
+                .await?,
+            LeaseAcquireOutcome::Busy { .. }
+        ));
+        Ok(())
     }
 }
