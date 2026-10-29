@@ -35,6 +35,7 @@
 # it), and that no foreign fixture file was modified (byte-level snapshot of
 # binaries, manifests, config, and database).
 set -Eeuo pipefail
+umask 0022
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-upgrade-process.XXXXXX")"

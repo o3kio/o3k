@@ -108,6 +108,14 @@ fn deny_installed_executable_access(
 ) -> Result<()> {
     let executable =
         std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
+    deny_installed_executable_access_for(configured_data_dir, &executable, installed_executable)
+}
+
+fn deny_installed_executable_access_for(
+    configured_data_dir: &Path,
+    executable: &Path,
+    installed_executable: &Path,
+) -> Result<()> {
     if executable == installed_executable || configured_data_dir == Path::new("/var/lib/o3k") {
         if configured_data_dir != Path::new("/var/lib/o3k") {
             return Err("installed executable cannot select a different data root");
@@ -1815,6 +1823,32 @@ mod tests {
 
     fn keypair(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
+    }
+
+    #[test]
+    fn installed_control_plane_executable_rejects_custom_data_root() {
+        let result = deny_installed_executable_access_for(
+            Path::new("/tmp/o3k-upgrade-fixture/data"),
+            Path::new("/usr/local/bin/o3kd"),
+            Path::new("/usr/local/bin/o3kd"),
+        );
+        assert_eq!(
+            result,
+            Err("installed executable cannot select a different data root")
+        );
+    }
+
+    #[test]
+    fn installed_operator_executable_rejects_custom_data_root() {
+        let result = deny_installed_executable_access_for(
+            Path::new("/tmp/o3k-upgrade-fixture/data"),
+            Path::new("/usr/local/bin/o3k"),
+            Path::new("/usr/local/bin/o3k"),
+        );
+        assert_eq!(
+            result,
+            Err("installed executable cannot select a different data root")
+        );
     }
 
     fn key_hex(key: &ed25519_dalek::VerifyingKey) -> String {

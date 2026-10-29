@@ -751,9 +751,9 @@ fn run_upgrade_cli(
     assume_yes: bool,
     json: bool,
 ) -> ExitCode {
-    if let Err(reason) =
-        o3k::recovery_installation::deny_operator_startup_access(Path::new("/var/lib/o3k"))
-    {
+    if let Err(reason) = o3k::recovery_installation::deny_operator_startup_access(
+        &o3k::upgrade::state::default_data_dir(),
+    ) {
         eprintln!("o3k upgrade: installation authority denied: {reason}");
         return ExitCode::from(1);
     }
@@ -781,9 +781,9 @@ fn run_upgrade_cli(
 }
 
 fn run_rollback_cli(json: bool) -> ExitCode {
-    if let Err(reason) =
-        o3k::recovery_installation::deny_operator_startup_access(Path::new("/var/lib/o3k"))
-    {
+    if let Err(reason) = o3k::recovery_installation::deny_operator_startup_access(
+        &o3k::upgrade::state::default_data_dir(),
+    ) {
         eprintln!("o3k rollback: installation authority denied: {reason}");
         return ExitCode::from(1);
     }

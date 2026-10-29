@@ -39,7 +39,7 @@ mkdir -p /usr/local/share/o3k /etc/o3k /var/lib/o3k
 mount --bind "$MANIFEST" /usr/local/share/o3k/release-manifest.json
 mount --bind "$POLICY" /etc/o3k/installation-policy.json
 mount --bind "$DATA" /var/lib/o3k
-exec "$BIN" 
+exec "$BIN"
 "#;
     let status = Command::new("unshare")
         .args([
