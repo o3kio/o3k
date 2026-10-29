@@ -90,7 +90,8 @@ pub fn deny_operator_startup_access(configured_data_dir: &Path) -> Result<()> {
 pub fn verify_operator_installation_selector(configured_data_dir: &Path) -> Result<()> {
     let executable =
         std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
-    if executable == Path::new("/usr/local/bin/o3k")
+    if fixed_release_manifest_present()?
+        || executable == Path::new("/usr/local/bin/o3k")
         || configured_data_dir == Path::new("/var/lib/o3k")
     {
         if configured_data_dir != Path::new("/var/lib/o3k") {
@@ -108,21 +109,38 @@ fn deny_installed_executable_access(
 ) -> Result<()> {
     let executable =
         std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
-    deny_installed_executable_access_for(configured_data_dir, &executable, installed_executable)
+    deny_installed_executable_access_for(
+        configured_data_dir,
+        &executable,
+        installed_executable,
+        fixed_release_manifest_present()?,
+    )
 }
 
 fn deny_installed_executable_access_for(
     configured_data_dir: &Path,
     executable: &Path,
     installed_executable: &Path,
+    installed_manifest_present: bool,
 ) -> Result<()> {
-    if executable == installed_executable || configured_data_dir == Path::new("/var/lib/o3k") {
+    if installed_manifest_present
+        || executable == installed_executable
+        || configured_data_dir == Path::new("/var/lib/o3k")
+    {
         if configured_data_dir != Path::new("/var/lib/o3k") {
             return Err("installed executable cannot select a different data root");
         }
         deny_operational_access(Path::new("/var/lib/o3k"))
     } else {
         deny_operational_access(configured_data_dir)
+    }
+}
+
+fn fixed_release_manifest_present() -> Result<bool> {
+    match fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("installed release manifest cannot be observed"),
     }
 }
 
@@ -1831,6 +1849,7 @@ mod tests {
             Path::new("/tmp/o3k-upgrade-fixture/data"),
             Path::new("/usr/local/bin/o3kd"),
             Path::new("/usr/local/bin/o3kd"),
+            false,
         );
         assert_eq!(
             result,
@@ -1844,6 +1863,21 @@ mod tests {
             Path::new("/tmp/o3k-upgrade-fixture/data"),
             Path::new("/usr/local/bin/o3k"),
             Path::new("/usr/local/bin/o3k"),
+            false,
+        );
+        assert_eq!(
+            result,
+            Err("installed executable cannot select a different data root")
+        );
+    }
+
+    #[test]
+    fn installed_manifest_rejects_alternate_executable_data_root() {
+        let result = deny_installed_executable_access_for(
+            Path::new("/tmp/o3k-upgrade-fixture/data"),
+            Path::new("/opt/o3k/releases/current/bin/o3k"),
+            Path::new("/usr/local/bin/o3k"),
+            true,
         );
         assert_eq!(
             result,
