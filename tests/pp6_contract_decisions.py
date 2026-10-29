@@ -1010,8 +1010,9 @@ class A10PublicationOrderContractTests(unittest.TestCase):
     def test_active_policy_publication_follows_durable_state_selector(self):
         spec = (Path(__file__).resolve().parents[1] / "docs/specs" /
                 "SPEC-0050-pp6-control-plane-backup-restore.md").read_text()
-        section = spec.split("### 7.4 Proposed amendment A10.1", 1)[1].split(
+        section = spec.split("### 7.4 Accepted amendment A10.1", 1)[1].split(
             "### 7.5", 1)[0]
+        self.assertIn("issuecomment-6504152604", section)
         selector = section.index(
             "The first publication that changes the selected recovery format")
         policy_publication = section.index(
@@ -1023,6 +1024,16 @@ class A10PublicationOrderContractTests(unittest.TestCase):
         self.assertIn(
             "The migration event remains the durable denial selector",
             section)
+
+    def test_accepted_policy_schemas_do_not_claim_owner_decision_is_pending(self):
+        root = Path(__file__).resolve().parents[1] / "contracts"
+        for name in ("o3k-installation-policy-v2.proposed.schema.json",
+                     "o3k-installation-policy-migration-v1.proposed.schema.json"):
+            with self.subTest(schema=name):
+                schema = json.loads((root / name).read_text())
+                description = schema["description"].lower()
+                self.assertIn("accepted a10.1 schema", description)
+                self.assertNotIn("until owner accept", description)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://o3k.io/contracts/o3k-installation-policy-migration-v1.proposed.schema.json",
-  "title": "Proposed O3K installation policy migration event",
-  "description": "Proposed contract only; it has no runtime authority until owner ACCEPT against an exact reviewed PR head.",
+  "title": "O3K installation policy migration event (accepted A10.1 contract)",
+  "description": "Accepted A10.1 schema. Runtime verification and production evidence remain unimplemented.",
   "type": "object",
   "additionalProperties": false,
   "required": ["payload", "envelope"],

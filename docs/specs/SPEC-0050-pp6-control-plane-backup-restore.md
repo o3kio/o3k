@@ -1479,9 +1479,9 @@ current trust failing closed; and rotation granting no activation. Passing
 these tests does not replace the installed-candidate, real offline-signer,
 supported-systemd-host, or independent-security gates.
 
-### 7.4 Proposed amendment A10.1 — versioned signed installation policy
+### 7.4 Accepted amendment A10.1 — versioned signed installation policy
 
-**Decision status: proposed; not accepted normative authority.** This narrow
+**Accepted for implementation/testing by owner decision** [6504152604](https://github.com/o3kio/o3k/pull/1192#issuecomment-6504152604), reviewing PR #1192 exact head `c8ab0a6f1b21bddc70ef46e34357f62ad64e6db4`, merged as `e14601645ba85bb039c41b31c85b7619cb522d67`. The review is non-independent under ADR-0190. This acceptance does not establish runtime, installed, production, independent-security, A10 target-mutation, controller-activation, or final PP.6 evidence. This narrow
 contract correction resolves the mismatch between A10's required explicit
 inactive-branch selection and C1's frozen `o3k-installation-policy-v1`, which
 has no deployment field or A10 authorization field. The v1 schema, signature
@@ -1504,7 +1504,7 @@ v1-to-v2 migration in §7.4.2; there is no v2 genesis or direct-install
 shortcut. A new installation first establishes the ordinary v1 policy and
 state, then completes the same explicit migration before A10 can be selected.
 Therefore `policy_revision` is at least 2 and is exactly the prior v1 policy
-revision plus one. The proposed strict schema is
+revision plus one. The accepted strict schema is
 [`o3k-installation-policy-v2.proposed.schema.json`](../../contracts/o3k-installation-policy-v2.proposed.schema.json):
 
 | Field | Required value and binding |
