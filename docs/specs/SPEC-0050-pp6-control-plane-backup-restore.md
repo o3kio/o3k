@@ -1479,9 +1479,9 @@ current trust failing closed; and rotation granting no activation. Passing
 these tests does not replace the installed-candidate, real offline-signer,
 supported-systemd-host, or independent-security gates.
 
-### 7.4 Proposed amendment A10.1 — versioned signed installation policy
+### 7.4 Accepted amendment A10.1 — versioned signed installation policy
 
-**Decision status: proposed; not accepted normative authority.** This narrow
+**Accepted for implementation/testing by owner decision** [6504152604](https://github.com/o3kio/o3k/pull/1192#issuecomment-6504152604), reviewing PR #1192 exact head `c8ab0a6f1b21bddc70ef46e34357f62ad64e6db4`, merged as `e14601645ba85bb039c41b31c85b7619cb522d67`. The review is non-independent under ADR-0190. This acceptance does not establish runtime, installed, production, independent-security, A10 target-mutation, controller-activation, or final PP.6 evidence. This narrow
 contract correction resolves the mismatch between A10's required explicit
 inactive-branch selection and C1's frozen `o3k-installation-policy-v1`, which
 has no deployment field or A10 authorization field. The v1 schema, signature
@@ -1504,7 +1504,7 @@ v1-to-v2 migration in §7.4.2; there is no v2 genesis or direct-install
 shortcut. A new installation first establishes the ordinary v1 policy and
 state, then completes the same explicit migration before A10 can be selected.
 Therefore `policy_revision` is at least 2 and is exactly the prior v1 policy
-revision plus one. The proposed strict schema is
+revision plus one. The accepted strict schema is
 [`o3k-installation-policy-v2.proposed.schema.json`](../../contracts/o3k-installation-policy-v2.proposed.schema.json):
 
 | Field | Required value and binding |
@@ -1739,16 +1739,17 @@ If any supported path still contains a v1-only executable, the migrator must
 not publish the selector. A crash while executable replacement is incomplete
 leaves the active v1 generation unchanged; both old and new executables may
 then operate only under v1 rules. After all installed paths are verified as
-v2-capable, the migrator atomically publishes the v2 policy, policy
-high-water, and new release manifest from the byte-identical staged inputs,
-with file fsync, same-directory rename, directory fsync, authenticated
-readback, and exact binding checks at each boundary. The migration event is
-then the durable denial for every newly installed verifier, including the
-compute service. While any required byte or verifier is absent or mixed, the
-v2 verifier fails before the side effects listed above. Only after the
-complete coherent generation and every boot, systemd, CLI operational,
-maintenance, upgrade, rollback, and provider entry point have been read back
-and shown to use the v2 verifier may the migrator release the D8 guard.
+v2-capable, the already durable selector event permits the migrator to
+atomically publish the v2 policy, policy high-water, and new release manifest
+from the byte-identical staged inputs, with file fsync, same-directory rename,
+directory fsync, authenticated readback, and exact binding checks at each
+boundary. The migration event remains the durable denial selector for every
+newly installed verifier, including the compute service. While any required
+byte or verifier is absent or mixed, the v2 verifier fails before the side
+effects listed above. Only after the complete coherent generation and every
+boot, systemd, CLI operational, maintenance, upgrade, rollback, and provider
+entry point have been read back and shown to use the v2 verifier may the
+migrator release the D8 guard.
 Systemd may restart a service after a crash; the verifier gate, rather than
 systemd ordering or the flock, must deny unsafe startup.
 
