@@ -1687,8 +1687,22 @@ read-only access to the authenticated selector and verification inputs, or
 provide an equivalently trusted in-process read path. It must not grant the
 compute identity write access to recovery state, policy, trust, or journal
 files. A systemd `ExecStartPre` check alone is insufficient because direct
-execution of the installed binary must enforce the same gate. Tests must prove
-both the access boundary and denial before compute startup side effects.
+execution of the installed binary must enforce the same gate.
+
+The compute process must also remain quiescent while the migrator holds the
+live D8 guard, including when systemd restarts it while v1 remains selected.
+Before an authenticated control-plane session is established, it must defer
+all provider-side effects, including startup cleanup and artifact pruning,
+DHCP/network reconciliation, domain restoration, provider readiness and
+command dispatch. The session is admissible only from an
+`o3kd` instance that acquired the same D8 guard and passed its installed
+selector and policy checks before accepting agents. During migration the
+guard prevents that `o3kd` from starting; after a crash, a v1-selected
+installation may resume only after a compliant `o3kd` obtains the guard, and
+a v2-selected incomplete installation remains denied. Direct execution of
+`o3k-compute` must enforce the same defer-and-deny behavior. Tests must prove
+the read-only access boundary, absence of provider-side effects during live
+migration, and denial before such effects after durable v2 selection.
 
 If any supported path still contains a v1-only executable, the migrator must
 not publish the selector. A crash while executable replacement is incomplete
@@ -1770,6 +1784,7 @@ suites are:
 | D8-A10-11 | Migration event durable; v2 verifier sees stale clock, expired/revoked signer, missing trust, or mismatched device/inode | Deny before store; clock rollback does not relax sequence/high-water |
 | D8-A10-12 | Complete v2 policy with `INACTIVE_VERIFIED` journal tip | Deny controller/API readiness, lease acquisition, reconciliation, and provider dispatch |
 | D8-A10-13 | Crash after migration selection while `o3k-compute` restarts and attempts startup cleanup/domain restoration | Its dual verifier denies before cleanup, restoration, agent readiness, or provider dispatch; a v1-only compute executable at a supported path makes selector publication invalid |
+| D8-A10-14 | `o3k-compute` restarts while the migrator holds D8 and v1 remains selected | It remains unready and performs no cleanup, reconciliation, restoration, or dispatch until an authenticated session from a D8-admitted `o3kd` exists; during migration no such session can be admitted |
 
 These vectors are deterministic state fixtures, not current runtime evidence.
 The implementation PR must turn each applicable vector into a failure-first
