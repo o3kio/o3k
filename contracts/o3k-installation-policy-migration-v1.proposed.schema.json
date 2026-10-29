@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/o3k-installation-policy-migration-v1.proposed.schema.json",
+  "title": "Proposed O3K installation policy migration event",
+  "description": "Proposed contract only; it has no runtime authority until owner ACCEPT against an exact reviewed PR head.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "envelope"],
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format", "installation_id", "site_id", "sequence",
+        "prior_record_digest", "preserved_state", "prior_policy_format",
+        "prior_policy_revision", "prior_policy_digest", "new_policy_format",
+        "new_policy_revision", "new_policy_digest",
+        "prior_release_manifest_sha256", "new_release_manifest_sha256",
+        "prior_release_identity", "new_release_identity", "target_device",
+        "target_inode", "trust_bundle_digest", "checkpoint_digest",
+        "signer_manifest_digest"
+      ],
+      "properties": {
+        "format": {"const": "o3k-installation-policy-migration-v1"},
+        "installation_id": {"type": "string", "minLength": 1},
+        "site_id": {"type": "string", "minLength": 1},
+        "sequence": {"type": "integer", "minimum": 1},
+        "prior_record_digest": {"$ref": "#/$defs/sha256"},
+        "preserved_state": {"enum": ["NEVER_RECOVERED", "RECOVERY_DESIGNATED", "RELEASED"]},
+        "prior_policy_format": {"const": "o3k-installation-policy-v1"},
+        "prior_policy_revision": {"type": "integer", "minimum": 1},
+        "prior_policy_digest": {"$ref": "#/$defs/sha256"},
+        "new_policy_format": {"const": "o3k-installation-policy-v2"},
+        "new_policy_revision": {"type": "integer", "minimum": 2},
+        "new_policy_digest": {"$ref": "#/$defs/sha256"},
+        "prior_release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "new_release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "prior_release_identity": {"$ref": "#/$defs/releaseIdentity"},
+        "new_release_identity": {"$ref": "#/$defs/releaseIdentity"},
+        "target_device": {"type": "integer", "minimum": 1},
+        "target_inode": {"type": "integer", "minimum": 1},
+        "trust_bundle_digest": {"$ref": "#/$defs/sha256"},
+        "checkpoint_digest": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "signer_manifest_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "signer_key_id", "signature"],
+      "properties": {
+        "algorithm": {"const": "Ed25519"},
+        "signer_key_id": {"type": "string", "minLength": 1},
+        "signature": {"type": "string", "pattern": "^[0-9a-f]{128}$"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "releaseIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source_commit", "release_artifact_sha256", "profile_id", "schema_version"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "release_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"const": "o3k-small-edge-v1"},
+        "schema_version": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

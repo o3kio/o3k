@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/o3k-installation-policy-v2.proposed.schema.json",
+  "title": "Proposed O3K installation policy v2",
+  "description": "Proposed contract only; it has no runtime authority until owner ACCEPT against an exact reviewed PR head.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "envelope"],
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format", "installation_id", "site_id", "profile", "backend",
+        "backend_version", "deployment", "restore_branch_authorization",
+        "release_identity", "release_version", "source_commit",
+        "release_manifest_sha256", "data_root", "target_device",
+        "target_inode", "policy_revision", "prior_policy_digest",
+        "policy_path", "trust_bundle_path", "trust_bundle_digest",
+        "recovery_state_root", "recovery_state_device", "recovery_state_inode",
+        "journal_directory", "journal_device", "journal_inode",
+        "journal_trust_root_id", "journal_trust_root_public_key",
+        "evidence_trust_root_id", "evidence_trust_root_public_key",
+        "signer_key_id"
+      ],
+      "properties": {
+        "format": {"const": "o3k-installation-policy-v2"},
+        "installation_id": {"type": "string", "minLength": 1},
+        "site_id": {"type": "string", "minLength": 1},
+        "profile": {"const": "o3k-small-edge-v1"},
+        "backend": {"const": "postgresql"},
+        "backend_version": {"const": "16"},
+        "deployment": {"const": "virtualized"},
+        "restore_branch_authorization": {"const": "inactive-materialization-only"},
+        "release_identity": {"$ref": "#/$defs/sha256"},
+        "release_version": {"type": "string", "minLength": 1},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "data_root": {"$ref": "#/$defs/absolutePath"},
+        "target_device": {"type": "integer", "minimum": 1},
+        "target_inode": {"type": "integer", "minimum": 1},
+        "policy_revision": {"type": "integer", "minimum": 2},
+        "prior_policy_digest": {"$ref": "#/$defs/sha256"},
+        "policy_path": {"const": "/etc/o3k/installation-policy.json"},
+        "trust_bundle_path": {"$ref": "#/$defs/absolutePath"},
+        "trust_bundle_digest": {"$ref": "#/$defs/sha256"},
+        "recovery_state_root": {"$ref": "#/$defs/absolutePath"},
+        "recovery_state_device": {"type": "integer", "minimum": 1},
+        "recovery_state_inode": {"type": "integer", "minimum": 1},
+        "journal_directory": {"$ref": "#/$defs/absolutePath"},
+        "journal_device": {"type": "integer", "minimum": 1},
+        "journal_inode": {"type": "integer", "minimum": 1},
+        "journal_trust_root_id": {"type": "string", "minLength": 1},
+        "journal_trust_root_public_key": {"$ref": "#/$defs/ed25519PublicKey"},
+        "evidence_trust_root_id": {"type": "string", "minLength": 1},
+        "evidence_trust_root_public_key": {"$ref": "#/$defs/ed25519PublicKey"},
+        "signer_key_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "signer_key_id", "signature"],
+      "properties": {
+        "algorithm": {"const": "Ed25519"},
+        "signer_key_id": {"type": "string", "minLength": 1},
+        "signature": {"type": "string", "pattern": "^[0-9a-f]{128}$"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ed25519PublicKey": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]*$"}
+  }
+}
