@@ -1615,29 +1615,220 @@ The migration implementation must use the durable same-directory
 fsync/rename/readback discipline and D8 recovery guard; this amendment does
 not itself implement that publisher.
 
-The root migrator first verifies the complete v1 state, both policies and
-release manifests, the migration event inputs, and the new v2-capable verifier.
-Before publishing any v2 selector or policy bytes, it acquires the existing
-exclusive D8 recovery/maintenance guard, stops listeners, controllers,
-workers, timers, and maintenance processes, and blocks startup, upgrade, and
-rollback execution. It stages and verifies the new release manifest and
-v2-capable verifier while this exclusion remains held. Only then may the
-migrator publish the exact-forward v1-to-v2 state/policy generation. It may
-release the guard only after authenticated readback proves the selected v2
-policy and every installed startup, upgrade, and rollback path uses a
-v2-capable verifier. A crash or partial publication leaves D8 exclusion in
-force; no old process or verifier may resume against a v2-selected state.
-Recovery under the guard can only complete the already authenticated exact
-forward migration or remain denied. This ordering does not add a second guard
-authority or allow an automatic upgrade to select v2.
+The process-held D8 `flock` coordinates live quiescence only. It is released
+by the kernel when the migrator exits or the host reboots; it is not a durable
+crash-denial mechanism. Crash denial is provided by the authenticated
+installation-state chain and the order below. No unrecognized marker is
+introduced. The migration event is the format selector and the durable
+migration-start record.
 
-Old verifiers continue to support v1 exactly. On a v2 policy or migration
-event they reject the unknown format/event and deny startup before store
-access. Upgrade must not replace an old verifier or release manifest until it
-has authenticated the complete migration preconditions. Rollback to a
-verifier that cannot validate v2 is denied before stopping services or
-replacing any installed file; v2-aware startup, maintenance, upgrade, rollback,
-and systemd paths must all share the same recovery-state exclusion.
+The root migrator authenticates the complete v1 state, both policies and
+release manifests, the exact migration event, and the v2-capable verifier.
+Preparation is not migration: until D8 is acquired, no policy, high-water,
+manifest, state-chain, or migration-staging bytes may be written. During
+preparation, the migrator makes the installed `o3k-compute` executable
+non-executable and durably reads back that mode, then stops and masks its
+systemd unit. It verifies the unit is inactive and masked and that no process
+with the installed executable's device/inode remains, including processes not
+started by systemd. Mode change is durable only after file and parent-directory
+fsync plus identity/mode readback; the persistent systemd mask is verified on
+disk to resolve to `/dev/null` after daemon reload. Failure of any check aborts
+before migration writes. This closes new systemd and direct `execve` starts
+while quiescence is established; it does not terminate an already-running
+process merely by changing mode. If
+preparation crashes before D8 acquisition, the v1 selector and complete active
+v1 policy generation are unchanged, so any process not yet stopped remains
+only under ordinary v1 rules; no A10 migration has started. After verified
+preparation, the migrator acquires the existing exclusive D8 guard, quiesces
+listeners, controllers, workers, timers, and maintenance processes, and blocks
+concurrent startup, upgrade, rollback, and maintenance while it holds the
+guard. If D8 acquisition fails or the migrator crashes after verified
+preparation but before selector publication, compute remains unavailable
+until the exact authenticated v1 executable is restored under a verified v1
+selector or the candidate replacement is completed. It writes and fsyncs new
+inputs only under inactive staging names first. It must not change
+the active release manifest, active policy, active policy high-water, active
+verifier, or active state tip during staging. A crash in this stage releases
+the flock, but the complete active v1 generation is byte-for-byte unchanged;
+ordinary v1 startup remains safe and the staged migration can be retried or
+removed by the authenticated v1 installer. No v2 staged file is an authority.
+
+The first publication that changes the selected recovery format is an atomic
+replacement of the existing `state.json` tip with the fully signed
+`o3k-installation-policy-migration-v1` event. The migrator fsyncs the new file,
+renames it in the protected state directory, fsyncs that directory, and reads
+back and authenticates the exact event before changing any remaining active
+recovery-generation file.
+Until that directory fsync/readback succeeds, it performs no subsequent
+recovery-generation publication. Before this selector publication, supported
+executable files are replaced from the already authenticated exact release
+candidate, one path at a time, using atomic same-directory replacement,
+directory fsync, and digest/readback verification against that candidate.
+The disabled compute path is atomically replaced with and verified against the
+candidate binary before execute permission is restored; the service remains
+masked until the candidate and its read-only selector gate are verified. If
+the migrator crashes in this interval, compute remains unavailable and cannot
+run the old ungated binary. Before selector publication, exact-forward resume
+may finish the replacement, or restore the exact authenticated old binary
+only after verifying the selector still selects v1. After selector
+publication, that restoration is forbidden. The active release manifest,
+policy, policy high-water and state tip remain v1 throughout executable
+replacement. Every crash during that
+replacement is therefore still governed by the unchanged v1 selector. A
+crash before the selector rename leaves the old v1 state tip; a crash between
+rename and
+directory fsync can recover only the old tip or the complete new tip. In the
+former case, the active v1 policy, high-water and release manifest remain
+unchanged, and the installed executables are the authenticated dual-verifier
+candidate. In the latter case, the selector is durable and migration has
+started. There is no crash
+image in which a v2 active policy or manifest exists with only the old v1
+selector.
+
+Once the migration event is durable, an old v1 `o3kd` or `o3k` verifier
+rejects its unknown state-event format before canonical-store open. The
+existing `o3k-compute` binary has no such verifier and cannot be relied upon
+to reject the event; it must have been replaced at every supported installed
+path before selector publication. Every v2 verifier selects v2 but must deny
+unless the active v2 policy, exact new manifest, policy high-water,
+state-chain digest/revision, and all installation bindings are present and
+mutually authenticated. A v2 verifier may never fall back to v1 when it sees
+the migration event. Thus the event itself is the durable
+startup/maintenance/upgrade/rollback denial across migrator crash and reboot
+for the required dual-verifier installed generation; the process-held flock
+is not claimed to survive either.
+
+Before publishing the selector, the migrator authenticates the exact release
+candidate and each executable digest, then installs and verifies a v2-capable
+verifier at every supported installed executable entry point:
+`o3kd`, `o3k`, `o3k-compute`, maintenance commands, upgrade, and rollback.
+These executables must continue to accept the unchanged v1 generation while
+the selector still selects v1, and must reject an incomplete v2 generation
+before any canonical-store open, listener readiness, lease acquisition,
+reconciliation, cleanup, domain restoration, or provider dispatch once the
+selector selects v2. In particular, the compute service is an independent
+systemd unit; its startup cleanup and domain-restoration work are provider-side
+effects and must run behind this same durable selector gate. Stopping it only
+while the migrator holds flock is insufficient because systemd can restart it
+after a crash.
+
+The current `o3k-compute` service identity cannot read the installed C1
+recovery state. The installed configuration must give the compute verifier
+read-only access to the authenticated selector and verification inputs, or
+provide an equivalently trusted in-process read path. It must not grant the
+compute identity write access to recovery state, policy, trust, or journal
+files. A systemd `ExecStartPre` check alone is insufficient because direct
+execution of the installed binary must enforce the same gate.
+
+The compute process must also remain quiescent while the migrator holds the
+live D8 guard, including when systemd restarts it while v1 remains selected.
+Before an authenticated control-plane session is established, it must defer
+all provider-side effects, including startup cleanup and artifact pruning,
+DHCP/network reconciliation, domain restoration, provider readiness and
+command dispatch. The session is admissible only from an
+`o3kd` instance that acquired the same D8 guard and passed its installed
+selector and policy checks before accepting agents. During migration the
+guard prevents that `o3kd` from starting; after a crash, a v1-selected
+installation may resume only after a compliant `o3kd` obtains the guard, and
+a v2-selected incomplete installation remains denied. Direct execution of
+`o3k-compute` must enforce the same defer-and-deny behavior. Tests must prove
+the read-only access boundary, absence of provider-side effects during live
+migration, and denial before such effects after durable v2 selection.
+
+If any supported path still contains a v1-only executable, the migrator must
+not publish the selector. A crash while executable replacement is incomplete
+leaves the active v1 generation unchanged; both old and new executables may
+then operate only under v1 rules. After all installed paths are verified as
+v2-capable, the migrator atomically publishes the v2 policy, policy
+high-water, and new release manifest from the byte-identical staged inputs,
+with file fsync, same-directory rename, directory fsync, authenticated
+readback, and exact binding checks at each boundary. The migration event is
+then the durable denial for every newly installed verifier, including the
+compute service. While any required byte or verifier is absent or mixed, the
+v2 verifier fails before the side effects listed above. Only after the
+complete coherent generation and every boot, systemd, CLI operational,
+maintenance, upgrade, rollback, and provider entry point have been read back
+and shown to use the v2 verifier may the migrator release the D8 guard.
+Systemd may restart a service after a crash; the verifier gate, rather than
+systemd ordering or the flock, must deny unsafe startup.
+
+After the migration event is durable, the only installer action permitted is
+byte-identical exact-forward completion from the authenticated staged inputs
+bound by that event. Missing, changed, unauthenticated, or conflicting input
+leaves the installation denied and requires bounded operator recovery under
+D8. The installer, upgrade CLI, rollback CLI, maintenance entry points, and
+systemd startup must reject partial repair, old-verifier rollback, release
+identity downgrade, and any rewrite of the authenticated event. Before the
+event is durable, no migration has been selected and ordinary supported v1
+operation/rollback rules continue to apply. This distinction is part of the
+contract and is covered by the crash vectors below.
+
+The crash outcomes are normative. “v1-only executable” means a protected
+C1/C1.1 executable that cannot read the migration selector; “dual verifier”
+means the future v2-capable executable required by this amendment, which
+continues to accept the unchanged v1 generation until selection. The current
+protected `o3kd`, `o3k`, and `o3k-compute` executables implement only v1
+behavior, and `o3k-compute` does not currently read the installed recovery
+state before startup cleanup or domain restoration. “Open” means canonical
+store access. “Ready/dispatch” includes API readiness, lease acquisition,
+compute-agent readiness, reconciliation, cleanup, domain restoration, or
+provider dispatch.
+
+| Crash boundary | Exact durable active bytes after recovery | v1 verifier | v2 verifier | Store open / ready / dispatch | Exact-forward installer | Rollback / repair / downgrade |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before quiescence | Original v1 manifest, policy, high-water, state tip, binaries; no migration staging | May start under v1 rules | If installed, must select v1 and may start under v1 rules | Allowed under v1 rules | May prepare | Existing supported v1 rules |
+| After quiescence, before staging | Same original v1 active generation | May start after flock release; v1 is unchanged | Selects v1; may start under v1 rules | Allowed under v1 rules | May prepare | Existing supported v1 rules |
+| During inactive file writes, before staged file fsync | Same active v1 generation; staged temp bytes may be absent, truncated, or untrusted | May start v1; ignores inactive staging paths | Selects v1; ignores inactive staging paths | Allowed under v1 rules | Must revalidate/recreate all staging inputs | Existing supported v1 rules; staging cannot be authority |
+| After staged file fsync/rename into inactive staging directory, before active selector | Same active v1 generation; exact staged signed inputs may exist | May start v1 | Selects v1; staged inputs do not select a format | Allowed under v1 rules | May authenticate and retry migration | Existing supported v1 rules; cannot consume staged v2 state as active |
+| Preparation before D8 acquisition | Original v1 manifest, policy, high-water and state tip; no migration staging; compute mode may be disabled and unit masked; if preparation is interrupted before process quiescence, an already-running process may remain | v1-only processes may operate only under ordinary v1 rules; no migration has started | Selects v1 and may operate under ordinary v1 rules | Ordinary v1 behavior only; migration has not acquired D8 or written migration inputs | Abort preparation or complete quiescence; exact v1 executable may be restored while v1 selector is verified | Existing v1 rollback rules |
+| During replacement of supported executables, before active selector | Original v1 manifest, policy, high-water and state tip; executable set may be mixed; verified preparation found no old compute process; old `o3k-compute` is masked and non-executable until the authenticated dual verifier replaces it | Any still-installed v1-only `o3kd`/`o3k` may operate only under v1 after the migrator releases D8; a replacement dual verifier selects v1 and follows unchanged v1 rules; compute remains unavailable until replaced | Selects v1; may operate only under v1 rules | v1 store operation may resume after crash; no compute cleanup, readiness, restoration, or dispatch until an admitted `o3kd` session | Finish replacement; exact old compute may be restored only if selector is verified still v1 | Existing v1 rollback rules only before selector publication; after selector, old binary restore is denied |
+| Selector temp file written/fsynced, before `state.json` rename | Original active v1 state tip and all other active v1 bytes | May start v1 | Selects v1 | Allowed under v1 rules | May retry; ignores incomplete selector temp | Existing supported v1 rules |
+| `state.json` renamed, before recovery-state directory fsync | After power loss, either original v1 tip or exact complete signed migration tip; all supported executables are already dual verifiers; no later active writes are allowed | If old tip survives: dual verifiers select v1 and may operate under unchanged v1 rules. If migration tip survives: dual verifiers select v2 and deny incomplete generation | If old tip survives: selects v1. If migration tip survives: selects v2 but denies incomplete generation | Only unchanged v1 state with dual verifiers may operate; migration-tip image must deny store, readiness, lease, reconciliation, cleanup, restoration, and dispatch | May retry from authenticated staged bytes only after reading and classifying recovered tip | Old-generation rollback only if old tip survived; event rewrite/rollback denied if new tip survived |
+| Selector directory fsync/readback complete; before v2 active policy publication | Original v1 policy/high-water/manifest plus authenticated migration event in `state.json`; every supported executable is dual-verifier | Rejects unknown event before store or provider-side effects | Selects v2; denies because required v2 generation is incomplete | Denied: no store, readiness, lease, reconciliation, cleanup, domain restoration, or provider dispatch | May exact-forward from bytes bound by event | Old verifier rollback, event removal, partial repair, and downgrade denied |
+| During active v2 policy replacement, before file and directory fsync/readback | Migration event plus either old policy bytes or complete v2 policy bytes; no later active step until verified | Rejects migration event before store or provider-side effects | Denies old policy/high-water mismatch or incomplete binding; may accept only if all required bindings already verify | Denied unless complete coherent generation already verifies; no intermediate step may expose readiness or provider side effects | Exact-forward only | Rollback/repair/downgrade denied |
+| After v2 policy, before v2 high-water | Migration event, v2 policy, old v1 high-water | Rejects migration event | Denies high-water mismatch | Denied | Exact-forward only | Rollback/repair/downgrade denied |
+| After v2 high-water, before new manifest | Migration event, v2 policy/high-water, old manifest | Rejects migration event | Denies exact-manifest mismatch | Denied | Exact-forward only | Rollback/repair/downgrade denied |
+| Forbidden state: migration event durable and a v1-only executable remains at any supported path | This state must be unreachable; all executables were authenticated, atomically replaced, and read back before selector publication | A v1-only executable cannot be assumed to reject the selector; detect it and keep migration denied, with no supported service path started | Dual verifier selects v2 and denies until the coherent generation and all entry points verify | Denied, including compute cleanup/restoration and provider dispatch | Exact-forward only after replacing the stale path with the authenticated candidate binary | Refuse rollback, partial repair, and downgrade |
+| Complete generation/readback, before guard release | Coherent v2 selector/policy/high-water/manifest, all installed paths verified v2-capable | Rejects migration event | Accepts v2 only under exact manifest and bindings | Permitted only according to v2 authorization; an inactive journal chain still denies activation | Migration is complete; no second selection | Any downgrade/re-anchor/rotation outside accepted contract denied |
+| After guard release or reboot | Same complete authenticated v2 generation | Rejects migration event | Accepts v2; journal-chain terminal/quarantine rules still apply | Same as complete generation above; never grants activation through A10 | No migration replay needed | Any downgrade/rewrite denied |
+
+The rows that mention a v2 verifier accepting are future requirements, not
+claims about currently protected implementation. The matrix is falsified if
+any entry point can open canonical state, report readiness, acquire a lease,
+or dispatch a provider operation from an incomplete selected generation.
+
+
+Deterministic negative contract vectors for the protected/implementation test
+suites are:
+
+| Vector | Recovered bytes | Expected result |
+| --- | --- | --- |
+| D8-A10-01 | Truncated or non-canonical selector temp; original active v1 state/policy/high-water/manifest | Ignore temp as authority; v1 only, no A10 selection |
+| D8-A10-02 | Complete v2 policy exists only under inactive staging name; active state tip remains v1 | Neither verifier selects v2; v1 may operate under v1 rules |
+| D8-A10-03 | Active v2 policy is observed without a valid migration event (constructed corruption/partial repair) | v1 rejects policy format; v2 rejects selector mismatch; deny before store |
+| D8-A10-04 | Migration event survives rename-before-directory-fsync; v2 policy/high-water remain v1 | v1 rejects unknown event; v2 selects v2 and denies incomplete bindings |
+| D8-A10-05 | Migration event durable; v2 policy absent, truncated, wrong signature, or wrong digest | Both verifier generations deny before store; installer cannot synthesize a different digest |
+| D8-A10-06 | Migration event durable; v2 policy present but v1 high-water remains | v1 rejects event; v2 rejects high-water mismatch; exact-forward only |
+| D8-A10-07 | Migration event durable; v2 policy/high-water present but old manifest remains | v1 rejects event; v2 rejects manifest digest/release binding; exact-forward only |
+| D8-A10-08 | Migration event durable; old binary/rollback package starts | Supported paths contain only dual verifiers before selector publication; any rollback tool/package that would execute a v1-only verifier refuses before replacing files |
+| D8-A10-09 | Migration event durable; event removed, rewritten, sequence regressed, or replaced with prior v1 tip | State-chain authentication/high-water fails; no store/readiness/lease/dispatch |
+| D8-A10-10 | Crash/reboot between any two active publications; resume input differs by one byte or names another manifest | No partial repair; deny, preserve bytes, require bounded operator action |
+| D8-A10-11 | Migration event durable; v2 verifier sees stale clock, expired/revoked signer, missing trust, or mismatched device/inode | Deny before store; clock rollback does not relax sequence/high-water |
+| D8-A10-12 | Complete v2 policy with `INACTIVE_VERIFIED` journal tip | Deny controller/API readiness, lease acquisition, reconciliation, and provider dispatch |
+| D8-A10-13 | Crash after migration selection while `o3k-compute` restarts and attempts startup cleanup/domain restoration | Its dual verifier denies before cleanup, restoration, agent readiness, or provider dispatch; a v1-only compute executable at a supported path makes selector publication invalid |
+| D8-A10-14 | `o3k-compute` restarts while the migrator holds D8 and v1 remains selected | It remains unready and performs no cleanup, reconciliation, restoration, or dispatch until an authenticated session from a D8-admitted `o3kd` exists; during migration no such session can be admitted |
+| D8-A10-15 | Preparation finds any process still executing the installed old `o3k-compute` inode after the path is made non-executable and the unit is masked | Abort before D8 acquisition or migration writes; do not publish selector; process remains governed only by unchanged v1 rules |
+| D8-A10-16 | Crash during compute preparation, before D8 acquisition | No migration staging or active recovery bytes changed; v1 remains selected; any surviving process is only under ordinary v1 rules, and the masked/non-executable path prevents new old-binary starts |
+
+These vectors are deterministic state fixtures, not current runtime evidence.
+The implementation PR must turn each applicable vector into a failure-first
+test across the installed startup, CLI, systemd, upgrade, rollback, and
+maintenance entry points. Preparation tests must include an already-running
+direct compute process, prove migration refuses while its executable inode is
+live, and prove a crash before D8 acquisition leaves only unchanged v1
+authority. The current v1 code can prove only its own fail-closed
+handling of unknown policy/state formats; it cannot prove v2 selection or
+resume behavior.
 
 C1.1 `o3k-installation-reanchor-v1` remains a v1-to-v1 re-anchor and must
 reject a changed policy format. It cannot verify or authorize v1-to-v2
