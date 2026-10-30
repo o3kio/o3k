@@ -1,6 +1,6 @@
 //! Installed C1 recovery discovery. No configuration or prefix environment
 //! variable participates in this trust path. Metadata never grants activation.
-use std::{fs, path::Path};
+use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
@@ -96,14 +96,164 @@ pub fn deny_operational_access_for_backend(
             return Ok(());
         }
     }
-    let installed = InstalledRecovery::load(data_dir)?;
-    if expected_backend.is_some_and(|expected| installed.policy.backend != expected) {
-        return Err("installation policy backend does not match configured backend");
+    match InstalledRecovery::load(data_dir) {
+        Ok(installed) => {
+            if expected_backend.is_some_and(|expected| installed.policy.backend != expected) {
+                return Err("installation policy backend does not match configured backend");
+            }
+            if installed.preserved_state() != RecoveryState::NeverRecovered {
+                return Err("authenticated recovery designation denies operational access");
+            }
+            Ok(())
+        }
+        Err(v1_error) => match verify_v2_installed(data_dir, expected_backend) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(v1_error),
+        },
     }
-    if installed.preserved_state() != RecoveryState::NeverRecovered {
+}
+
+/// Verifies a selected policy-v2 generation before any canonical store or
+/// provider boundary. Incomplete generations never fall back to the v1
+/// verifier: only an authenticated migration event in `state.json` selects
+/// this path.
+fn verify_v2_installed(data_dir: &Path, expected_backend: Option<&str>) -> Result<()> {
+    let release_bytes = release_identity::read_fixed_installed_release_manifest()
+        .map_err(|_| "installed recovery release is unsafe or unavailable")?;
+    let prior_authority = BackupReleaseIdentity::c1_authority_from_manifest(&release_bytes)
+        .map_err(|_| "C1 release authority is missing")?;
+    let (uid, gid) = service_identity()?;
+    let policy_bytes = read_protected_config(Path::new(prior_authority.policy_path.as_str()), gid)?;
+    let policy: identity::Signed<crate::recovery_policy_v2::PolicyV2> =
+        identity::decode_canonical(&policy_bytes)
+            .map_err(|_| "v2 installation policy is malformed")?;
+    let p = &policy.payload;
+
+    if p.format != crate::recovery_policy_v2::POLICY_V2
+        || p.policy_path != crate::recovery_policy_v2::FIXED_POLICY_PATH
+        || p.data_root != data_dir.to_string_lossy()
+        || p.recovery_state_root != format!("/var/lib/o3k-recovery-state/{}", p.installation_id)
+        || p.trust_bundle_path != "/etc/o3k/recovery-trust.json"
+        || expected_backend.is_some_and(|backend| p.backend != backend)
+    {
+        return Err("v2 installation policy target or path binding is invalid");
+    }
+    let canonical = fs::canonicalize(data_dir).map_err(|_| "recovery target is unavailable")?;
+    let target_meta = fs::metadata(data_dir).map_err(|_| "recovery target is unavailable")?;
+    let (installation, site) = o3k_store::identity_tokens(data_dir)
+        .map_err(|_| "installation identity cannot be resolved")?;
+    if canonical != data_dir
+        || target_meta.dev() != p.target_device
+        || target_meta.ino() != p.target_inode
+        || hex::encode(installation) != p.installation_id
+        || hex::encode(site) != p.site_id
+    {
+        return Err("v2 installation policy does not match canonical target identity");
+    }
+
+    let state_directory = ProtectedDirectory::open(
+        Path::new(&p.recovery_state_root),
+        0,
+        gid,
+        0o750,
+        p.recovery_state_device,
+        p.recovery_state_inode,
+    )
+    .map_err(|_| "protected recovery state directory is unsafe")?;
+    let state_tip = state_directory
+        .read_bounded("state.json", 0, gid, 0o640, MAX_DOCUMENT)
+        .map_err(|_| "protected installation state is unavailable")?;
+    let tip_envelope: identity::Signed<serde_json::Value> =
+        identity::decode_canonical(&state_tip).map_err(|_| "installation state is malformed")?;
+    if tip_envelope
+        .payload
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        != Some(crate::recovery_policy_v2::MIGRATION_V1)
+    {
+        return Err("v2 policy has no authenticated migration selector");
+    }
+    let selector: identity::Signed<crate::recovery_policy_v2::MigrationPayload> =
+        identity::decode_canonical(&state_tip)
+            .map_err(|_| "installation policy migration selector is malformed")?;
+    let prior_state_digest = &selector.payload.prior_record_digest;
+    let prior_policy_digest = &selector.payload.prior_policy_digest;
+    if !is_lower_sha256(prior_state_digest) || !is_lower_sha256(prior_policy_digest) {
+        return Err("installation policy migration archive digest is invalid");
+    }
+    let prior_state = state_directory
+        .read_bounded(
+            &format!("state-{prior_state_digest}.json"),
+            0,
+            gid,
+            0o640,
+            MAX_DOCUMENT,
+        )
+        .map_err(|_| "installation state predecessor is missing")?;
+    let prior_policy = state_directory
+        .read_bounded(
+            &format!("policy-{prior_policy_digest}.json"),
+            0,
+            gid,
+            0o640,
+            MAX_DOCUMENT,
+        )
+        .map_err(|_| "prior installation policy is missing")?;
+    let high_water = state_directory
+        .read_bounded("policy.json", 0, gid, 0o640, MAX_DOCUMENT)
+        .map_err(|_| "installation policy high-water state is unavailable")?;
+    crate::recovery_policy_v2::verify_selected_policy_v2(
+        &release_bytes,
+        &policy_bytes,
+        &high_water,
+        &state_tip,
+        &prior_state,
+        &prior_policy,
+    )?;
+
+    // Trust remains the existing C1 installation trust. The v2 format does
+    // not create a parallel trust root and a missing/mismatched bundle denies
+    // startup before store access.
+    let compatibility_policy = InstallationPolicy {
+        format: crate::recovery_policy_v2::POLICY_V1.into(),
+        installation_id: p.installation_id.clone(),
+        site_id: p.site_id.clone(),
+        profile: p.profile.clone(),
+        backend: p.backend.clone(),
+        release_identity: p.release_identity.clone(),
+        data_root: p.data_root.clone(),
+        target_device: p.target_device,
+        target_inode: p.target_inode,
+        policy_revision: p.policy_revision,
+        prior_policy_digest: p.prior_policy_digest.clone(),
+        policy_path: p.policy_path.clone(),
+        trust_bundle_path: p.trust_bundle_path.clone(),
+        trust_bundle_digest: p.trust_bundle_digest.clone(),
+        recovery_state_root: p.recovery_state_root.clone(),
+        recovery_state_device: p.recovery_state_device,
+        recovery_state_inode: p.recovery_state_inode,
+        journal_directory: p.journal_directory.clone(),
+        journal_device: p.journal_device,
+        journal_inode: p.journal_inode,
+        journal_trust_root_id: p.journal_trust_root_id.clone(),
+        journal_trust_root_public_key: p.journal_trust_root_public_key.clone(),
+        evidence_trust_root_id: p.evidence_trust_root_id.clone(),
+        evidence_trust_root_public_key: p.evidence_trust_root_public_key.clone(),
+        signer_key_id: p.signer_key_id.clone(),
+    };
+    load_trust(&compatibility_policy, &state_directory, gid)?;
+    if selector.payload.preserved_state != "NEVER_RECOVERED" {
         return Err("authenticated recovery designation denies operational access");
     }
+    let _ = uid;
     Ok(())
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl InstalledRecovery {

@@ -23,6 +23,7 @@ o3k-libvirt = { path = "../../crates/o3k-libvirt" }
 o3k-network = { path = "../../crates/o3k-network" }
 o3k-provider = { path = "../../crates/o3k-provider" }
 o3k-provider-contract = { path = "../../crates/o3k-provider-contract" }
+o3k = { path = "../o3k" }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

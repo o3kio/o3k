@@ -666,6 +666,12 @@ fn run_upgrade_cli(
     assume_yes: bool,
     json: bool,
 ) -> ExitCode {
+    if let Err(reason) =
+        o3k::recovery_installation::deny_operational_access(Path::new("/var/lib/o3k"))
+    {
+        eprintln!("upgrade denied by installed recovery selector: {reason}");
+        return ExitCode::from(1);
+    }
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,
@@ -690,6 +696,12 @@ fn run_upgrade_cli(
 }
 
 fn run_rollback_cli(json: bool) -> ExitCode {
+    if let Err(reason) =
+        o3k::recovery_installation::deny_operational_access(Path::new("/var/lib/o3k"))
+    {
+        eprintln!("rollback denied by installed recovery selector: {reason}");
+        return ExitCode::from(1);
+    }
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,

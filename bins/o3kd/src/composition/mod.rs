@@ -1026,7 +1026,9 @@ pub fn acquire_startup_guard(
     data_dir: &Path,
     backend: o3k_config::DatabaseBackend,
 ) -> Result<o3k_store::StoreAccessLock, Box<dyn std::error::Error>> {
-    let guard = o3k_store::StoreAccessLock::acquire(data_dir)?;
+    // Authenticate the installed recovery selector before acquiring even the
+    // canonical store-access guard. A selected but incomplete v2 generation
+    // must not create a lock file or progress to listener/provider startup.
     o3k::restore_preflight::deny_startup_if_restore_state_for_backend(
         data_dir,
         match backend {
@@ -1035,6 +1037,7 @@ pub fn acquire_startup_guard(
         },
     )
     .map_err(std::io::Error::other)?;
+    let guard = o3k_store::StoreAccessLock::acquire(data_dir)?;
     Ok(guard)
 }
 
