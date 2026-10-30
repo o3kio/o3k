@@ -201,6 +201,42 @@ impl ProtectedDirectory {
         Ok(())
     }
 
+    /// Opens and non-blocking-locks an existing protected lock file without
+    /// following a symlink. The returned descriptor keeps the lock held for
+    /// as long as the caller retains it. `None` means the lock file is absent.
+    pub fn try_lock_existing_file(
+        &self,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        mode: u32,
+    ) -> Result<Option<File>, RecoveryFileError> {
+        validate_name(name)?;
+        self.check()?;
+        let fd = match openat(
+            self.dir.as_fd(),
+            name,
+            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = fstat(&fd)?;
+        if metadata.st_mode & 0o170000 != 0o100000
+            || metadata.st_nlink != 1
+            || metadata.st_uid != uid
+            || metadata.st_gid != gid
+            || metadata.st_mode & 0o7777 != mode
+        {
+            return Err(RecoveryFileError::Unsafe("lock file metadata"));
+        }
+        let file = File::from(fd);
+        flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive)?;
+        Ok(Some(file))
+    }
+
     pub fn read_bounded(
         &self,
         name: &str,

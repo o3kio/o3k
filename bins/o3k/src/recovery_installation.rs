@@ -584,26 +584,15 @@ fn verify_migration_predecessor(
             }) {
                 return Err("pending recovery journal work denies migration admission");
             }
-            let lock_path = context
+            let _signing_request_lock = context
                 .journal_directory
-                .path()
-                .join("restore-signing-request.lock");
-            match fs::File::open(&lock_path) {
-                Ok(file) => {
-                    if rustix::fs::flock(
-                        &file,
-                        rustix::fs::FlockOperation::NonBlockingLockExclusive,
-                    )
-                    .is_err()
-                    {
-                        return Err(
-                            "in-flight recovery journal signing denies migration admission",
-                        );
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err("recovery journal signing lock cannot be inspected"),
-            }
+                .try_lock_existing_file(
+                    "restore-signing-request.lock",
+                    context.uid,
+                    context.gid,
+                    0o600,
+                )
+                .map_err(|_| "recovery journal signing lock is unsafe or busy")?;
 
             let fixed_bundle_bytes = read_protected_config(
                 Path::new(&context.prior_policy.trust_bundle_path),
