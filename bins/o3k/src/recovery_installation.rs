@@ -578,10 +578,11 @@ fn verify_migration_predecessor(
                 .journal_directory
                 .list_names()
                 .map_err(|_| "recovery journal directory cannot be inspected")?;
-            if names.iter().any(|name| {
+            let pending_signing_request_present = names.iter().any(|name| {
                 name == reanchor::PENDING_REQUEST_NAME
                     || (name.starts_with("restore-reservation-") && name.ends_with(".lock"))
-            }) {
+            });
+            if pending_signing_request_present {
                 return Err("pending recovery journal work denies migration admission");
             }
             let _signing_request_lock = context
@@ -654,7 +655,7 @@ fn verify_migration_predecessor(
                 journal_bytes: Some(&journal_bytes),
                 checkpoint_bytes: Some(&checkpoint_bytes),
                 consumption_record_bytes: consumption_record_bytes.as_deref(),
-                pending_signing_request_present: false,
+                pending_signing_request_present,
                 now: chrono::Utc::now().timestamp(),
             };
             let archives = ProtectedArchives {
