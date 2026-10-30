@@ -1876,11 +1876,15 @@ an independently trusted anti-rollback anchor, unavailable offline custody,
 and interrupted migration. These remain fail-closed availability risks; this
 proposal adds no local rollback defense beyond the accepted D8/C1.1 state and
 high-water controls and grants no target-mutation authority. ADR-0190's
-non-independent single-maintainer review disclosure remains applicable; this
-proposal has not received an owner-directed technical decision. It is not
-accepted until the owner records ACCEPT / AMEND / REJECT against the exact
-reviewed PR head. The decision authorizes only contract work; runtime
-implementation remains gated until that decision.
+non-independent single-maintainer review disclosure remains applicable. The
+publication-order clarification was accepted for implementation/testing by
+the owner decision supplied for this implementation turn, against exact head
+`16f41ad4c531abcccc2c1dbb9246333289b67849`, merged into protected `main` at
+`586fe87b2966223450114bee26b35fc72f08ba6e`. The PR also has an exact-head
+APPROVED review; that review is not treated as the owner decision. This decision
+authorizes only contract implementation and testing; it does not establish
+runtime, installed, production, independent-security, target-mutation,
+controller-activation, or final PP.6 evidence.
 
 ## 8. Operator interface
 

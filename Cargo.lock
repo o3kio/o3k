@@ -1920,6 +1920,7 @@ version = "0.4.0-rc.5"
 dependencies = [
  "async-trait",
  "axum",
+ "o3k",
  "o3k-compute-agent",
  "o3k-console",
  "o3k-dhcp",

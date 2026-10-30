@@ -52,7 +52,7 @@ pub struct InstalledRecovery {
     staged_prior_trust_bytes: Option<Vec<u8>>,
     tip_is_reanchor: bool,
     state_directory: ProtectedDirectory,
-    _data_directory: ProtectedDirectory,
+    _data_directory: Option<ProtectedDirectory>,
     journal_directory: Option<ProtectedDirectory>,
 }
 
@@ -68,6 +68,121 @@ fn key(value: &str) -> Result<VerifyingKey> {
 /// is a provisioning failure, including when the caller selects another path.
 pub fn deny_operational_access(data_dir: &Path) -> Result<()> {
     deny_operational_access_for_backend(data_dir, None)
+}
+
+/// Guards the installed control-plane executable independently of its
+/// environment-selected data directory. Development/TestLab executables may
+/// use an isolated data directory only when no installed release manifest is
+/// present and the executable is not at its packaged path.
+pub fn deny_control_plane_startup_access(configured_data_dir: &Path) -> Result<()> {
+    deny_installed_executable_access(configured_data_dir, Path::new("/usr/local/bin/o3kd"))
+}
+
+/// Guards operator maintenance commands with the same fixed installation
+/// authority as the packaged CLI.
+pub fn deny_operator_startup_access(configured_data_dir: &Path) -> Result<()> {
+    deny_installed_executable_access(configured_data_dir, Path::new("/usr/local/bin/o3k"))
+}
+
+/// Verifies the active selector for local maintenance paths that must still
+/// operate on an authenticated recovery-designated installation. This checks
+/// format and generation integrity without granting ordinary runtime access.
+pub fn verify_operator_installation_selector(configured_data_dir: &Path) -> Result<()> {
+    let executable =
+        std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
+    if fixed_release_manifest_requires_selector()?
+        || executable == Path::new("/usr/local/bin/o3k")
+        || configured_data_dir == Path::new("/var/lib/o3k")
+    {
+        if configured_data_dir != Path::new("/var/lib/o3k") {
+            return Err("installed executable cannot select a different data root");
+        }
+        verify_startup_policy_selector(Path::new("/var/lib/o3k")).map(|_| ())
+    } else {
+        deny_operational_access(configured_data_dir)
+    }
+}
+
+fn deny_installed_executable_access(
+    configured_data_dir: &Path,
+    installed_executable: &Path,
+) -> Result<()> {
+    let executable =
+        std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
+    deny_installed_executable_access_for(
+        configured_data_dir,
+        &executable,
+        installed_executable,
+        fixed_release_manifest_requires_selector()?,
+    )
+}
+
+fn deny_installed_executable_access_for(
+    configured_data_dir: &Path,
+    executable: &Path,
+    installed_executable: &Path,
+    installed_manifest_present: bool,
+) -> Result<()> {
+    if installed_manifest_present
+        || executable == installed_executable
+        || configured_data_dir == Path::new("/var/lib/o3k")
+    {
+        if configured_data_dir != Path::new("/var/lib/o3k") {
+            return Err("installed executable cannot select a different data root");
+        }
+        deny_operational_access(Path::new("/var/lib/o3k"))
+    } else {
+        deny_operational_access(configured_data_dir)
+    }
+}
+
+/// Reports whether the fixed installed manifest marks this installation as
+/// selector-managed. Legacy source-built release fixtures have no policy
+/// authority fields and retain their isolated TestLab data roots.
+pub fn fixed_release_manifest_requires_selector() -> Result<bool> {
+    let manifest = match release_identity::read_fixed_installed_release_manifest() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return match fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(_) => Err("installed release manifest cannot be observed"),
+            };
+        }
+    };
+    Ok(manifest_requires_selector(&manifest))
+}
+
+fn manifest_requires_selector(manifest: &[u8]) -> bool {
+    let value = match serde_json::from_slice::<serde_json::Value>(manifest) {
+        Ok(value) => value,
+        Err(_) => return true,
+    };
+    [
+        "installation_policy_authority",
+        "installation_policy_v2_authority",
+        "installation_policy_format",
+        "installation_policy_path",
+    ]
+    .iter()
+    .any(|field| value.get(field).is_some())
+}
+
+/// Compute is an independent consumer of the installation selector. Installed
+/// binaries use the fixed canonical installation root, never an environment
+/// supplied compute-data directory, so direct execution cannot choose a
+/// different selector path. Source-built TestLab binaries paired with a valid
+/// legacy manifest that has no selector-authority fields retain their existing
+/// non-installed behavior.
+pub fn deny_compute_startup_access() -> Result<()> {
+    let executable =
+        std::env::current_exe().map_err(|_| "compute executable identity is unavailable")?;
+    if executable != Path::new("/usr/local/bin/o3k-compute")
+        && !fixed_release_manifest_requires_selector()?
+    {
+        return Ok(());
+    }
+    deny_operational_access(Path::new("/var/lib/o3k"))
 }
 
 pub fn deny_operational_access_for_backend(
@@ -96,14 +211,329 @@ pub fn deny_operational_access_for_backend(
             return Ok(());
         }
     }
-    let installed = InstalledRecovery::load(data_dir)?;
-    if expected_backend.is_some_and(|expected| installed.policy.backend != expected) {
+    let (backend, preserved_state) = verify_startup_policy_selector(data_dir)?;
+    if expected_backend.is_some_and(|expected| backend != expected) {
         return Err("installation policy backend does not match configured backend");
     }
-    if installed.preserved_state() != RecoveryState::NeverRecovered {
+    if preserved_state != RecoveryState::NeverRecovered {
         return Err("authenticated recovery designation denies operational access");
     }
     Ok(())
+}
+
+/// Authenticates the active installation-policy selector for every startup
+/// consumer. The state tip chooses the format: a v2 policy file without the
+/// signed migration event is a mixed generation and is denied.
+fn verify_startup_policy_selector(data_dir: &Path) -> Result<(String, RecoveryState)> {
+    let manifest_bytes = release_identity::read_fixed_installed_release_manifest()
+        .map_err(|_| "installed recovery release is unsafe or unavailable")?;
+    let v1_authority = BackupReleaseIdentity::c1_authority_from_manifest(&manifest_bytes)
+        .map_err(|_| "installed release requires authenticated C1 migration")?;
+    let (_, gid) = service_identity()?;
+    let policy_bytes = read_protected_config(Path::new(&v1_authority.policy_path), gid)?;
+    let envelope: identity::Signed<serde_json::Value> =
+        identity::decode_canonical(&policy_bytes)
+            .map_err(|_| "installation policy is malformed")?;
+    let policy_format = envelope
+        .payload
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("installation policy format is missing")?;
+    match policy_format {
+        "o3k-installation-policy-v1" => {
+            // The full legacy verifier authenticates v1 policy, state chain,
+            // high-water, trust, filesystem posture, and quarantine state.
+            let installed = InstalledRecovery::load_for_startup(data_dir)?;
+            let backend = installed.policy.backend.clone();
+            let state = installed.preserved_state();
+            Ok((backend, state))
+        }
+        crate::recovery_migration_selector::V2_FORMAT => {
+            verify_v2_selected_generation(data_dir, &manifest_bytes, &policy_bytes)
+        }
+        _ => Err("installation policy format is unsupported"),
+    }
+}
+
+fn verify_v2_selected_generation(
+    data_dir: &Path,
+    manifest_bytes: &[u8],
+    policy_bytes: &[u8],
+) -> Result<(String, RecoveryState)> {
+    use crate::recovery_migration_selector as selector;
+
+    let old_authority = BackupReleaseIdentity::c1_authority_from_manifest(manifest_bytes)
+        .map_err(|_| "installed release v1 policy authority is unavailable")?;
+    let new_authority = BackupReleaseIdentity::c1_v2_authority_from_manifest(manifest_bytes)
+        .map_err(|_| "installed release v2 policy authority is unavailable")?;
+    if old_authority.key_id != new_authority.key_id
+        || old_authority.ed25519_public_key != new_authority.ed25519_public_key
+    {
+        return Err("installation policy signer changed during format migration");
+    }
+    let policy_key = key(&new_authority.ed25519_public_key)?;
+    let release = BackupReleaseIdentity::from_manifest_bytes(manifest_bytes)
+        .map_err(|_| "installed release identity is incomplete")?;
+    let manifest_digest = hex::encode(Sha256::digest(manifest_bytes));
+    let policy = selector::verify_v2_policy(
+        policy_bytes,
+        &new_authority.key_id,
+        &policy_key,
+        &manifest_digest,
+        &release.release_artifact_sha256,
+        &release.o3k_version,
+        &release.source_sha,
+    )
+    .map_err(|_| "installation v2 policy binding is invalid")?;
+    if policy.installation_id.is_empty()
+        || policy.site_id.is_empty()
+        || policy.recovery_state_root
+            != format!("/var/lib/o3k-recovery-state/{}", policy.installation_id)
+        || policy.journal_directory != format!("/var/lib/o3k-recovery/{}", policy.installation_id)
+        || policy.trust_bundle_path != "/etc/o3k/recovery-trust.json"
+        || policy.policy_path != old_authority.policy_path
+        || Path::new(&policy.data_root) != data_dir
+        || fs::canonicalize(data_dir).map_err(|_| "recovery target is unavailable")? != data_dir
+    {
+        return Err("installation v2 policy discovery paths or target changed");
+    }
+    let (uid, service_gid) = service_identity()?;
+    let state_directory = ProtectedDirectory::open(
+        Path::new(&policy.recovery_state_root),
+        0,
+        service_gid,
+        0o750,
+        policy.recovery_state_device,
+        policy.recovery_state_inode,
+    )
+    .map_err(|_| "protected recovery state directory is unsafe")?;
+    let _journal_directory = ProtectedDirectory::open(
+        Path::new(&policy.journal_directory),
+        uid,
+        service_gid,
+        0o700,
+        policy.journal_device,
+        policy.journal_inode,
+    )
+    .map_err(|_| "recovery journal identity or protection changed")?;
+    let policy_digest = hex::encode(Sha256::digest(policy_bytes));
+    let high_water = state_directory
+        .read_bounded("policy.json", 0, service_gid, 0o640, MAX_DOCUMENT)
+        .map_err(|_| "installation policy high-water state is unavailable")?;
+    if high_water != policy_bytes {
+        return Err("installation policy rollback or equivocation detected");
+    }
+
+    // The migration event is the only v2 selector. Missing or different tip
+    // formats fail closed; v2 is never inferred from the v2 policy file.
+    let selector_bytes = state_directory
+        .read_bounded("state.json", 0, service_gid, 0o640, MAX_DOCUMENT)
+        .map_err(|_| "protected installation selector is unavailable")?;
+    let tip: identity::Signed<serde_json::Value> = identity::decode_canonical(&selector_bytes)
+        .map_err(|_| "installation selector is malformed")?;
+    if tip
+        .payload
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        != Some(selector::MIGRATION_FORMAT)
+    {
+        return Err("v2 policy is not selected by an authenticated migration event");
+    }
+    let migration: selector::InstallationPolicyMigrationV1 = identity::verify_signed(
+        &selector_bytes,
+        selector::MIGRATION_FORMAT,
+        &new_authority.key_id,
+        &policy_key,
+    )
+    .map_err(|_| "installation migration selector signature is invalid")?;
+
+    // Retain and authenticate the exact prior v1 policy and state tip. These
+    // content-named archives are the same recovery-state archive convention
+    // used by C1.1 re-anchor publication.
+    let prior_policy_bytes = state_directory
+        .read_bounded(
+            &format!("policy-{}.json", migration.prior_policy_digest),
+            0,
+            service_gid,
+            0o640,
+            MAX_DOCUMENT,
+        )
+        .map_err(|_| "migration prior policy archive is missing")?;
+    if hex::encode(Sha256::digest(&prior_policy_bytes)) != migration.prior_policy_digest {
+        return Err("migration prior policy archive digest changed");
+    }
+    let prior_policy: InstallationPolicy = identity::verify_signed(
+        &prior_policy_bytes,
+        "o3k-installation-policy-v1",
+        &old_authority.key_id,
+        &policy_key,
+    )
+    .map_err(|_| "migration prior policy signature is invalid")?;
+    identity::verify_policy(&prior_policy, &old_authority.key_id)
+        .map_err(|_| "migration prior policy binding is invalid")?;
+    let prior_state_bytes = state_directory
+        .read_bounded(
+            &format!("state-{}.json", migration.prior_record_digest),
+            0,
+            service_gid,
+            0o640,
+            MAX_DOCUMENT,
+        )
+        .map_err(|_| "migration prior state archive is missing")?;
+    if hex::encode(Sha256::digest(&prior_state_bytes)) != migration.prior_record_digest {
+        return Err("migration prior state archive digest changed");
+    }
+    let prior_state: InstallationState = identity::verify_signed(
+        &prior_state_bytes,
+        "o3k-installation-state-v1",
+        &old_authority.key_id,
+        &policy_key,
+    )
+    .map_err(|_| "migration prior state signature is invalid")?;
+    identity::verify_initial_state_transition(None, &prior_state, &prior_policy)
+        .map_err(|_| "migration prior state binding is invalid")?;
+
+    let prior_manifest_bytes = state_directory
+        .read_bounded(
+            &format!("release-{}.json", migration.prior_release_manifest_sha256),
+            0,
+            service_gid,
+            0o640,
+            MAX_DOCUMENT,
+        )
+        .map_err(|_| "migration prior release manifest archive is missing")?;
+    if hex::encode(Sha256::digest(&prior_manifest_bytes)) != migration.prior_release_manifest_sha256
+    {
+        return Err("migration prior release manifest digest changed");
+    }
+    let prior_release = BackupReleaseIdentity::from_manifest_bytes(&prior_manifest_bytes)
+        .map_err(|_| "migration prior release manifest identity is invalid")?;
+    let prior_manifest_authority =
+        BackupReleaseIdentity::c1_authority_from_manifest(&prior_manifest_bytes)
+            .map_err(|_| "migration prior release authority is invalid")?;
+    if prior_manifest_authority.key_id != old_authority.key_id
+        || prior_manifest_authority.ed25519_public_key != old_authority.ed25519_public_key
+    {
+        return Err("migration release policy signer changed");
+    }
+    let expected_prior_release = selector::ReleaseIdentity {
+        version: prior_release.o3k_version,
+        source_commit: prior_release.source_sha,
+        release_artifact_sha256: prior_release.release_artifact_sha256,
+        profile_id: prior_release.profile_id,
+        schema_version: prior_release.schema_version,
+    };
+    let expected_new_release = selector::ReleaseIdentity {
+        version: release.o3k_version,
+        source_commit: release.source_sha,
+        release_artifact_sha256: release.release_artifact_sha256.clone(),
+        profile_id: release.profile_id,
+        schema_version: release.schema_version,
+    };
+    let prior_policy_digest = hex::encode(Sha256::digest(&prior_policy_bytes));
+    let mut expected_policy = prior_policy.clone();
+    expected_policy.release_identity = release.release_artifact_sha256.clone();
+    expected_policy.policy_revision = prior_policy.policy_revision.saturating_add(1);
+    expected_policy.prior_policy_digest = prior_policy_digest.clone();
+    if legacy_policy_view(&policy) != expected_policy
+        || policy.installation_id != prior_policy.installation_id
+        || policy.site_id != prior_policy.site_id
+        || policy.target_device != prior_policy.target_device
+        || policy.target_inode != prior_policy.target_inode
+        || policy.trust_bundle_digest != prior_policy.trust_bundle_digest
+        || expected_prior_release.release_artifact_sha256 != prior_policy.release_identity
+        || expected_prior_release.profile_id != prior_policy.profile
+        || migration.prior_release_identity != expected_prior_release
+        || migration.new_release_identity != expected_new_release
+    {
+        return Err("installation migration release or identity binding changed");
+    }
+    selector::verify_migration(
+        &selector_bytes,
+        &new_authority.key_id,
+        &policy_key,
+        &selector::MigrationBindings {
+            prior_sequence: prior_state.sequence,
+            prior_tip_digest: &migration.prior_record_digest,
+            prior_policy_digest: &prior_policy_digest,
+            prior_policy_revision: prior_policy.policy_revision,
+            new_policy_digest: &policy_digest,
+            prior_manifest_digest: &migration.prior_release_manifest_sha256,
+            new_manifest_digest: &manifest_digest,
+            target_device: policy.target_device,
+            target_inode: policy.target_inode,
+            trust_digest: &policy.trust_bundle_digest,
+        },
+    )
+    .map_err(|_| "installation migration selector binding is invalid")?;
+    selector::verify_migration_identity(
+        &migration,
+        &policy.installation_id,
+        &policy.site_id,
+        prior_state.state,
+    )
+    .map_err(|_| "installation migration selector identity is invalid")?;
+    if migration.sequence != prior_state.sequence.saturating_add(1)
+        || migration.prior_record_digest != hex::encode(Sha256::digest(&prior_state_bytes))
+        || migration.preserved_state != prior_state.state
+        || policy.policy_revision != prior_policy.policy_revision.saturating_add(1)
+        || policy.prior_policy_digest != migration.prior_policy_digest
+        || policy.signer_key_id != new_authority.key_id
+        || migration.preserved_state != RecoveryState::NeverRecovered
+        || migration.checkpoint_digest.is_some()
+    {
+        return Err("installation migration transition is invalid");
+    }
+
+    let mut current_policy = legacy_policy_view(&policy);
+    // Authenticate the current purpose-separated recovery trust before
+    // granting v2 startup. Its exact initial digest and durable high-water
+    // remain bound by the preserved v1 policy fields.
+    current_policy.format = "o3k-installation-policy-v1".to_owned();
+    let _ = load_trust(&current_policy, &state_directory, service_gid)?;
+
+    // Open the canonical store only after the authenticated migration event,
+    // policy/high-water, prior generation and trust bindings have all passed.
+    let (installation, site) = o3k_store::identity_tokens(data_dir)
+        .map_err(|_| "installation identity cannot be resolved")?;
+    if policy.installation_id != hex::encode(installation) || policy.site_id != hex::encode(site) {
+        return Err("installation v2 policy does not match canonical identity");
+    }
+    let _data_directory = open_data_root(data_dir, uid, service_gid, &current_policy)
+        .map_err(|_| "recovery target identity or protection changed")?;
+    Ok((policy.backend, prior_state.state))
+}
+
+fn legacy_policy_view(
+    policy: &crate::recovery_migration_selector::InstallationPolicyV2,
+) -> InstallationPolicy {
+    InstallationPolicy {
+        format: "o3k-installation-policy-v1".to_owned(),
+        installation_id: policy.installation_id.clone(),
+        site_id: policy.site_id.clone(),
+        profile: policy.profile.clone(),
+        backend: policy.backend.clone(),
+        release_identity: policy.release_identity.clone(),
+        data_root: policy.data_root.clone(),
+        target_device: policy.target_device,
+        target_inode: policy.target_inode,
+        policy_revision: policy.policy_revision,
+        prior_policy_digest: policy.prior_policy_digest.clone(),
+        policy_path: policy.policy_path.clone(),
+        trust_bundle_path: policy.trust_bundle_path.clone(),
+        trust_bundle_digest: policy.trust_bundle_digest.clone(),
+        recovery_state_root: policy.recovery_state_root.clone(),
+        recovery_state_device: policy.recovery_state_device,
+        recovery_state_inode: policy.recovery_state_inode,
+        journal_directory: policy.journal_directory.clone(),
+        journal_device: policy.journal_device,
+        journal_inode: policy.journal_inode,
+        journal_trust_root_id: policy.journal_trust_root_id.clone(),
+        journal_trust_root_public_key: policy.journal_trust_root_public_key.clone(),
+        evidence_trust_root_id: policy.evidence_trust_root_id.clone(),
+        evidence_trust_root_public_key: policy.evidence_trust_root_public_key.clone(),
+        signer_key_id: policy.signer_key_id.clone(),
+    }
 }
 
 impl InstalledRecovery {
@@ -113,14 +543,18 @@ impl InstalledRecovery {
     /// exact-forward resume (§7.3.9). All filesystem, posture, and signature
     /// checks on the individual records still run.
     pub fn load_partial(data_dir: &Path) -> Result<Self> {
-        Self::load_impl(data_dir, false)
+        Self::load_impl(data_dir, false, false)
     }
 
     pub fn load(data_dir: &Path) -> Result<Self> {
-        Self::load_impl(data_dir, true)
+        Self::load_impl(data_dir, true, false)
     }
 
-    fn load_impl(data_dir: &Path, authenticate: bool) -> Result<Self> {
+    fn load_for_startup(data_dir: &Path) -> Result<Self> {
+        Self::load_impl(data_dir, true, true)
+    }
+
+    fn load_impl(data_dir: &Path, authenticate: bool, operational_startup: bool) -> Result<Self> {
         let release_bytes = release_identity::read_fixed_installed_release_manifest()
             .map_err(|_| "installed recovery release is unsafe or unavailable")?;
         let authority = BackupReleaseIdentity::c1_authority_from_manifest(&release_bytes)
@@ -145,13 +579,6 @@ impl InstalledRecovery {
             || fs::canonicalize(data_dir).map_err(|_| "recovery target is unavailable")? != data_dir
         {
             return Err("installation policy release or target identity changed");
-        }
-        let (installation, site) = o3k_store::identity_tokens(data_dir)
-            .map_err(|_| "installation identity cannot be resolved")?;
-        if policy.installation_id != hex::encode(installation)
-            || policy.site_id != hex::encode(site)
-        {
-            return Err("installation policy does not match canonical identity");
         }
         if policy.recovery_state_root
             != format!("/var/lib/o3k-recovery-state/{}", policy.installation_id)
@@ -186,8 +613,6 @@ impl InstalledRecovery {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err("recovery journal identity cannot be observed"),
         };
-        let data_directory = open_data_root(data_dir, uid, gid, &policy)
-            .map_err(|_| "recovery target identity or protection changed")?;
         let policy_digest = hex::encode(Sha256::digest(&policy_bytes));
         // Checkpoint is the exact signed policy, not an unsigned permission
         // marker. Only the root-authorized installer may advance it. A
@@ -293,6 +718,8 @@ impl InstalledRecovery {
                     .read_bounded(reanchor::CONSUMPTION_NAME, 0, gid, 0o640, MAX_DOCUMENT)
                     .ok(),
             );
+            let data_directory = open_data_root(data_dir, uid, gid, &policy)
+                .map_err(|_| "recovery target identity or protection changed")?;
             return Ok(Self {
                 state: state.clone(),
                 policy,
@@ -332,7 +759,7 @@ impl InstalledRecovery {
                     .ok(),
                 tip_is_reanchor: tip_format == reanchor::REANCHOR_FORMAT,
                 state_directory,
-                _data_directory: data_directory,
+                _data_directory: Some(data_directory),
                 journal_directory,
             });
         }
@@ -570,7 +997,21 @@ impl InstalledRecovery {
             }
             _ => return Err("installation state is malformed"),
         };
-        let installed = Self {
+        if operational_startup && preserved_state != RecoveryState::NeverRecovered {
+            return Err("authenticated recovery designation denies operational access");
+        }
+        // Selector, high-water, predecessor chain and purpose-separated trust
+        // are authenticated before touching the canonical store. The database
+        // identity then binds the verified installation authority to this
+        // exact target.
+        let (installation, site) = o3k_store::identity_tokens(data_dir)
+            .map_err(|_| "installation identity cannot be resolved")?;
+        if policy.installation_id != hex::encode(installation)
+            || policy.site_id != hex::encode(site)
+        {
+            return Err("installation policy does not match canonical identity");
+        }
+        let mut installed = Self {
             policy,
             policy_digest,
             state,
@@ -591,7 +1032,7 @@ impl InstalledRecovery {
             staged_prior_trust_bytes: None,
             tip_is_reanchor,
             state_directory,
-            _data_directory: data_directory,
+            _data_directory: None,
             journal_directory,
         };
         if installed.preserved_state != RecoveryState::NeverRecovered && !installed.tip_is_reanchor
@@ -600,6 +1041,17 @@ impl InstalledRecovery {
             let trust = load_trust(&installed.policy, &installed.state_directory, gid)?;
             installed.authenticate_journal_for(&installed.state, &trust)?;
         }
+        let (installation, site) = o3k_store::identity_tokens(data_dir)
+            .map_err(|_| "installation identity cannot be resolved")?;
+        if installed.policy.installation_id != hex::encode(installation)
+            || installed.policy.site_id != hex::encode(site)
+        {
+            return Err("installation policy does not match canonical identity");
+        }
+        installed._data_directory = Some(
+            open_data_root(data_dir, uid, gid, &installed.policy)
+                .map_err(|_| "recovery target identity or protection changed")?,
+        );
         Ok(installed)
     }
 
@@ -616,6 +1068,8 @@ impl InstalledRecovery {
             return Err("recovery journal must be provisioned before designation");
         }
         self._data_directory
+            .as_ref()
+            .ok_or("recovery target is unavailable")?
             .lock()
             .map_err(|_| "recovery target is busy")?;
         self.revalidate_state()?;
@@ -679,6 +1133,8 @@ impl InstalledRecovery {
         }
         // Target identity recheck before any recovery-state mutation.
         self._data_directory
+            .as_ref()
+            .ok_or("recovery target is unavailable")?
             .lock()
             .map_err(|_| "recovery target is busy")?;
         self.revalidate_state()?;
@@ -793,9 +1249,15 @@ impl InstalledRecovery {
     /// designation path holds, plus the policy-bound identity recheck.
     pub(crate) fn quiesce_data_directory(&self) -> std::result::Result<(), ReanchorError> {
         self._data_directory
+            .as_ref()
+            .ok_or(ReanchorError::Quiescence("recovery target is unavailable"))?
             .lock()
             .map_err(|_| ReanchorError::Quiescence("recovery target is busy"))?;
-        let (device, inode) = self._data_directory.identity();
+        let (device, inode) = self
+            ._data_directory
+            .as_ref()
+            .ok_or(ReanchorError::Quiescence("recovery target is unavailable"))?
+            .identity();
         if device != self.policy.target_device || inode != self.policy.target_inode {
             return Err(ReanchorError::Quiescence(
                 "recovery target identity changed",
@@ -1400,6 +1862,59 @@ mod tests {
 
     fn keypair(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
+    }
+
+    #[test]
+    fn installed_control_plane_executable_rejects_custom_data_root() {
+        let result = deny_installed_executable_access_for(
+            Path::new("/tmp/o3k-upgrade-fixture/data"),
+            Path::new("/usr/local/bin/o3kd"),
+            Path::new("/usr/local/bin/o3kd"),
+            false,
+        );
+        assert_eq!(
+            result,
+            Err("installed executable cannot select a different data root")
+        );
+    }
+
+    #[test]
+    fn installed_operator_executable_rejects_custom_data_root() {
+        let result = deny_installed_executable_access_for(
+            Path::new("/tmp/o3k-upgrade-fixture/data"),
+            Path::new("/usr/local/bin/o3k"),
+            Path::new("/usr/local/bin/o3k"),
+            false,
+        );
+        assert_eq!(
+            result,
+            Err("installed executable cannot select a different data root")
+        );
+    }
+
+    #[test]
+    fn installed_manifest_rejects_alternate_executable_data_root() {
+        let result = deny_installed_executable_access_for(
+            Path::new("/tmp/o3k-upgrade-fixture/data"),
+            Path::new("/opt/o3k/releases/current/bin/o3k"),
+            Path::new("/usr/local/bin/o3k"),
+            true,
+        );
+        assert_eq!(
+            result,
+            Err("installed executable cannot select a different data root")
+        );
+    }
+
+    #[test]
+    fn v2_only_release_authority_requires_selector_for_every_consumer() {
+        assert!(manifest_requires_selector(
+            br#"{"installation_policy_v2_authority":{"key_id":"policy-v2"}}"#
+        ));
+        assert!(!manifest_requires_selector(
+            br#"{"version":"0.4.0-rc.5","source_commit":"legacy-source-fixture"}"#
+        ));
+        assert!(manifest_requires_selector(b"not-json"));
     }
 
     fn key_hex(key: &ed25519_dalek::VerifyingKey) -> String {

@@ -900,7 +900,7 @@ fn revalidate_destination(dirfd: &OwnedFd, destination: &Path) -> Result<(), &'s
 
 /// Validates `--destination`: absolute, existing, a real directory (no symlink
 /// substitution), owned by the effective uid, and not group/other-writable.
-fn validate_destination(destination: &Path) -> Result<(), &'static str> {
+pub fn validate_destination(destination: &Path) -> Result<(), &'static str> {
     if !destination.is_absolute() {
         return Err("destination-not-absolute");
     }

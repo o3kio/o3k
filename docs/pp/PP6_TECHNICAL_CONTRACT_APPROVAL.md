@@ -241,6 +241,12 @@ production, independent-security, target-mutation, activation, or final PP.6
 evidence.
 
 Review then found an internal conflict in the accepted text's publication
-order. PR #1193 corrects that conflict and requires its own exact-head owner
-disposition and protected merge before policy-v2 implementation begins. PR
-approval or merge alone is not that normative decision.
+order. PR #1193 corrects that conflict. The owner ACCEPT was supplied for
+exact head `16f41ad4c531abcccc2c1dbb9246333289b67849` and the clarification
+merged into protected `main` at `586fe87b2966223450114bee26b35fc72f08ba6e`.
+The exact-head APPROVED review is supporting review metadata, not the owner
+decision itself.
+This is an implementation/testing decision only; ADR-0190's explicitly
+non-independent review disclosure remains applicable, and no runtime,
+installed, production, independent-security, target-mutation, activation, or
+final PP.6 evidence follows from it.
