@@ -17,7 +17,29 @@ mod tests {
     use async_trait::async_trait;
     use o3k_compute_agent::ArtifactStore;
     use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn installed_compute_uses_fixed_installation_root_even_with_custom_identity_path() {
+        assert_eq!(
+            startup_installation_root(
+                Path::new("/usr/local/bin/o3k-compute"),
+                Path::new("/tmp/alternate/compute/agent-id"),
+            ),
+            PathBuf::from("/var/lib/o3k")
+        );
+    }
+
+    #[test]
+    fn source_built_compute_uses_testlab_installation_root() {
+        assert_eq!(
+            startup_installation_root(
+                Path::new("./target/debug/o3k-compute"),
+                Path::new("./compute-data/agent-id"),
+            ),
+            PathBuf::from(".")
+        );
+    }
 
     #[test]
     fn hostname_normalization_discards_nul_padding_and_bounds_identity() {

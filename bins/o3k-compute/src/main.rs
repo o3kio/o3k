@@ -112,18 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // or agent/provider dispatch. The parent of the packaged
     // `/var/lib/o3k/compute` state is the canonical installation directory;
     // source-built TestLab runs retain their non-installed data-root path.
-    let installed_executable =
-        env::current_exe().is_ok_and(|path| path == Path::new("/usr/local/bin/o3k-compute"));
-    let installation_root = if installed_executable {
-        PathBuf::from("/var/lib/o3k")
-    } else {
-        config
-            .identity_file
-            .parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/var/lib/o3k"))
-    };
+    let executable = env::current_exe()?;
+    let installation_root = startup_installation_root(&executable, &config.identity_file);
     o3k::recovery_installation::deny_operational_access(&installation_root)
         .map_err(std::io::Error::other)?;
     tracing_subscriber::fmt()
@@ -351,6 +341,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!("o3k-compute stopped");
     Ok(())
+}
+
+fn startup_installation_root(executable: &Path, identity_file: &Path) -> PathBuf {
+    if executable == Path::new("/usr/local/bin/o3k-compute") {
+        return PathBuf::from("/var/lib/o3k");
+    }
+    identity_file
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/o3k"))
 }
 
 fn health_router(state: HealthState) -> Router {
