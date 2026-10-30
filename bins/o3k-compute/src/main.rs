@@ -41,7 +41,7 @@ use runtime::{
 use std::{
     env,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -105,17 +105,10 @@ struct HealthState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // This must precede configuration parsing: the active selector and its
+    // fixed installation root are never chosen by compute environment.
+    o3k::recovery_installation::deny_compute_startup_access().map_err(std::io::Error::other)?;
     let mut config = config_from_env()?;
-    // This executable can be started directly or restarted by systemd. Check
-    // the authenticated installation selector before libvirt observation,
-    // DHCP/network reconciliation, residue cleanup, restoration, readiness,
-    // or agent/provider dispatch. The parent of the packaged
-    // `/var/lib/o3k/compute` state is the canonical installation directory;
-    // source-built TestLab runs retain their non-installed data-root path.
-    let executable = env::current_exe()?;
-    let installation_root = startup_installation_root(&executable, &config.identity_file);
-    o3k::recovery_installation::deny_operational_access(&installation_root)
-        .map_err(std::io::Error::other)?;
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(EnvFilter::from_default_env())
@@ -196,99 +189,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
         bridge_name.clone(),
     )?));
-    // Startup residue cleanup (issue #87 S3 rerun #5, issue #88 S3/S4
-    // reruns): the stale-network reap removes the persisted DHCP bindings
-    // and TAPs of instances whose domains provably do not exist FIRST, then
-    // the owned-dnsmasq reap stops EVERY owned dnsmasq — at startup the
-    // supervisor is always None, so any owned dnsmasq is a leftover of a
-    // previous process regardless of bindings (a live-bound orphan would
-    // hold the DHCP socket and block the fresh supervisor). Live bindings
-    // then get their fresh supervisor below. Errors are logged and retried
-    // on the next restart; startup is never blocked.
-    if !network_owned_by_external_agent
-        && let Err(error) = reap_startup_residue(&network, &dhcp, &libvirt).await
-    {
-        tracing::warn!(
-            error = %error,
-            "startup residue reap failed; retried on the next restart"
-        );
-    }
-    // Reap incomplete-transfer `.part` files that can never be resumed
-    // (issue #88 S5 supplementary): a crashed agent's part survives its
-    // restart and the resource delete (the delete arm reaps config-drive
-    // artifacts only), and the control plane expires the abandoned transfer
-    // row (#571) without ever resuming it. The rule mirrors
-    // `artifact_statuses`: a part with no manifest or an expired incomplete
-    // transfer is an orphan; a non-expired incomplete transfer is resumed
-    // with the SAME transfer id after reconnect and its part is kept.
-    // Best-effort and never fatal; the inventory catches residue.
-    reap_orphaned_transfer_parts(&artifact_root, &agent_id, None);
-    // A DHCP that cannot start at boot (missing capabilities, a port
-    // conflict, the host's own dnsmasq on 127.0.0.1:53, ...) must not take
-    // the agent down: the failure is logged, the agent stays up, and DHCP
-    // is retried on the next restart or the next create. Create-time DHCP
-    // failures remain fail-closed in DhcpRuntime::apply.
-    if !network_owned_by_external_agent
-        && let Err(error) = reconcile_dhcp_on_startup(&dhcp, &network)
-    {
-        tracing::warn!(
-            error = %error,
-            "DHCP reconciliation failed at startup; the agent stays up and \
-             retries on the next restart or create"
-        );
-    }
-    // Host-reboot restoration (issue #613 blocker A): domains whose last
-    // lifecycle mutation provably left them running are started again inside
-    // a bounded window. The restore runs as a task next to the control
-    // connection so a slow restore can never delay agent registration, and
-    // it only ever starts domains the agent's own journal proves were
-    // running. A failed restore is logged and retried on the next restart.
-    let restore_states = match o3k_compute_agent::load_journal_lifecycle_resource_states(
-        agent.identity_file(),
-        &agent_id,
-    ) {
-        Ok(states) => states,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "command journal could not be read for domain restoration; \
-                 restoration skipped for this start"
-            );
-            std::collections::HashMap::new()
+    // Provider-side startup recovery is deferred until the control plane has
+    // authenticated this agent registration. This is the live D8 quiescence
+    // boundary; the durable installation selector above handles restart denial.
+    let restore_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let startup_restore_task = Arc::clone(&restore_task);
+    let startup_network = Arc::clone(&network);
+    let startup_dhcp = Arc::clone(&dhcp);
+    let startup_libvirt = libvirt.clone();
+    let startup_artifact_root = artifact_root.clone();
+    let startup_identity_path = agent.identity_file().to_path_buf();
+    let startup_agent_id = agent_id.clone();
+    let startup_fabric_attachments = fabric_attachments.clone();
+    let startup_local_host = local_host.clone();
+    let startup_admission = move || async move {
+        if !network_owned_by_external_agent
+            && let Err(error) =
+                reap_startup_residue(&startup_network, &startup_dhcp, &startup_libvirt).await
+        {
+            tracing::warn!(error = %error, "startup residue reap failed; retried on the next restart");
         }
-    };
-    let restore_journal_refresh = CommandJournalStartupRefresh {
-        identity_path: agent.identity_file().to_path_buf(),
-        agent_id: agent_id.clone(),
-    };
-    let restore_identity_path = agent.identity_file().to_path_buf();
-    let restore_agent_id = agent_id.clone();
-    let restore_fabric_attachments = fabric_attachments.clone();
-    let restore_local_host = local_host.clone();
-    let restore_task = tokio::spawn({
-        let adapter = libvirt.clone();
-        let network = Arc::clone(&network);
-        async move {
-            let tap_restorer = NetworkStartupTapRestore {
-                network,
-                fabric_attachments: restore_fabric_attachments,
-                external_owner: network_owned_by_external_agent,
-                local_host: restore_local_host,
-                identity_path: restore_identity_path,
-                agent_id: restore_agent_id,
-            };
-            // The unconverged outcome is logged once inside the restore pass
-            // (with the pending count); the returned error needs no second
-            // log site here.
-            let _ = restore_expected_running_domains(
-                &tap_restorer,
-                &adapter,
-                &restore_journal_refresh,
-                &restore_states,
-            )
-            .await;
+        reap_orphaned_transfer_parts(&startup_artifact_root, &startup_agent_id, None);
+        if !network_owned_by_external_agent
+            && let Err(error) = reconcile_dhcp_on_startup(&startup_dhcp, &startup_network)
+        {
+            tracing::warn!(error = %error, "DHCP reconciliation failed at startup; the agent stays up and retries later");
         }
-    });
+        let restore_states = match o3k_compute_agent::load_journal_lifecycle_resource_states(
+            &startup_identity_path,
+            &startup_agent_id,
+        ) {
+            Ok(states) => states,
+            Err(error) => {
+                tracing::warn!(error = %error, "command journal could not be read for domain restoration; restoration skipped for this start");
+                std::collections::HashMap::new()
+            }
+        };
+        let restore_journal_refresh = CommandJournalStartupRefresh {
+            identity_path: startup_identity_path.clone(),
+            agent_id: startup_agent_id.clone(),
+        };
+        let restore_identity_path = startup_identity_path.clone();
+        let restore_agent_id = startup_agent_id.clone();
+        let restore_local_host = startup_local_host.clone();
+        let handle = tokio::spawn({
+            let adapter = startup_libvirt.clone();
+            let network = Arc::clone(&startup_network);
+            async move {
+                let tap_restorer = NetworkStartupTapRestore {
+                    network,
+                    fabric_attachments: startup_fabric_attachments,
+                    external_owner: network_owned_by_external_agent,
+                    local_host: restore_local_host,
+                    identity_path: restore_identity_path,
+                    agent_id: restore_agent_id,
+                };
+                let _ = restore_expected_running_domains(
+                    &tap_restorer,
+                    &adapter,
+                    &restore_journal_refresh,
+                    &restore_states,
+                )
+                .await;
+            }
+        });
+        *startup_restore_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+        Ok::<(), AgentError>(())
+    };
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
         artifact_root,
@@ -328,14 +297,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let health_server = axum::serve(TcpListener::bind(health_addr).await?, health_router(state));
     tokio::select! {
-        result = agent.run_with_executor(shutdown_signal(), executor) => {
-            restore_task.abort();
-            let _ = restore_task.await;
+        result = agent.run_with_executor_after_registration(shutdown_signal(), executor, startup_admission) => {
+            stop_restore_task(&restore_task).await;
             result?;
         }
         result = health_server.with_graceful_shutdown(shutdown_signal()) => {
-            restore_task.abort();
-            let _ = restore_task.await;
+            stop_restore_task(&restore_task).await;
             result?;
         }
     }
@@ -343,15 +310,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn startup_installation_root(executable: &Path, identity_file: &Path) -> PathBuf {
-    if executable == Path::new("/usr/local/bin/o3k-compute") {
-        return PathBuf::from("/var/lib/o3k");
+async fn stop_restore_task(restore_task: &Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>) {
+    let task = restore_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
     }
-    identity_file
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/o3k"))
 }
 
 fn health_router(state: HealthState) -> Router {

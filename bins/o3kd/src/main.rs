@@ -14,6 +14,12 @@ const SERVE_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(15
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = o3k_config::Config::from_sources(std::env::args(), std::env::vars())?;
+    // Verify the installed selector before acquiring the store lock, binding
+    // the API listener, or opening canonical state. A custom TestLab data
+    // directory remains accepted only when no installed release authority
+    // claims this host.
+    o3k::recovery_installation::deny_control_plane_startup_access(&config.data_dir)
+        .map_err(std::io::Error::other)?;
     let subscriber =
         tracing_subscriber::fmt().with_env_filter(EnvFilter::try_new(&config.log_filter)?);
     match config.log_format {

@@ -17,13 +17,13 @@ libvirt = ["o3k-libvirt/libvirt"]
 async-trait.workspace = true
 axum.workspace = true
 o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
+o3k = { path = "../o3k" }
 o3k-console = { path = "../../crates/o3k-console" }
 o3k-dhcp = { path = "../../crates/o3k-dhcp" }
 o3k-libvirt = { path = "../../crates/o3k-libvirt" }
 o3k-network = { path = "../../crates/o3k-network" }
 o3k-provider = { path = "../../crates/o3k-provider" }
 o3k-provider-contract = { path = "../../crates/o3k-provider-contract" }
-o3k = { path = "../o3k" }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

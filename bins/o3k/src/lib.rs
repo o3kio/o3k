@@ -73,7 +73,7 @@ pub mod recovery_identity;
 #[cfg(target_os = "linux")]
 pub mod recovery_installation;
 #[cfg(target_os = "linux")]
-pub mod recovery_policy_v2;
+pub mod recovery_migration_selector;
 #[cfg(target_os = "linux")]
 pub mod recovery_prepare;
 #[cfg(target_os = "linux")]

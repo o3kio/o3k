@@ -27,6 +27,8 @@ pub enum AgentError {
     TlsMaterial,
     #[error("compute-agent protocol error: {0}")]
     Protocol(String),
+    #[error("compute-agent startup admission denied: {0}")]
+    StartupAdmission(String),
 }
 
 #[derive(Clone)]
