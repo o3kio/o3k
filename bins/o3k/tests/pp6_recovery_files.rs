@@ -119,6 +119,41 @@ fn accepts_packaged_posture_and_rejects_writable_posture_and_stale_identity() {
 
 #[test]
 #[ignore = "requires root and local ext4"]
+fn named_lock_is_no_follow_and_remains_exclusive_while_held() {
+    let fixture = Fixture::new().expect("root/local fixture");
+    let directory = fixture.open();
+    let path = fixture.0.join("restore-signing-request.lock");
+    fs::write(&path, b"").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let held = directory
+        .try_lock_existing_file("restore-signing-request.lock", 0, 0, 0o600)
+        .unwrap()
+        .expect("existing lock file");
+    assert!(
+        directory
+            .try_lock_existing_file("restore-signing-request.lock", 0, 0, 0o600)
+            .is_err()
+    );
+    drop(held);
+    assert!(
+        directory
+            .try_lock_existing_file("restore-signing-request.lock", 0, 0, 0o600)
+            .unwrap()
+            .is_some()
+    );
+
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink("missing-lock-target", &path).unwrap();
+    assert!(
+        directory
+            .try_lock_existing_file("restore-signing-request.lock", 0, 0, 0o600)
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "requires root and local ext4"]
 fn rejects_symlink_and_stale_cas_and_detects_path_replacement() {
     let fixture = Fixture::new().expect("root/local fixture");
     let dir = fixture.open();

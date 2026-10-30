@@ -307,7 +307,7 @@ fn verify_v2_selected_generation(
         policy.recovery_state_inode,
     )
     .map_err(|_| "protected recovery state directory is unsafe")?;
-    let _journal_directory = ProtectedDirectory::open(
+    let journal_directory = ProtectedDirectory::open(
         Path::new(&policy.journal_directory),
         uid,
         service_gid,
@@ -382,25 +382,6 @@ fn verify_v2_selected_generation(
     if hex::encode(Sha256::digest(&prior_state_bytes)) != migration.prior_record_digest {
         return Err("migration prior state archive digest changed");
     }
-    let prior_state: InstallationState = identity::verify_signed(
-        &prior_state_bytes,
-        "o3k-installation-state-v1",
-        &old_authority.key_id,
-        &policy_key,
-    )
-    .map_err(|_| "migration prior state signature is invalid")?;
-    identity::verify_initial_state_transition(None, &prior_state, &prior_policy)
-        .map_err(|_| "migration prior state binding is invalid")?;
-    verify_migration_predecessor_high_water(
-        &state_directory,
-        service_gid,
-        &old_authority.key_id,
-        &policy_key,
-        &prior_policy,
-        &prior_policy_bytes,
-        &migration.prior_record_digest,
-    )?;
-
     let prior_manifest_bytes = state_directory
         .read_bounded(
             &format!("release-{}.json", migration.prior_release_manifest_sha256),
@@ -424,6 +405,24 @@ fn verify_v2_selected_generation(
     {
         return Err("migration release policy signer changed");
     }
+    let predecessor = MigrationPredecessorContext {
+        state_directory: &state_directory,
+        journal_directory: &journal_directory,
+        uid,
+        gid: service_gid,
+        prior_policy: &prior_policy,
+        prior_policy_bytes: &prior_policy_bytes,
+        prior_manifest_bytes: &prior_manifest_bytes,
+        policy_key_id: &old_authority.key_id,
+        policy_key: &policy_key,
+    };
+    let (prior_state_sequence, prior_state_kind) =
+        verify_migration_predecessor(&predecessor, &prior_state_bytes, &migration)?;
+    verify_migration_predecessor_high_water(
+        &predecessor,
+        &migration.prior_record_digest,
+        prior_state_sequence,
+    )?;
     let expected_prior_release = selector::ReleaseIdentity {
         version: prior_release.o3k_version,
         source_commit: prior_release.source_sha,
@@ -461,7 +460,7 @@ fn verify_v2_selected_generation(
         &new_authority.key_id,
         &policy_key,
         &selector::MigrationBindings {
-            prior_sequence: prior_state.sequence,
+            prior_sequence: prior_state_sequence,
             prior_tip_digest: &migration.prior_record_digest,
             prior_policy_digest: &prior_policy_digest,
             prior_policy_revision: prior_policy.policy_revision,
@@ -478,17 +477,15 @@ fn verify_v2_selected_generation(
         &migration,
         &policy.installation_id,
         &policy.site_id,
-        prior_state.state,
+        prior_state_kind,
     )
     .map_err(|_| "installation migration selector identity is invalid")?;
-    if migration.sequence != prior_state.sequence.saturating_add(1)
+    if migration.sequence != prior_state_sequence.saturating_add(1)
         || migration.prior_record_digest != hex::encode(Sha256::digest(&prior_state_bytes))
-        || migration.preserved_state != prior_state.state
+        || migration.preserved_state != prior_state_kind
         || policy.policy_revision != prior_policy.policy_revision.saturating_add(1)
         || policy.prior_policy_digest != migration.prior_policy_digest
         || policy.signer_key_id != new_authority.key_id
-        || migration.preserved_state != RecoveryState::NeverRecovered
-        || migration.checkpoint_digest.is_some()
     {
         return Err("installation migration transition is invalid");
     }
@@ -509,33 +506,241 @@ fn verify_v2_selected_generation(
     }
     let _data_directory = open_data_root(data_dir, uid, service_gid, &current_policy)
         .map_err(|_| "recovery target identity or protection changed")?;
-    Ok((policy.backend, prior_state.state))
+    Ok((policy.backend, prior_state_kind))
+}
+
+/// Authenticates the exact v1 state tip named by a policy migration. A plain
+/// v1 `NEVER_RECOVERED` genesis needs no journal. Every C1.1 re-anchor is
+/// checked through the complete archived R/C chain, including its current
+/// journal-v1 checkpoint. A disposition without that re-anchor is ambiguous
+/// for migration and remains denied.
+struct MigrationPredecessorContext<'a> {
+    state_directory: &'a ProtectedDirectory,
+    journal_directory: &'a ProtectedDirectory,
+    uid: u32,
+    gid: u32,
+    prior_policy: &'a InstallationPolicy,
+    prior_policy_bytes: &'a [u8],
+    prior_manifest_bytes: &'a [u8],
+    policy_key_id: &'a str,
+    policy_key: &'a VerifyingKey,
+}
+
+fn verify_migration_predecessor(
+    context: &MigrationPredecessorContext<'_>,
+    prior_state_bytes: &[u8],
+    migration: &crate::recovery_migration_selector::InstallationPolicyMigrationV1,
+) -> Result<(u64, RecoveryState)> {
+    let envelope: identity::Signed<serde_json::Value> =
+        identity::decode_canonical(prior_state_bytes)
+            .map_err(|_| "migration prior state is malformed")?;
+    let format = envelope
+        .payload
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("migration prior state kind is missing")?;
+    let digest = hex::encode(Sha256::digest(prior_state_bytes));
+    if digest != migration.prior_record_digest {
+        return Err("migration prior state digest changed");
+    }
+    match format {
+        "o3k-installation-state-v1" => {
+            let state: InstallationState = identity::verify_signed(
+                prior_state_bytes,
+                "o3k-installation-state-v1",
+                context.policy_key_id,
+                context.policy_key,
+            )
+            .map_err(|_| "migration prior state signature is invalid")?;
+            if state.state != RecoveryState::NeverRecovered || migration.checkpoint_digest.is_some()
+            {
+                return Err("recovered migration predecessor lacks a C1.1 checkpoint");
+            }
+            identity::verify_initial_state_transition(None, &state, context.prior_policy)
+                .map_err(|_| "migration prior state binding is invalid")?;
+            Ok((state.sequence, state.state))
+        }
+        reanchor::REANCHOR_FORMAT => {
+            let record = verify_migration_reanchor_record(
+                prior_state_bytes,
+                context.policy_key_id,
+                context.policy_key,
+            )?;
+            if record.preserved_state != RecoveryState::NeverRecovered
+                && record.checkpoint_digest.is_none()
+            {
+                return Err("recovered migration predecessor lacks a C1.1 checkpoint");
+            }
+            if record.checkpoint_digest != migration.checkpoint_digest {
+                return Err("migration checkpoint does not match the C1.1 re-anchor");
+            }
+            let _signing_request_lock = context
+                .journal_directory
+                .try_lock_existing_file(
+                    "restore-signing-request.lock",
+                    context.uid,
+                    context.gid,
+                    0o600,
+                )
+                .map_err(|_| "recovery journal signing lock is unsafe or busy")?;
+            let names = context
+                .journal_directory
+                .list_names()
+                .map_err(|_| "recovery journal directory cannot be inspected")?;
+            let pending_signing_request_present = names.iter().any(|name| {
+                name == reanchor::PENDING_REQUEST_NAME
+                    || (name.starts_with("restore-reservation-") && name.ends_with(".lock"))
+            });
+            if pending_signing_request_present {
+                return Err("pending recovery journal work denies migration admission");
+            }
+
+            let fixed_bundle_bytes = read_protected_config(
+                Path::new(&context.prior_policy.trust_bundle_path),
+                context.gid,
+            )
+            .map_err(|_| "installed recovery trust is unsafe or unavailable")?;
+            let trust_high_water_bytes = context
+                .state_directory
+                .read_bounded("trust.json", 0, context.gid, 0o640, MAX_DOCUMENT)
+                .map_err(|_| "durable recovery trust high-water state is unavailable")?;
+            let journal_bytes = context
+                .journal_directory
+                .read_bounded(
+                    "restore-journal.json",
+                    context.uid,
+                    context.gid,
+                    0o600,
+                    64 * 1024 * 1024,
+                )
+                .map_err(|_| "recovery journal is unsafe or unavailable")?;
+            let checkpoint_bytes = context
+                .journal_directory
+                .read_bounded(
+                    reanchor::CHECKPOINT_NAME,
+                    context.uid,
+                    context.gid,
+                    0o600,
+                    MAX_DOCUMENT,
+                )
+                .map_err(|_| "C1.1 journal checkpoint is missing")?;
+            let observed_checkpoint_digest = hex::encode(Sha256::digest(&checkpoint_bytes));
+            if record.checkpoint_digest.as_deref() != Some(observed_checkpoint_digest.as_str()) {
+                return Err("C1.1 journal checkpoint digest changed");
+            }
+            let consumption_record_bytes = context
+                .state_directory
+                .read_bounded(
+                    reanchor::CONSUMPTION_NAME,
+                    0,
+                    context.gid,
+                    0o640,
+                    MAX_DOCUMENT,
+                )
+                .ok();
+            let view = reanchor::GenerationView {
+                manifest_bytes: context.prior_manifest_bytes,
+                policy_bytes: context.prior_policy_bytes,
+                // The active v2 high-water has already been verified above.
+                // This historical view binds the archived v1 policy itself;
+                // a v1 high-water file must not be inferred from current v2
+                // state after the selector has advanced.
+                policy_high_water_bytes: Some(context.prior_policy_bytes),
+                fixed_bundle_bytes: &fixed_bundle_bytes,
+                trust_high_water_bytes: &trust_high_water_bytes,
+                pending_reanchor_bytes: None,
+                staged_prior_policy_bytes: None,
+                staged_prior_trust_bytes: None,
+                state_tip_bytes: prior_state_bytes,
+                journal_bytes: Some(&journal_bytes),
+                checkpoint_bytes: Some(&checkpoint_bytes),
+                consumption_record_bytes: consumption_record_bytes.as_deref(),
+                pending_signing_request_present,
+                now: chrono::Utc::now().timestamp(),
+            };
+            let archives = ProtectedArchives {
+                state_directory: context.state_directory,
+                journal_directory: Some(context.journal_directory),
+                uid: context.uid,
+                gid: context.gid,
+            };
+            let observed = reanchor::authenticate_rotated_generation(&view, &archives)
+                .map_err(rotated_denial_reason)?;
+            if observed.tip_digest != digest
+                || observed.tip_sequence != record.sequence
+                || observed.preserved_state != record.preserved_state
+                || observed.policy_digest != hex::encode(Sha256::digest(context.prior_policy_bytes))
+                || observed.trust_bundle_digest != hex::encode(Sha256::digest(&fixed_bundle_bytes))
+            {
+                return Err("C1.1 migration predecessor identity is inconsistent");
+            }
+            Ok((observed.tip_sequence, observed.preserved_state))
+        }
+        _ => Err("migration prior state kind is unsupported"),
+    }
+}
+
+fn verify_migration_reanchor_record(
+    bytes: &[u8],
+    policy_key_id: &str,
+    policy_key: &VerifyingKey,
+) -> Result<reanchor::InstallationReanchor> {
+    identity::verify_signed(bytes, reanchor::REANCHOR_FORMAT, policy_key_id, policy_key)
+        .map_err(|_| "migration re-anchor signature or binding is invalid")
 }
 
 /// The selector overwrites the previous active state tip and policy
-/// high-water. For the supported sequence-zero predecessor, archived v1
-/// policy and state records are the remaining durable evidence of the old
-/// generation's high-water. Reject a selector that points at a stale policy
-/// archive or leaves any later state archive behind.
+/// high-water. Archived v1 policy and state records are the remaining durable
+/// evidence of the old generation's high-water. Reject stale policy archives,
+/// gaps or equivocation in the state chain, and state beyond the authenticated
+/// predecessor tip.
 fn verify_migration_predecessor_high_water(
-    state_directory: &ProtectedDirectory,
-    gid: u32,
-    policy_key_id: &str,
-    policy_key: &VerifyingKey,
-    prior_policy: &InstallationPolicy,
-    prior_policy_bytes: &[u8],
+    context: &MigrationPredecessorContext<'_>,
     prior_state_digest: &str,
+    prior_state_sequence: u64,
 ) -> Result<()> {
-    let names = state_directory
+    let names = context
+        .state_directory
         .list_names()
         .map_err(|_| "migration predecessor archives cannot be enumerated")?;
     let mut archived_policy_high_waters = Vec::new();
-    let mut state_archives = Vec::new();
-    let prior_policy_digest = hex::encode(Sha256::digest(prior_policy_bytes));
+    let mut state_archives = std::collections::BTreeMap::new();
+    let prior_policy_digest = hex::encode(Sha256::digest(context.prior_policy_bytes));
 
     for name in &names {
         if name.starts_with("state-") && name.ends_with(".json") {
-            state_archives.push(name.as_str());
+            let (area, expected_digest) =
+                parse_archive_name(name).ok_or("migration state archive name is malformed")?;
+            if !matches!(area, ArchiveArea::StateRoot) {
+                return Err("migration state archive is outside protected recovery state");
+            }
+            let bytes = context
+                .state_directory
+                .read_bounded(name, 0, context.gid, 0o640, MAX_DOCUMENT)
+                .map_err(|_| "migration state archive is unsafe or unavailable")?;
+            if hex::encode(Sha256::digest(&bytes)) != expected_digest {
+                return Err("migration state archive digest changed");
+            }
+            let signed: identity::Signed<serde_json::Value> = identity::decode_canonical(&bytes)
+                .map_err(|_| "migration state archive is malformed")?;
+            let format = signed
+                .payload
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("migration state archive kind is missing")?;
+            if format != "o3k-installation-state-v1" && format != reanchor::REANCHOR_FORMAT {
+                return Err("migration state archive kind is unsupported");
+            }
+            let sequence = signed
+                .payload
+                .get("sequence")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("migration state archive sequence is invalid")?;
+            if sequence > prior_state_sequence
+                || state_archives.insert(sequence, expected_digest).is_some()
+            {
+                return Err("migration state archive contains a stale or conflicting tip");
+            }
         }
         if !name.starts_with("policy-") || !name.ends_with(".json") {
             continue;
@@ -545,8 +750,9 @@ fn verify_migration_predecessor_high_water(
         if !matches!(area, ArchiveArea::StateRoot) {
             return Err("migration policy archive is outside protected recovery state");
         }
-        let bytes = state_directory
-            .read_bounded(name, 0, gid, 0o640, MAX_DOCUMENT)
+        let bytes = context
+            .state_directory
+            .read_bounded(name, 0, context.gid, 0o640, MAX_DOCUMENT)
             .map_err(|_| "migration policy archive is unsafe or unavailable")?;
         let actual_digest = hex::encode(Sha256::digest(&bytes));
         if actual_digest != expected_digest {
@@ -555,16 +761,16 @@ fn verify_migration_predecessor_high_water(
         let archived: InstallationPolicy = identity::verify_signed(
             &bytes,
             "o3k-installation-policy-v1",
-            policy_key_id,
-            policy_key,
+            context.policy_key_id,
+            context.policy_key,
         )
         .map_err(|_| "migration policy archive signature is invalid")?;
-        identity::verify_policy(&archived, policy_key_id)
+        identity::verify_policy(&archived, context.policy_key_id)
             .map_err(|_| "migration policy archive binding is invalid")?;
-        if archived.installation_id != prior_policy.installation_id
-            || archived.site_id != prior_policy.site_id
-            || archived.target_device != prior_policy.target_device
-            || archived.target_inode != prior_policy.target_inode
+        if archived.installation_id != context.prior_policy.installation_id
+            || archived.site_id != context.prior_policy.site_id
+            || archived.target_device != context.prior_policy.target_device
+            || archived.target_inode != context.prior_policy.target_inode
         {
             return Err("migration policy archive identity changed");
         }
@@ -573,9 +779,10 @@ fn verify_migration_predecessor_high_water(
 
     verify_migration_archive_high_water(
         &prior_policy_digest,
-        prior_policy.policy_revision,
+        context.prior_policy.policy_revision,
         &archived_policy_high_waters,
         prior_state_digest,
+        prior_state_sequence,
         &state_archives,
     )
 }
@@ -585,7 +792,8 @@ fn verify_migration_archive_high_water(
     prior_policy_revision: u64,
     archived_policy_high_waters: &[(u64, String)],
     prior_state_digest: &str,
-    state_archives: &[&str],
+    prior_state_sequence: u64,
+    state_archives: &std::collections::BTreeMap<u64, String>,
 ) -> Result<()> {
     let mut found_prior_policy = false;
     for (index, (revision, digest)) in archived_policy_high_waters.iter().enumerate() {
@@ -603,11 +811,13 @@ fn verify_migration_archive_high_water(
             found_prior_policy = true;
         }
     }
-    let prior_state_name = format!("state-{prior_state_digest}.json");
-    if !found_prior_policy
-        || state_archives.len() != 1
-        || state_archives.first().copied() != Some(prior_state_name.as_str())
-    {
+    let complete_state_chain = state_archives.len() as u64
+        == prior_state_sequence.saturating_add(1)
+        && (0..=prior_state_sequence).all(|sequence| state_archives.contains_key(&sequence))
+        && state_archives
+            .get(&prior_state_sequence)
+            .is_some_and(|digest| digest == prior_state_digest);
+    if !found_prior_policy || !complete_state_chain {
         return Err("migration prior state is not the unique archived v1 high-water tip");
     }
     Ok(())
@@ -1973,15 +2183,18 @@ mod tests {
     fn migration_rejects_stale_archived_policy_and_state_high_water() {
         let prior_policy_digest = "a".repeat(64);
         let prior_state_digest = "b".repeat(64);
-        let prior_state_name = format!("state-{prior_state_digest}.json");
         let valid_archives = [(3, prior_policy_digest.clone())];
+        let valid_state_archives = [(0, prior_state_digest.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert!(
             verify_migration_archive_high_water(
                 &prior_policy_digest,
                 3,
                 &valid_archives,
                 &prior_state_digest,
-                &[prior_state_name.as_str()],
+                0,
+                &valid_state_archives,
             )
             .is_ok()
         );
@@ -1992,7 +2205,8 @@ mod tests {
                 3,
                 &[(3, prior_policy_digest.clone()), (4, "c".repeat(64))],
                 &prior_state_digest,
-                &[prior_state_name.as_str()],
+                0,
+                &valid_state_archives,
             )
             .is_err()
         );
@@ -2002,7 +2216,8 @@ mod tests {
                 3,
                 &[(3, "d".repeat(64))],
                 &prior_state_digest,
-                &[prior_state_name.as_str()],
+                0,
+                &valid_state_archives,
             )
             .is_err()
         );
@@ -2016,7 +2231,8 @@ mod tests {
                     (3, prior_policy_digest.clone()),
                 ],
                 &prior_state_digest,
-                &[prior_state_name.as_str()],
+                0,
+                &valid_state_archives,
             )
             .is_err()
         );
@@ -2026,9 +2242,109 @@ mod tests {
                 3,
                 &valid_archives,
                 &prior_state_digest,
-                &[prior_state_name.as_str(), "state-later.json"],
+                1,
+                &valid_state_archives,
             )
             .is_err()
+        );
+        let two_record_chain = [(0, "c".repeat(64)), (1, prior_state_digest.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &valid_archives,
+                &prior_state_digest,
+                1,
+                &two_record_chain,
+            )
+            .is_ok()
+        );
+        let skipped_predecessor = [(1, prior_state_digest.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &valid_archives,
+                &prior_state_digest,
+                1,
+                &skipped_predecessor,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migration_reanchor_predecessor_rejects_invalid_signature_before_chain_use() {
+        let signing = keypair(0xA7);
+        let record = reanchor::InstallationReanchor {
+            format: reanchor::REANCHOR_FORMAT.to_owned(),
+            installation_id: "installation-1".to_owned(),
+            site_id: "site-1".to_owned(),
+            profile: "o3k-demo-v1".to_owned(),
+            backend: "sqlite".to_owned(),
+            preserved_state: RecoveryState::NeverRecovered,
+            sequence: 1,
+            prior_record_digest: "a".repeat(64),
+            prior_policy_revision: 1,
+            prior_policy_digest: "b".repeat(64),
+            new_policy_revision: 2,
+            new_policy_digest: "c".repeat(64),
+            prior_trust_bundle_digest: "d".repeat(64),
+            new_trust_bundle_digest: "e".repeat(64),
+            prior_journal_revocation: reanchor::RevocationHighWater {
+                root_id: JOURNAL_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "f".repeat(64),
+            },
+            prior_evidence_revocation: reanchor::RevocationHighWater {
+                root_id: EVIDENCE_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "1".repeat(64),
+            },
+            new_journal_revocation: reanchor::RevocationHighWater {
+                root_id: JOURNAL_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "f".repeat(64),
+            },
+            new_evidence_revocation: reanchor::RevocationHighWater {
+                root_id: EVIDENCE_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "1".repeat(64),
+            },
+            checkpoint_digest: None,
+            recovery_revalidation_digest: None,
+            operation_id: None,
+            artifact_sha256: None,
+            recovery_directory_digest: None,
+            terminal_journal_digest: None,
+            terminal_evidence_digest: None,
+            target_device: 1,
+            target_inode: 2,
+            signer_manifest_digest: "2".repeat(64),
+        };
+        let mut signed = sign(&record, &signing, "policy-signer");
+        signed.envelope.signature = "00".repeat(64);
+        let bytes = canonical(&signed).expect("canonical forged record");
+
+        assert_eq!(
+            verify_migration_reanchor_record(&bytes, "policy-signer", &signing.verifying_key(),),
+            Err("migration re-anchor signature or binding is invalid")
+        );
+
+        let valid = sign(&record, &signing, "policy-signer");
+        let valid_bytes = canonical(&valid).expect("canonical valid record");
+        assert_eq!(
+            verify_migration_reanchor_record(
+                &valid_bytes,
+                "policy-signer",
+                &signing.verifying_key(),
+            )
+            .expect("valid signed record"),
+            record
         );
     }
 
