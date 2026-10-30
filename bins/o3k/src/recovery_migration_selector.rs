@@ -84,6 +84,17 @@ pub struct InstallationPolicyMigrationV1 {
     pub signer_manifest_digest: String,
 }
 
+/// Cross-format anti-rollback high-water. The existing v1 verifier continues
+/// to consume its legacy `{revision, digest}` record; a v2-selected generation
+/// records the fixed format epoch as well.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyHighWaterV2 {
+    pub format_epoch: u64,
+    pub revision: u64,
+    pub digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorError {
     Invalid,
@@ -260,6 +271,23 @@ pub fn verify_migration_identity(
     Ok(())
 }
 
+pub fn verify_v2_high_water(
+    bytes: &[u8],
+    policy_digest: &str,
+    policy_revision: u64,
+) -> Result<(), SelectorError> {
+    let high_water: PolicyHighWaterV2 =
+        identity::decode_canonical(bytes).map_err(|_| SelectorError::Invalid)?;
+    if high_water.format_epoch != 2
+        || high_water.revision != policy_revision
+        || high_water.digest != policy_digest
+        || !digest(&high_water.digest)
+    {
+        return Err(SelectorError::Binding);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +399,39 @@ mod tests {
     fn successor_overflow_is_denied() {
         assert_eq!(successor(u64::MAX), None);
         assert_eq!(successor(7), Some(8));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn v2_high_water_binds_format_epoch_revision_and_exact_policy_digest() {
+        let expected_digest = "a".repeat(64);
+        let valid = PolicyHighWaterV2 {
+            format_epoch: 2,
+            revision: 6,
+            digest: expected_digest.clone(),
+        };
+        let bytes = identity::canonical(&valid).expect("canonical high-water");
+        assert!(verify_v2_high_water(&bytes, &expected_digest, 6).is_ok());
+
+        for invalid in [
+            PolicyHighWaterV2 {
+                format_epoch: 1,
+                ..valid.clone()
+            },
+            PolicyHighWaterV2 {
+                revision: 5,
+                ..valid.clone()
+            },
+            PolicyHighWaterV2 {
+                digest: "b".repeat(64),
+                ..valid.clone()
+            },
+        ] {
+            let bytes = identity::canonical(&invalid).expect("canonical high-water");
+            assert!(verify_v2_high_water(&bytes, &expected_digest, 6).is_err());
+        }
+
+        assert!(verify_v2_high_water(br#"{"format_epoch":2,"revision":6,"digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","extra":true}"#, &expected_digest, 6).is_err());
     }
 
     #[test]

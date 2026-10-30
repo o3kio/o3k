@@ -1026,7 +1026,9 @@ pub fn acquire_startup_guard(
     data_dir: &Path,
     backend: o3k_config::DatabaseBackend,
 ) -> Result<o3k_store::StoreAccessLock, Box<dyn std::error::Error>> {
-    let guard = o3k_store::StoreAccessLock::acquire(data_dir)?;
+    // Authenticate the installed recovery selector before acquiring even the
+    // canonical store-access guard. A selected but incomplete v2 generation
+    // must not create a lock file or progress to listener/provider startup.
     o3k::restore_preflight::deny_startup_if_restore_state_for_backend(
         data_dir,
         match backend {
@@ -1035,6 +1037,8 @@ pub fn acquire_startup_guard(
         },
     )
     .map_err(std::io::Error::other)?;
+    deny_interrupted_backup_markers(data_dir)?;
+    let guard = o3k_store::StoreAccessLock::acquire(data_dir)?;
     Ok(guard)
 }
 
@@ -3377,7 +3381,7 @@ mod tests {
 #[cfg(test)]
 mod backup_startup_tests {
     use super::{
-        INTERRUPTED_BACKUP_MARKER_PREFIX, deny_interrupted_backup_markers,
+        INTERRUPTED_BACKUP_MARKER_PREFIX, acquire_startup_guard, deny_interrupted_backup_markers,
         expected_backup_executor_from, shutdown_signal_with_backup,
     };
     use std::sync::Arc;
@@ -3435,6 +3439,24 @@ mod backup_startup_tests {
         assert!(
             message.contains("inspect"),
             "error must demand inspection: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn denied_startup_does_not_create_store_access_lock() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = TestDir::new("o3kd-backup-marker-no-store-lock")?;
+        let marker =
+            format!("{INTERRUPTED_BACKUP_MARKER_PREFIX}7c9e6679-7425-40de-944b-e07fc1f90ae7");
+        std::fs::write(root.0.join(marker), b"interrupted")?;
+
+        let result = acquire_startup_guard(&root.0, o3k_config::DatabaseBackend::Sqlite);
+
+        assert!(result.is_err(), "interrupted recovery must deny startup");
+        assert!(
+            !root.0.join(".o3k-store.lock").exists(),
+            "denied startup must not create the canonical store lock"
         );
         Ok(())
     }

@@ -21,6 +21,7 @@ PY
 password=${O3K_P13_PASSWORD:-p13-5e-provider-password}; project=eba29e2d-53de-461d-ae91-ede7402713cb
 backend_pid=; proxy_pid=
 proxy_evidence="$work/proxy-initial.json"
+install -d -m 700 "$work/data"
 database_args=()
 if [[ "${O3K_DATABASE_BACKEND:-sqlite}" == postgres || "${O3K_DATABASE_BACKEND:-sqlite}" == postgresql ]]; then
   database_args+=(--database-backend postgres --database-url "${O3K_DATABASE_URL:?O3K_DATABASE_URL is required for PostgreSQL}")
@@ -41,10 +42,27 @@ restart_backend() {
     curl -fsS "http://127.0.0.1:$backend_port/readyz" >/dev/null 2>&1 && return
     sleep .1
   done
+  echo 'o3kd did not become ready after restart; daemon log follows:' >&2
+  cat "$work/o3kd.log" >&2
   return 1
 }
 start_backend
-for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$backend_port/readyz" >/dev/null 2>&1 && break; sleep .1; done
+ready=false
+for _ in $(seq 1 120); do
+  if curl -fsS "http://127.0.0.1:$backend_port/readyz" >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  if ! kill -0 "$backend_pid" 2>/dev/null; then
+    break
+  fi
+  sleep .1
+done
+if [[ "$ready" != true ]]; then
+  echo 'o3kd did not become ready; daemon log follows:' >&2
+  cat "$work/o3kd.log" >&2
+  exit 1
+fi
 start_proxy() { python3 "$root_dir/scripts/p13_5e_fault_proxy.py" --serve-backend "http://127.0.0.1:$backend_port" --listen-port "$proxy_port" --evidence "$proxy_evidence" "$@" >"$work/proxy.address" 2>&1 & proxy_pid=$!; for _ in $(seq 1 50); do kill -0 "$proxy_pid" 2>/dev/null || return 1; curl -fsS "http://127.0.0.1:$proxy_port/readyz" >/dev/null 2>&1 && return; sleep .1; done; return 1; }
 stop_proxy() { kill -TERM "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; proxy_pid=; }
 assert_fault() { local file=$1 location=$2; python3 - "$file" "$location" <<'PY'
