@@ -561,10 +561,11 @@ fn verify_migration_predecessor(
             Ok((state.sequence, state.state))
         }
         reanchor::REANCHOR_FORMAT => {
-            let signed_record: identity::Signed<reanchor::InstallationReanchor> =
-                identity::decode_canonical(prior_state_bytes)
-                    .map_err(|_| "migration re-anchor predecessor is malformed")?;
-            let record = signed_record.payload;
+            let record = verify_migration_reanchor_record(
+                prior_state_bytes,
+                context.policy_key_id,
+                context.policy_key,
+            )?;
             if record.preserved_state != RecoveryState::NeverRecovered
                 && record.checkpoint_digest.is_none()
             {
@@ -687,6 +688,15 @@ fn verify_migration_predecessor(
         }
         _ => Err("migration prior state kind is unsupported"),
     }
+}
+
+fn verify_migration_reanchor_record(
+    bytes: &[u8],
+    policy_key_id: &str,
+    policy_key: &VerifyingKey,
+) -> Result<reanchor::InstallationReanchor> {
+    identity::verify_signed(bytes, reanchor::REANCHOR_FORMAT, policy_key_id, policy_key)
+        .map_err(|_| "migration re-anchor signature or binding is invalid")
 }
 
 /// The selector overwrites the previous active state tip and policy
@@ -2274,6 +2284,77 @@ mod tests {
                 &skipped_predecessor,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn migration_reanchor_predecessor_rejects_invalid_signature_before_chain_use() {
+        let signing = keypair(0xA7);
+        let record = reanchor::InstallationReanchor {
+            format: reanchor::REANCHOR_FORMAT.to_owned(),
+            installation_id: "installation-1".to_owned(),
+            site_id: "site-1".to_owned(),
+            profile: "o3k-demo-v1".to_owned(),
+            backend: "sqlite".to_owned(),
+            preserved_state: RecoveryState::NeverRecovered,
+            sequence: 1,
+            prior_record_digest: "a".repeat(64),
+            prior_policy_revision: 1,
+            prior_policy_digest: "b".repeat(64),
+            new_policy_revision: 2,
+            new_policy_digest: "c".repeat(64),
+            prior_trust_bundle_digest: "d".repeat(64),
+            new_trust_bundle_digest: "e".repeat(64),
+            prior_journal_revocation: reanchor::RevocationHighWater {
+                root_id: JOURNAL_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "f".repeat(64),
+            },
+            prior_evidence_revocation: reanchor::RevocationHighWater {
+                root_id: EVIDENCE_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "1".repeat(64),
+            },
+            new_journal_revocation: reanchor::RevocationHighWater {
+                root_id: JOURNAL_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "f".repeat(64),
+            },
+            new_evidence_revocation: reanchor::RevocationHighWater {
+                root_id: EVIDENCE_ROOT_ID.to_owned(),
+                sequence: 1,
+                document_digest: "1".repeat(64),
+            },
+            checkpoint_digest: None,
+            recovery_revalidation_digest: None,
+            operation_id: None,
+            artifact_sha256: None,
+            recovery_directory_digest: None,
+            terminal_journal_digest: None,
+            terminal_evidence_digest: None,
+            target_device: 1,
+            target_inode: 2,
+            signer_manifest_digest: "2".repeat(64),
+        };
+        let mut signed = sign(&record, &signing, "policy-signer");
+        signed.envelope.signature = "00".repeat(64);
+        let bytes = canonical(&signed).expect("canonical forged record");
+
+        assert_eq!(
+            verify_migration_reanchor_record(&bytes, "policy-signer", &signing.verifying_key(),),
+            Err("migration re-anchor signature or binding is invalid")
+        );
+
+        let valid = sign(&record, &signing, "policy-signer");
+        let valid_bytes = canonical(&valid).expect("canonical valid record");
+        assert_eq!(
+            verify_migration_reanchor_record(
+                &valid_bytes,
+                "policy-signer",
+                &signing.verifying_key(),
+            )
+            .expect("valid signed record"),
+            record
         );
     }
 
