@@ -320,9 +320,8 @@ fn verify_v2_selected_generation(
     let high_water = state_directory
         .read_bounded("policy.json", 0, service_gid, 0o640, MAX_DOCUMENT)
         .map_err(|_| "installation policy high-water state is unavailable")?;
-    if high_water != policy_bytes {
-        return Err("installation policy rollback or equivocation detected");
-    }
+    selector::verify_v2_high_water(&high_water, &policy_digest, policy.policy_revision)
+        .map_err(|_| "installation policy format high-water is stale or invalid")?;
 
     // The migration event is the only v2 selector. Missing or different tip
     // formats fail closed; v2 is never inferred from the v2 policy file.
@@ -392,6 +391,15 @@ fn verify_v2_selected_generation(
     .map_err(|_| "migration prior state signature is invalid")?;
     identity::verify_initial_state_transition(None, &prior_state, &prior_policy)
         .map_err(|_| "migration prior state binding is invalid")?;
+    verify_migration_predecessor_high_water(
+        &state_directory,
+        service_gid,
+        &old_authority.key_id,
+        &policy_key,
+        &prior_policy,
+        &prior_policy_bytes,
+        &migration.prior_record_digest,
+    )?;
 
     let prior_manifest_bytes = state_directory
         .read_bounded(
@@ -502,6 +510,107 @@ fn verify_v2_selected_generation(
     let _data_directory = open_data_root(data_dir, uid, service_gid, &current_policy)
         .map_err(|_| "recovery target identity or protection changed")?;
     Ok((policy.backend, prior_state.state))
+}
+
+/// The selector overwrites the previous active state tip and policy
+/// high-water. For the supported sequence-zero predecessor, archived v1
+/// policy and state records are the remaining durable evidence of the old
+/// generation's high-water. Reject a selector that points at a stale policy
+/// archive or leaves any later state archive behind.
+fn verify_migration_predecessor_high_water(
+    state_directory: &ProtectedDirectory,
+    gid: u32,
+    policy_key_id: &str,
+    policy_key: &VerifyingKey,
+    prior_policy: &InstallationPolicy,
+    prior_policy_bytes: &[u8],
+    prior_state_digest: &str,
+) -> Result<()> {
+    let names = state_directory
+        .list_names()
+        .map_err(|_| "migration predecessor archives cannot be enumerated")?;
+    let mut archived_policy_high_waters = Vec::new();
+    let mut state_archives = Vec::new();
+    let prior_policy_digest = hex::encode(Sha256::digest(prior_policy_bytes));
+
+    for name in &names {
+        if name.starts_with("state-") && name.ends_with(".json") {
+            state_archives.push(name.as_str());
+        }
+        if !name.starts_with("policy-") || !name.ends_with(".json") {
+            continue;
+        }
+        let (area, expected_digest) =
+            parse_archive_name(name).ok_or("migration policy archive name is malformed")?;
+        if !matches!(area, ArchiveArea::StateRoot) {
+            return Err("migration policy archive is outside protected recovery state");
+        }
+        let bytes = state_directory
+            .read_bounded(name, 0, gid, 0o640, MAX_DOCUMENT)
+            .map_err(|_| "migration policy archive is unsafe or unavailable")?;
+        let actual_digest = hex::encode(Sha256::digest(&bytes));
+        if actual_digest != expected_digest {
+            return Err("migration policy archive digest changed");
+        }
+        let archived: InstallationPolicy = identity::verify_signed(
+            &bytes,
+            "o3k-installation-policy-v1",
+            policy_key_id,
+            policy_key,
+        )
+        .map_err(|_| "migration policy archive signature is invalid")?;
+        identity::verify_policy(&archived, policy_key_id)
+            .map_err(|_| "migration policy archive binding is invalid")?;
+        if archived.installation_id != prior_policy.installation_id
+            || archived.site_id != prior_policy.site_id
+            || archived.target_device != prior_policy.target_device
+            || archived.target_inode != prior_policy.target_inode
+        {
+            return Err("migration policy archive identity changed");
+        }
+        archived_policy_high_waters.push((archived.policy_revision, actual_digest));
+    }
+
+    verify_migration_archive_high_water(
+        &prior_policy_digest,
+        prior_policy.policy_revision,
+        &archived_policy_high_waters,
+        prior_state_digest,
+        &state_archives,
+    )
+}
+
+fn verify_migration_archive_high_water(
+    prior_policy_digest: &str,
+    prior_policy_revision: u64,
+    archived_policy_high_waters: &[(u64, String)],
+    prior_state_digest: &str,
+    state_archives: &[&str],
+) -> Result<()> {
+    let mut found_prior_policy = false;
+    for (index, (revision, digest)) in archived_policy_high_waters.iter().enumerate() {
+        if *revision > prior_policy_revision
+            || (*revision == prior_policy_revision && digest != prior_policy_digest)
+        {
+            return Err("migration prior policy is below the durable policy high-water");
+        }
+        if archived_policy_high_waters.iter().skip(index + 1).any(
+            |(other_revision, other_digest)| other_revision == revision && other_digest != digest,
+        ) {
+            return Err("migration policy archive has equal-revision equivocation");
+        }
+        if *revision == prior_policy_revision && digest == prior_policy_digest {
+            found_prior_policy = true;
+        }
+    }
+    let prior_state_name = format!("state-{prior_state_digest}.json");
+    if !found_prior_policy
+        || state_archives.len() != 1
+        || state_archives.first().copied() != Some(prior_state_name.as_str())
+    {
+        return Err("migration prior state is not the unique archived v1 high-water tip");
+    }
+    Ok(())
 }
 
 fn legacy_policy_view(
@@ -1859,6 +1968,69 @@ mod tests {
     const JOURNAL_SIGNER_ID: &str = "journal-signer-1";
     const EVIDENCE_SIGNER_ID: &str = "evidence-signer-1";
     const POLICY_DIGEST: &str = "policy-digest";
+
+    #[test]
+    fn migration_rejects_stale_archived_policy_and_state_high_water() {
+        let prior_policy_digest = "a".repeat(64);
+        let prior_state_digest = "b".repeat(64);
+        let prior_state_name = format!("state-{prior_state_digest}.json");
+        let valid_archives = [(3, prior_policy_digest.clone())];
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &valid_archives,
+                &prior_state_digest,
+                &[prior_state_name.as_str()],
+            )
+            .is_ok()
+        );
+
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &[(3, prior_policy_digest.clone()), (4, "c".repeat(64))],
+                &prior_state_digest,
+                &[prior_state_name.as_str()],
+            )
+            .is_err()
+        );
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &[(3, "d".repeat(64))],
+                &prior_state_digest,
+                &[prior_state_name.as_str()],
+            )
+            .is_err()
+        );
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &[
+                    (2, "e".repeat(64)),
+                    (2, "f".repeat(64)),
+                    (3, prior_policy_digest.clone()),
+                ],
+                &prior_state_digest,
+                &[prior_state_name.as_str()],
+            )
+            .is_err()
+        );
+        assert!(
+            verify_migration_archive_high_water(
+                &prior_policy_digest,
+                3,
+                &valid_archives,
+                &prior_state_digest,
+                &[prior_state_name.as_str(), "state-later.json"],
+            )
+            .is_err()
+        );
+    }
 
     fn keypair(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
