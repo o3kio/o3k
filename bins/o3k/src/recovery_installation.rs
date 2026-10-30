@@ -574,6 +574,15 @@ fn verify_migration_predecessor(
             if record.checkpoint_digest != migration.checkpoint_digest {
                 return Err("migration checkpoint does not match the C1.1 re-anchor");
             }
+            let _signing_request_lock = context
+                .journal_directory
+                .try_lock_existing_file(
+                    "restore-signing-request.lock",
+                    context.uid,
+                    context.gid,
+                    0o600,
+                )
+                .map_err(|_| "recovery journal signing lock is unsafe or busy")?;
             let names = context
                 .journal_directory
                 .list_names()
@@ -585,15 +594,6 @@ fn verify_migration_predecessor(
             if pending_signing_request_present {
                 return Err("pending recovery journal work denies migration admission");
             }
-            let _signing_request_lock = context
-                .journal_directory
-                .try_lock_existing_file(
-                    "restore-signing-request.lock",
-                    context.uid,
-                    context.gid,
-                    0o600,
-                )
-                .map_err(|_| "recovery journal signing lock is unsafe or busy")?;
 
             let fixed_bundle_bytes = read_protected_config(
                 Path::new(&context.prior_policy.trust_bundle_path),
