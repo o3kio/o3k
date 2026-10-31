@@ -17,6 +17,7 @@ use rustix::{
     },
     process::geteuid,
 };
+use sha2::{Digest, Sha256};
 
 const EXT4_MAGIC: u64 = 0xef53;
 
@@ -62,6 +63,28 @@ pub struct DirectoryPosture {
 }
 
 impl ProtectedDirectory {
+    /// Opens an existing root-owned installer directory on the supported
+    /// protected filesystem. The observed path identity and non-writable
+    /// posture are bound into the descriptor before it can publish files.
+    pub fn open_root_installer(path: &Path) -> Result<Self, RecoveryFileError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(RecoveryFileError::Unsafe(
+                "root installer directory posture",
+            ));
+        }
+        Self::open(
+            path,
+            0,
+            metadata.gid(),
+            metadata.mode() & 0o7777,
+            metadata.dev(),
+            metadata.ino(),
+        )
+    }
+
     /// Opens an absolute directory by walking every component with no-follow.
     /// The resulting descriptor, not a later path lookup, anchors all reads
     /// and writes.
@@ -452,6 +475,211 @@ impl ProtectedDirectory {
         Ok(())
     }
 
+    /// Replaces one exact existing installer file by compare-and-swap. This
+    /// variant supports executable permissions while retaining the same
+    /// descriptor-anchored temp/fsync/rename/fsync/readback sequence.
+    // The separate owner/group and before/after modes are deliberate parts of
+    // the file CAS contract and should not be collapsed into inferred state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn atomic_replace_installer(
+        &self,
+        name: &str,
+        expected: &[u8],
+        bytes: &[u8],
+        uid: u32,
+        gid: u32,
+        old_mode: u32,
+        new_mode: u32,
+    ) -> Result<(), RecoveryFileError> {
+        validate_name(name)?;
+        if self.mode & 0o022 != 0 || geteuid().as_raw() != 0 {
+            return Err(RecoveryFileError::Unsafe(
+                "protected installer root required",
+            ));
+        }
+        self.lock()?;
+        let existing = self.read_installer_file(name, uid, gid, old_mode, expected.len())?;
+        if existing != expected {
+            return Err(RecoveryFileError::CompareFailed);
+        }
+        let temp = format!(
+            ".{name}.tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        );
+        let fd = openat(
+            self.dir.as_fd(),
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )?;
+        let mut file = File::from(fd);
+        fchmod(file.as_fd(), Mode::from_raw_mode(new_mode)).map_err(errno)?;
+        std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        self.dir.sync_all()?;
+        let readback = self.read_installer_file(name, uid, gid, new_mode, bytes.len())?;
+        if readback != bytes {
+            return Err(RecoveryFileError::Unsafe("executable replacement readback"));
+        }
+        Ok(())
+    }
+
+    /// Copies a bounded root-owned artifact into this anchored protected
+    /// directory under an inert name. Existing staged bytes are accepted
+    /// only when their digest and protected metadata match exactly.
+    pub fn stage_root_artifact(
+        &self,
+        name: &str,
+        source: &Path,
+        expected_sha256: &str,
+        gid: u32,
+        max: u64,
+    ) -> Result<(), RecoveryFileError> {
+        validate_name(name)?;
+        if self.uid != 0 || self.mode & 0o022 != 0 || geteuid().as_raw() != 0 {
+            return Err(RecoveryFileError::Unsafe("protected artifact staging root"));
+        }
+        check_ancestors(source)?;
+        let source_fd = open(
+            source,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        let source_before = fstat(&source_fd)?;
+        if source_before.st_mode & 0o170000 != 0o100000
+            || source_before.st_nlink != 1
+            || source_before.st_uid != 0
+            || source_before.st_mode & 0o022 != 0
+            || source_before.st_size <= 0
+            || source_before.st_size as u64 > max
+        {
+            return Err(RecoveryFileError::Unsafe("source artifact posture"));
+        }
+        self.check()?;
+        match openat(
+            self.dir.as_fd(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Ok(existing_fd) => {
+                let existing = File::from(existing_fd);
+                if digest_protected_file(&existing, 0, gid, 0o640, max)? == expected_sha256 {
+                    return Ok(());
+                }
+                return Err(RecoveryFileError::CompareFailed);
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => {}
+            Err(error) => return Err(error.into()),
+        }
+        let temp = format!(
+            ".{name}.tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        );
+        let destination_fd = openat(
+            self.dir.as_fd(),
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )?;
+        let mut destination = File::from(destination_fd);
+        fchmod(destination.as_fd(), Mode::from_raw_mode(0o640)).map_err(errno)?;
+        std::os::unix::fs::fchown(&destination, Some(0), Some(gid))?;
+        let mut source = File::from(source_fd);
+        let mut digest = Sha256::new();
+        let mut copied = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = Read::by_ref(&mut source)
+                .take(buffer.len() as u64)
+                .read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            copied += count as u64;
+            if copied > max {
+                return Err(RecoveryFileError::TooLarge);
+            }
+            digest.update(&buffer[..count]);
+            destination.write_all(&buffer[..count])?;
+        }
+        let source_after = fstat(source.as_fd())?;
+        if source_before.st_dev != source_after.st_dev
+            || source_before.st_ino != source_after.st_ino
+            || source_before.st_size as u64 != copied
+            || source_before.st_mtime != source_after.st_mtime
+            || source_before.st_ctime != source_after.st_ctime
+            || hex::encode(digest.finalize()) != expected_sha256
+        {
+            return Err(RecoveryFileError::Unsafe(
+                "source artifact changed or digest mismatch",
+            ));
+        }
+        destination.sync_all()?;
+        rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        self.dir.sync_all()?;
+        let readback_fd = openat(
+            self.dir.as_fd(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        if digest_protected_file(&File::from(readback_fd), 0, gid, 0o640, max)? != expected_sha256 {
+            return Err(RecoveryFileError::Unsafe("staged artifact readback"));
+        }
+        Ok(())
+    }
+
+    fn read_installer_file(
+        &self,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        mode: u32,
+        max: usize,
+    ) -> Result<Vec<u8>, RecoveryFileError> {
+        validate_name(name)?;
+        self.check()?;
+        let fd = openat(
+            self.dir.as_fd(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        let before = fstat(&fd)?;
+        if before.st_mode & 0o170000 != 0o100000
+            || before.st_nlink != 1
+            || before.st_uid != uid
+            || before.st_gid != gid
+            || before.st_mode & 0o7777 != mode
+        {
+            return Err(RecoveryFileError::Unsafe("installer file metadata"));
+        }
+        let mut file = File::from(fd);
+        let mut bytes = Vec::with_capacity(max.min(8192));
+        Read::by_ref(&mut file)
+            .take(max as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max {
+            return Err(RecoveryFileError::TooLarge);
+        }
+        let after = fstat(file.as_fd())?;
+        let entry = statat(self.dir.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if before.st_dev != after.st_dev
+            || before.st_ino != after.st_ino
+            || before.st_size != after.st_size
+            || entry.st_dev != before.st_dev
+            || entry.st_ino != before.st_ino
+        {
+            return Err(RecoveryFileError::Unsafe("installer file changed"));
+        }
+        Ok(bytes)
+    }
+
     /// The anchored absolute path, for bounded listings by policy consumers.
     pub fn path(&self) -> &Path {
         &self.path
@@ -549,6 +777,52 @@ fn crash_hook(_point: &str) -> Result<(), RecoveryFileError> {
         std::process::exit(86);
     }
     Ok(())
+}
+
+fn digest_protected_file(
+    file: &File,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    max: u64,
+) -> Result<String, RecoveryFileError> {
+    let before = fstat(file.as_fd())?;
+    if before.st_mode & 0o170000 != 0o100000
+        || before.st_nlink != 1
+        || before.st_uid != uid
+        || before.st_gid != gid
+        || before.st_mode & 0o7777 != mode
+        || before.st_size < 0
+        || before.st_size as u64 > max
+    {
+        return Err(RecoveryFileError::Unsafe("staged artifact posture"));
+    }
+    let mut digest = Sha256::new();
+    let mut copied = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = Read::by_ref(&mut &*file)
+            .take(buffer.len() as u64)
+            .read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        copied += count as u64;
+        if copied > max {
+            return Err(RecoveryFileError::TooLarge);
+        }
+        digest.update(&buffer[..count]);
+    }
+    let after = fstat(file.as_fd())?;
+    if before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_size != after.st_size
+        || before.st_mtime != after.st_mtime
+        || before.st_ctime != after.st_ctime
+    {
+        return Err(RecoveryFileError::Unsafe("staged artifact changed"));
+    }
+    Ok(hex::encode(digest.finalize()))
 }
 
 #[cfg(test)]

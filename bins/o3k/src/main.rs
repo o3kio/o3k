@@ -88,6 +88,29 @@ enum Commands {
         #[arg(long)]
         custody_record: Option<std::path::PathBuf>,
     },
+    /// Publish an offline-signed v1-to-v2 installation-policy migration
+    /// (root-only; no signing authority or restore-target mutation)
+    #[command(hide = true)]
+    RecoveryMigrateV2 {
+        #[arg(long)]
+        policy: std::path::PathBuf,
+        #[arg(long)]
+        event: std::path::PathBuf,
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+        #[arg(long)]
+        artifact: std::path::PathBuf,
+        #[arg(long)]
+        release_digests: std::path::PathBuf,
+        #[arg(long)]
+        release_signature: std::path::PathBuf,
+        #[arg(long)]
+        source_manifest: std::path::PathBuf,
+        #[arg(long)]
+        source_release_digests: std::path::PathBuf,
+        #[arg(long)]
+        source_release_signature: std::path::PathBuf,
+    },
     /// Upgrade the installation
     Upgrade {
         /// Target release version (e.g. v0.4.0)
@@ -445,6 +468,39 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(reason) => {
                     eprintln!("recovery rotation failed: {reason}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryMigrateV2 {
+            policy,
+            event,
+            manifest,
+            artifact,
+            release_digests,
+            release_signature,
+            source_manifest,
+            source_release_digests,
+            source_release_signature,
+        } => {
+            let inputs = o3k::recovery_migration_publisher::MigrationInputs {
+                policy_v2: &policy,
+                migration_event: &event,
+                release_manifest_v2: &manifest,
+                candidate_artifact: &artifact,
+                release_digests: &release_digests,
+                release_signature: &release_signature,
+                source_manifest: &source_manifest,
+                source_release_digests: &source_release_digests,
+                source_release_signature: &source_release_signature,
+            };
+            match o3k::recovery_migration_publisher::publish_v2(&inputs) {
+                Ok(position) => {
+                    println!("{position:?}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("installation policy migration failed: {error}");
                     ExitCode::from(1)
                 }
             }

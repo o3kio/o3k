@@ -2,9 +2,10 @@
 //! hand-rolled HTTP/1.1, and read-only SQLite (the database implementation
 //! lives in [`crate::db`]).
 //!
-//! Everything here is bounded: commands carry a 10-second timeout, HTTP
+//! Host commands run through the bounded execution adapter here. HTTP
 //! connects/reads/writes carry 2-second timeouts, and file reads are small
-//! config or `/proc` artifacts. Nothing in this module mutates host state.
+//! config or `/proc` artifacts. Callers own the authority to request any
+//! host mutation and must verify its postconditions.
 
 use crate::context::{Exec, HttpClient, HttpResponse, UnitState};
 use async_trait::async_trait;
@@ -86,6 +87,17 @@ pub(crate) fn run_bounded_with_timeout(
             None => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+/// Runs `systemctl` through the shared bounded host-execution adapter.
+/// Callers remain responsible for authorization and verifying postconditions.
+pub(crate) fn run_systemctl_with_timeout(
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<CommandOutcome> {
+    let mut command = Command::new("systemctl");
+    command.args(args);
+    run_bounded_with_timeout(&mut command, timeout)
 }
 
 /// Reduces a completed command outcome to a trimmed stderr message.
