@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running tests/pp6_c1_reanchor_realfs.rs (target/debug/deps/pp6_c1_reanchor_realfs-87b7ac03f9f47f40)
+
+running 5 tests
+test revocation_refresh_resumes_after_archive_and_is_repeatable ... ok
+test rotate_then_real_designate_then_startup_observation_accepts_the_new_designation ... ok
+test startup_observation_rejects_mixed_generations ... ok
+test rotation_over_real_protected_directories_resumes_and_preserves_exactly ... ok
+test crash_before_and_after_every_boundary_resumes_exact_forward_driver_level ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 44.79s
+

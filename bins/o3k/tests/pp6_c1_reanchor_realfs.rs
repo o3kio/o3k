@@ -831,14 +831,28 @@ fn r_only_rotation_docs(
 
 // ---- namespace harness ----
 
-fn root_fixture() -> Option<PathBuf> {
+fn root_fixture() -> Result<PathBuf, String> {
     if rustix::process::geteuid().as_raw() != 0 {
-        return None;
+        return Err(format!(
+            "NOT_RUN: real protected-filesystem fixture requires root (effective uid is {})",
+            rustix::process::geteuid().as_raw()
+        ));
     }
     let path = PathBuf::from(format!("/var/lib/o3k-c1-reanchor-{}", uuid::Uuid::now_v7()));
-    fs::create_dir(&path).ok()?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).ok()?;
-    Some(path)
+    fs::create_dir(&path).map_err(|error| {
+        format!(
+            "NOT_RUN: cannot create root-owned fixture {}: {error}",
+            path.display()
+        )
+    })?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        let _ = fs::remove_dir_all(&path);
+        format!(
+            "NOT_RUN: cannot protect root fixture {} with mode 0700: {error}",
+            path.display()
+        )
+    })?;
+    Ok(path)
 }
 
 fn setup_fixture(ctx: &mut Ctx, fixture: &Path, designate: bool) -> Installation {
@@ -877,8 +891,6 @@ fn setup_fixture(ctx: &mut Ctx, fixture: &Path, designate: bool) -> Installation
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();
-    ctx.manifest_digest = sha256_hex(manifest.as_bytes());
-
     let prepare = "{binary} recovery-provision-prepare --data-root /var/lib/o3k --backend sqlite";
     let (stdout, stderr, status) = run_in_namespace(fixture, prepare, &[]);
     assert!(stderr.contains("C1_REANCHOR_NAMESPACE_READY"));
@@ -898,6 +910,8 @@ fn setup_fixture(ctx: &mut Ctx, fixture: &Path, designate: bool) -> Installation
         journal_inode: value["journal_inode"].as_u64().unwrap(),
     };
     assert_eq!(ctx.target.data_root, "/var/lib/o3k");
+
+    ctx.manifest_digest = sha256_hex(manifest.as_bytes());
 
     let era1 = era(1);
     let era1_bundle = build_bundle(&ctx.target, ctx.now, &era1, None);
@@ -1180,9 +1194,7 @@ fn fresh_ctx() -> Ctx {
 #[test]
 #[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
 fn rotation_over_real_protected_directories_resumes_and_preserves_exactly() {
-    let Some(fixture) = root_fixture() else {
-        return;
-    };
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
     let mut ctx = fresh_ctx();
     let installation = setup_fixture(&mut ctx, &fixture, true);
     let Installation {
@@ -1387,9 +1399,7 @@ fn rotation_over_real_protected_directories_resumes_and_preserves_exactly() {
 #[test]
 #[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
 fn rotate_then_real_designate_then_startup_observation_accepts_the_new_designation() {
-    let Some(fixture) = root_fixture() else {
-        return;
-    };
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
     let mut ctx = fresh_ctx();
     // A NEVER_RECOVERED installation: no journal, no designation yet.
     let installation = setup_fixture(&mut ctx, &fixture, false);
@@ -1540,9 +1550,7 @@ const CRASH_POINTS: &[&str] = &[
 #[test]
 #[ignore = "requires root, unshare(1), and a source-built o3k binary"]
 fn crash_before_and_after_every_boundary_resumes_exact_forward_driver_level() {
-    let Some(fixture) = root_fixture() else {
-        return;
-    };
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
     let mut ctx = fresh_ctx();
     let installation = setup_fixture(&mut ctx, &fixture, true);
     let Installation {
@@ -1680,9 +1688,7 @@ fn crash_before_and_after_every_boundary_resumes_exact_forward_driver_level() {
 #[test]
 #[ignore = "requires root, unshare(1), and a source-built o3k binary"]
 fn startup_observation_rejects_mixed_generations() {
-    let Some(fixture) = root_fixture() else {
-        return;
-    };
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
     let mut ctx = fresh_ctx();
     let installation = setup_fixture(&mut ctx, &fixture, true);
     let Installation {
@@ -1788,7 +1794,7 @@ fn startup_observation_rejects_mixed_generations() {
 #[test]
 #[ignore = "requires root, unshare(1), and a source-built o3k binary"]
 fn revocation_refresh_resumes_after_archive_and_is_repeatable() {
-    let fixture = root_fixture().expect("root fixture required");
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
     let mut ctx = fresh_ctx();
     let installation = setup_fixture(&mut ctx, &fixture, true);
     let input = installation.var.join("refresh-inputs");
