@@ -41,6 +41,11 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # paths. See `backup_create.rs` and `backup_artifact.rs` for the exact
 # variables and exit codes.
 backup-test-hooks = ["o3k-store/backup-test-hooks"]
+# Temporary release-provenance authority for the isolated PP.6 A10 process
+# fixture. The feature is debug-only and the fixture private key is generated
+# in the isolated test process; production builds retain the pinned
+# release key below.
+a10-process-test-hooks = []
 
 [lib]
 name = "o3k"

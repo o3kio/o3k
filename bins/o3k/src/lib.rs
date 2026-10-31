@@ -16,6 +16,8 @@
 // hard process exits from production code paths.
 #[cfg(all(feature = "backup-test-hooks", not(debug_assertions)))]
 compile_error!("backup-test-hooks is a debug-only test feature");
+#[cfg(all(feature = "a10-process-test-hooks", not(debug_assertions)))]
+compile_error!("a10-process-test-hooks is a debug-only qualification feature");
 
 // Artifact format primitives (manifest contract, member encryption, streaming
 // verify, offline signing input). Kept crate-private: the operator journey goes

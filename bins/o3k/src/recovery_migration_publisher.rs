@@ -26,12 +26,18 @@ const MAX_INPUT: u64 = 1024 * 1024;
 const MAX_CANDIDATE_ARTIFACT: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_EXECUTABLE: u64 = 512 * 1024 * 1024;
 
+#[cfg(feature = "a10-process-test-hooks")]
+const RELEASE_VERIFY_KEY: &[u8] = include_bytes!("../tests/fixtures/a10-release-verify.pub");
+#[cfg(not(feature = "a10-process-test-hooks"))]
+const RELEASE_VERIFY_KEY: &[u8] = include_bytes!("../../../packaging/release-verify.pub");
+
 #[derive(Debug)]
 pub enum MigrationError {
     RootRequired,
     Input(&'static str),
     Rejected(&'static str),
     Persistence(&'static str),
+    Verification(&'static str, &'static str),
 }
 
 impl std::fmt::Display for MigrationError {
@@ -75,6 +81,7 @@ pub struct AuthenticatedMigration {
     pub manifest_digest: String,
     pub artifact_digest: String,
     pub release_version: String,
+    pub policy_revision: u64,
     pub sequence: u64,
     pub candidate_sums: Vec<u8>,
     pub release_digests: Vec<u8>,
@@ -248,22 +255,46 @@ impl Drop for UpgradeExclusion {
     }
 }
 
-fn acquire_upgrade_exclusion() -> Result<UpgradeExclusion, MigrationError> {
+fn acquire_upgrade_exclusion(
+    data_root: &Path,
+    target_device: u64,
+    target_inode: u64,
+) -> Result<UpgradeExclusion, MigrationError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let state_path = crate::upgrade::state::default_state_path();
     let path = upgrade_lock_path(&state_path)?;
+    if data_root != Path::new("/var/lib/o3k") {
+        return Err(reject(
+            "upgrade lock is outside the authenticated data root",
+        ));
+    }
+    let (service_uid, service_gid) =
+        service_identity().map_err(|_| reject("upgrade lock service identity is unavailable"))?;
     let parent = path
         .parent()
         .ok_or_else(|| reject("upgrade lock path has no parent"))?;
-    crate::recovery_files::check_ancestors(&path)
+    crate::recovery_files::check_ancestors(parent)
         .map_err(|_| reject("upgrade lock path is unsafe"))?;
+    let accepted = crate::recovery_installation::data_root_postures(
+        service_uid,
+        service_gid,
+        crate::recovery_installation::compute_group_gid().ok(),
+    );
+    let _protected_parent = crate::recovery_files::ProtectedDirectory::open_accepted(
+        parent,
+        &accepted,
+        target_device,
+        target_inode,
+    )
+    .map_err(|_| reject("upgrade lock directory identity or posture is unsafe"))?;
     let parent_metadata = fs::symlink_metadata(parent)
         .map_err(|_| reject("upgrade lock directory is unavailable"))?;
-    if !parent_metadata.is_dir()
-        || parent_metadata.uid() != 0
-        || parent_metadata.mode() & 0o022 != 0
-    {
+    if !accepted.iter().any(|posture| {
+        parent_metadata.uid() == posture.uid
+            && parent_metadata.gid() == posture.gid
+            && parent_metadata.mode() & 0o7777 == posture.mode
+    }) {
         return Err(reject("upgrade lock directory posture is unsafe"));
     }
     for attempt in 0..2 {
@@ -342,6 +373,15 @@ fn upgrade_lock_path(state_path: &Path) -> Result<PathBuf, MigrationError> {
     Ok(PathBuf::from(path))
 }
 
+fn acquire_d8_store_exclusion(
+    data_dir: &Path,
+) -> Result<o3k_store::StoreAccessLock, MigrationError> {
+    let (service_uid, _) =
+        service_identity().map_err(|_| reject("o3k service identity is unavailable"))?;
+    o3k_store::StoreAccessLock::acquire_read_only_for_owner(data_dir, service_uid)
+        .map_err(|_| reject("D8 store exclusion could not be acquired"))
+}
+
 /// Unpacks an already authenticated release asset into a new, empty inert
 /// directory. The tar parser rejects links, special files, path traversal,
 /// duplicate names and oversized expansion before any installed executable
@@ -351,13 +391,23 @@ pub fn extract_verified_candidate(
     authenticated: &AuthenticatedMigration,
     destination: &Path,
 ) -> Result<PathBuf, MigrationError> {
+    if digest_root_artifact(artifact)? != authenticated.artifact_digest {
+        return Err(reject("candidate artifact changed after authentication"));
+    }
+    let file = fs::File::open(artifact)
+        .map_err(|_| MigrationError::Input("candidate artifact cannot be reopened"))?;
+    extract_verified_candidate_reader(file, authenticated, destination)
+}
+
+fn extract_verified_candidate_reader<R: std::io::Read>(
+    artifact: R,
+    authenticated: &AuthenticatedMigration,
+    destination: &Path,
+) -> Result<PathBuf, MigrationError> {
     use flate2::read::GzDecoder;
     use std::collections::{BTreeMap, BTreeSet};
     use std::os::unix::fs::OpenOptionsExt;
 
-    if digest_root_artifact(artifact)? != authenticated.artifact_digest {
-        return Err(reject("candidate artifact changed after authentication"));
-    }
     if !destination.is_absolute() || fs::read_dir(destination).is_err() {
         return Err(MigrationError::Input(
             "candidate staging directory is not an existing directory",
@@ -377,10 +427,7 @@ pub fn extract_verified_candidate(
             "candidate staging directory is not root-only and protected",
         ));
     }
-    let mut archive =
-        tar::Archive::new(GzDecoder::new(fs::File::open(artifact).map_err(|_| {
-            MigrationError::Input("candidate artifact cannot be reopened")
-        })?));
+    let mut archive = tar::Archive::new(GzDecoder::new(artifact));
     let entries = archive
         .entries()
         .map_err(|_| reject("candidate archive is malformed"))?;
@@ -393,9 +440,13 @@ pub fn extract_verified_candidate(
             .path()
             .map_err(|_| reject("candidate archive path is malformed"))?
             .into_owned();
+        let release_version = authenticated
+            .release_version
+            .strip_prefix('v')
+            .unwrap_or(&authenticated.release_version);
         if path.components().next()
             != Some(std::path::Component::Normal(
-                format!("o3k-{}", authenticated.release_version).as_ref(),
+                format!("o3k-{release_version}").as_ref(),
             ))
         {
             return Err(reject("candidate archive has an unexpected bundle root"));
@@ -447,7 +498,13 @@ pub fn extract_verified_candidate(
             .sync_all()
             .map_err(|_| MigrationError::Persistence("candidate file sync failed"))?;
     }
-    let bundle_name = format!("o3k-{}", authenticated.release_version);
+    let bundle_name = format!(
+        "o3k-{}",
+        authenticated
+            .release_version
+            .strip_prefix('v')
+            .unwrap_or(&authenticated.release_version)
+    );
     let bundle = destination.join(bundle_name);
     if !bundle.is_dir() {
         return Err(reject("candidate archive has no exact release bundle root"));
@@ -585,6 +642,7 @@ pub fn replace_dual_verifiers(
         bin_dir
             .atomic_replace_installer(name, &old_bytes, &new_bytes, 0, 0, old_mode, new_mode)
             .map_err(|_| MigrationError::Persistence("dual-verifier replacement failed"))?;
+        a10_crash_hook(&format!("executable-replaced:{name}"));
     }
     for name in EXECUTABLES {
         let path = Path::new("/usr/local/bin").join(name);
@@ -738,13 +796,11 @@ pub(crate) fn publish_documents_selector_first(
             0o640,
         )
         .map_err(|_| MigrationError::Persistence("v2 policy publication failed"))?;
+    a10_crash_hook("v2-policy-published");
 
-    let v2_policy: selector::InstallationPolicyV2 =
-        identity::decode_canonical(&authenticated.policy_bytes)
-            .map_err(|_| reject("authenticated v2 policy cannot be decoded"))?;
     let high_water = identity::canonical(&selector::PolicyHighWaterV2 {
         format_epoch: 2,
-        revision: v2_policy.policy_revision,
+        revision: authenticated.policy_revision,
         digest: authenticated.policy_digest.clone(),
     })
     .map_err(|_| reject("v2 policy high-water cannot be encoded"))?;
@@ -756,6 +812,7 @@ pub(crate) fn publish_documents_selector_first(
             gid,
         )
         .map_err(|_| MigrationError::Persistence("v2 policy high-water publication failed"))?;
+    a10_crash_hook("v2-high-water-published");
 
     let old_release = read_root_input(Path::new("/usr/local/share/o3k/release-manifest.json"))?;
     if old_release != prior_manifest {
@@ -774,6 +831,7 @@ pub(crate) fn publish_documents_selector_first(
             0o644,
         )
         .map_err(|_| MigrationError::Persistence("target release publication failed"))?;
+    a10_crash_hook("v2-release-manifest-published");
 
     // The active release inventory follows the selector, policy, high-water
     // and exact manifest. It is not a selector or recovery authority.
@@ -802,7 +860,9 @@ pub(crate) fn publish_documents_selector_first(
         &authenticated.manifest_bytes,
         &authenticated.policy_bytes,
     )
-    .map_err(|_| MigrationError::Persistence("complete v2 generation verification failed"))?;
+    .map_err(|reason| {
+        MigrationError::Verification("complete v2 generation verification failed", reason)
+    })?;
     if backend != "postgresql" || preserved != installed.preserved_state() {
         return Err(reject(
             "final v2 generation changed installation disposition",
@@ -1063,6 +1123,36 @@ fn reject(reason: &'static str) -> MigrationError {
     MigrationError::Rejected(reason)
 }
 
+/// Hard-exit fault points for the isolated debug qualification build only.
+/// The feature is compile-time gated and rejected for optimized builds.
+fn a10_crash_hook(point: &str) {
+    #[cfg(feature = "a10-process-test-hooks")]
+    {
+        if std::env::var("O3K_A10_MIGRATION_CRASH_AT").ok().as_deref() == Some(point) {
+            std::process::exit(86);
+        }
+        if std::env::var("O3K_A10_MIGRATION_PAUSE_AT").ok().as_deref() == Some(point) {
+            let (Some(marker), Some(resume)) = (
+                std::env::var_os("O3K_A10_MIGRATION_PAUSE_MARKER"),
+                std::env::var_os("O3K_A10_MIGRATION_RESUME_MARKER"),
+            ) else {
+                std::process::exit(87);
+            };
+            if fs::write(marker, b"paused at A10 publication boundary").is_err() {
+                std::process::exit(87);
+            }
+            for _ in 0..600 {
+                if Path::new(&resume).exists() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            std::process::exit(87);
+        }
+    }
+    let _ = point;
+}
+
 fn read_root_input(path: &Path) -> Result<Vec<u8>, MigrationError> {
     read_root_file(path, MAX_INPUT)
 }
@@ -1159,6 +1249,15 @@ fn digest_root_artifact(path: &Path) -> Result<String, MigrationError> {
         || before.st_size <= 0
         || before.st_size as u64 > MAX_CANDIDATE_ARTIFACT
     {
+        #[cfg(feature = "a10-process-test-hooks")]
+        eprintln!(
+            "A10 test-only artifact rejection: type={:o} links={} uid={} mode={:o} size={}",
+            before.st_mode & 0o170000,
+            before.st_nlink,
+            before.st_uid,
+            before.st_mode & 0o7777,
+            before.st_size,
+        );
         return Err(MigrationError::Input(
             "candidate artifact is not a bounded root-owned regular file",
         ));
@@ -1238,14 +1337,30 @@ fn verify_target_release_provenance_bytes(
     installed_manifest: &[u8],
     artifact_digest: &str,
 ) -> Result<Vec<u8>, MigrationError> {
+    let candidate = fs::File::open(candidate_artifact)
+        .map_err(|_| MigrationError::Input("candidate artifact cannot be reopened"))?;
+    verify_target_release_provenance_reader(
+        candidate,
+        digests,
+        signature,
+        release,
+        installed_manifest,
+        artifact_digest,
+    )
+}
+
+fn verify_target_release_provenance_reader<R: std::io::Read>(
+    candidate_artifact: R,
+    digests: &[u8],
+    signature: &[u8],
+    release: &BackupReleaseIdentity,
+    installed_manifest: &[u8],
+    artifact_digest: &str,
+) -> Result<Vec<u8>, MigrationError> {
     use flate2::read::GzDecoder;
     use std::collections::BTreeMap;
 
-    verify_release_signature(
-        digests,
-        signature,
-        include_bytes!("../../../packaging/release-verify.pub"),
-    )?;
+    verify_release_signature(digests, signature, RELEASE_VERIFY_KEY)?;
 
     let mut signed_assets = BTreeMap::new();
     for line in std::str::from_utf8(digests)
@@ -1300,10 +1415,7 @@ fn verify_target_release_provenance_bytes(
         ));
     }
 
-    let mut archive = tar::Archive::new(GzDecoder::new(
-        fs::File::open(candidate_artifact)
-            .map_err(|_| MigrationError::Input("candidate artifact cannot be reopened"))?,
-    ));
+    let mut archive = tar::Archive::new(GzDecoder::new(candidate_artifact));
     let mut raw_manifest = None;
     let mut candidate_sums = None;
     for entry in archive
@@ -1395,11 +1507,7 @@ fn verify_source_release_provenance_bytes(
 ) -> Result<SourceReleaseProvenance, MigrationError> {
     use std::collections::BTreeMap;
 
-    verify_release_signature(
-        &digests,
-        &signature,
-        include_bytes!("../../../packaging/release-verify.pub"),
-    )?;
+    verify_release_signature(&digests, &signature, RELEASE_VERIFY_KEY)?;
     let mut signed_assets = BTreeMap::new();
     for line in std::str::from_utf8(&digests)
         .map_err(|_| reject("source release digest statement is not UTF-8"))?
@@ -1510,6 +1618,9 @@ pub fn authenticate_inputs(
 
     let installed = InstalledRecovery::load(data_dir)
         .map_err(|_| reject("complete authenticated v1 installation is unavailable"))?;
+    installed
+        .verify_migration_trust()
+        .map_err(|_| reject("source trust bundle or anti-rollback high-water is invalid"))?;
     let (prior_sequence, prior_tip_digest, _prior_tip, prior_policy_bytes, prior_manifest_bytes) =
         installed.migration_predecessor();
     if installed.policy.format != "o3k-installation-policy-v1"
@@ -1678,6 +1789,7 @@ pub fn authenticate_inputs(
         manifest_digest,
         artifact_digest,
         release_version: release.o3k_version,
+        policy_revision: policy.policy_revision,
         sequence: migration.sequence,
         candidate_sums,
         release_digests: read_root_input(inputs.release_digests)?,
@@ -1697,7 +1809,8 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         return Err(MigrationError::RootRequired);
     }
     let data_dir = Path::new("/var/lib/o3k");
-    if let Some(position) = resume_selected_v2()? {
+    let resumed = resume_selected_v2()?;
+    if let Some(position) = resumed {
         return Ok(position);
     }
     let installed = match InstalledRecovery::load(data_dir) {
@@ -1729,10 +1842,15 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         ));
     }
     verify_prepublication_executables(&old_sums, &authenticated.candidate_sums)?;
-    let _upgrade_guard = acquire_upgrade_exclusion()?;
+    let _upgrade_guard = acquire_upgrade_exclusion(
+        Path::new(&installed.policy.data_root),
+        installed.policy.target_device,
+        installed.policy.target_inode,
+    )?;
     let service_posture = snapshot_service_posture()?;
     let executable_inodes = installed_executable_inodes()?;
     let compute_identity = disable_compute_executable()?;
+    a10_crash_hook("compute-execution-disabled");
     if !executable_inodes.contains(&compute_identity) {
         return Err(reject(
             "compute executable identity changed during preparation",
@@ -1743,13 +1861,13 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
     // executable still has a process; repeat under the guard to close the
     // direct-start race between this observation and lock acquisition.
     verify_process_quiescence(&executable_inodes)?;
+    a10_crash_hook("compute-processes-quiesced");
 
     // This is the same process-held data-directory guard used by o3kd and
     // backup/upgrade operations. Protected state and journal directory locks
     // below exclude root maintenance/signing writers which do not open the
     // canonical store. The selector remains the reboot-persistent authority.
-    let store_guard = o3k_store::StoreAccessLock::acquire_read_only(data_dir)
-        .map_err(|_| reject("D8 store exclusion could not be acquired"))?;
+    let store_guard = acquire_d8_store_exclusion(data_dir)?;
     installed
         .migration_state_directory()
         .lock()
@@ -1763,6 +1881,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         .strict_pending_signing_request_exclusion(uid, gid)
         .map_err(|_| reject("pending signing request or reservation blocks migration"))?;
     verify_process_quiescence(&executable_inodes)?;
+    a10_crash_hook("d8-exclusions-acquired");
     let (_, gid) = service_identity().map_err(|_| reject("o3k service identity is unavailable"))?;
     stage_exact(
         installed.migration_state_directory(),
@@ -1783,6 +1902,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
     }
 
     stage_authority_documents(&installed, &authenticated, inputs.candidate_artifact)?;
+    a10_crash_hook("authenticated-inputs-staged");
     replace_dual_verifiers(&bundle, &old_sums)?;
     verify_dual_verifiers(&bundle, false)?;
     publish_documents_selector_first(
@@ -1791,6 +1911,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         &candidate_sums,
         inputs.candidate_artifact,
     )?;
+    a10_crash_hook("v2-generation-verified-before-guard-release");
     verify_dual_verifiers(&bundle, false)?;
     if installed.preserved_state() != identity::RecoveryState::NeverRecovered {
         // C1 disposition is still denial authority. Leave all affected units
@@ -1804,7 +1925,9 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
     // Services are restored only after complete-generation readback. The
     // D8 guard is released before any service can attempt store access.
     drop(installed);
+    a10_crash_hook("before-d8-guard-release");
     drop(store_guard);
+    a10_crash_hook("after-d8-guard-release");
     enable_compute_executable()?;
     verify_dual_verifiers(&bundle, true)?;
     stage_root.cleanup()?;
@@ -1926,8 +2049,9 @@ fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
         "migration-v2-artifact-{}.tar.gz",
         migration.new_release_identity.release_artifact_sha256
     );
-    let artifact = state_directory.path().join(artifact_name);
-    let artifact_digest = digest_root_artifact(&artifact)?;
+    let (mut artifact_file, artifact_digest) = state_directory
+        .open_digest_bounded(&artifact_name, 0, gid, 0o640, MAX_CANDIDATE_ARTIFACT)
+        .map_err(|_| reject("exact staged candidate artifact is unavailable"))?;
     if artifact_digest != migration.new_release_identity.release_artifact_sha256 {
         return Err(reject("staged candidate artifact digest changed"));
     }
@@ -1940,7 +2064,11 @@ fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
 
     // Re-establish reboot-persistent and direct-execution denial before any
     // exact-forward writes. This path never replaces executable bytes.
-    let _upgrade_guard = acquire_upgrade_exclusion()?;
+    let _upgrade_guard = acquire_upgrade_exclusion(
+        Path::new(&policy.data_root),
+        policy.target_device,
+        policy.target_inode,
+    )?;
     let executable_inodes = installed_executable_inodes()?;
     let compute_identity = disable_compute_executable()?;
     if !executable_inodes.contains(&compute_identity) {
@@ -1950,8 +2078,7 @@ fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
     }
     mask_and_quiesce_services()?;
     verify_process_quiescence(&executable_inodes)?;
-    let store_guard = o3k_store::StoreAccessLock::acquire_read_only(data_dir)
-        .map_err(|_| reject("D8 store exclusion could not be acquired"))?;
+    let store_guard = acquire_d8_store_exclusion(data_dir)?;
     state_directory
         .lock()
         .map_err(|_| reject("protected installation-state exclusion is busy"))?;
@@ -2090,14 +2217,20 @@ fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
         .map_err(|_| reject("exact source release signature is not staged"))?;
     let release_identity = BackupReleaseIdentity::from_manifest_bytes(&target_manifest)
         .map_err(|_| reject("staged target release identity is invalid"))?;
-    let candidate_sums = verify_target_release_provenance_bytes(
-        &artifact,
+    use std::io::{Seek, SeekFrom};
+    let candidate_sums = verify_target_release_provenance_reader(
+        artifact_file
+            .try_clone()
+            .map_err(|_| reject("staged candidate artifact cannot be authenticated"))?,
         &release_digests,
         &release_signature,
         &release_identity,
         &target_manifest,
         &artifact_digest,
     )?;
+    artifact_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| reject("staged candidate artifact cannot be rewound"))?;
     verify_source_release_provenance_bytes(
         source_manifest.clone(),
         source_release_digests.clone(),
@@ -2114,6 +2247,7 @@ fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
         manifest_digest: migration.new_release_manifest_sha256.clone(),
         artifact_digest,
         release_version: migration.new_release_identity.version.clone(),
+        policy_revision: policy.policy_revision,
         sequence: migration.sequence,
         candidate_sums: candidate_sums.clone(),
         release_digests,
@@ -2122,7 +2256,8 @@ fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
         source_release_digests,
         source_release_signature,
     };
-    let bundle = extract_verified_candidate(&artifact, &authenticated, staged_root.path())?;
+    let bundle =
+        extract_verified_candidate_reader(artifact_file, &authenticated, staged_root.path())?;
     verify_dual_verifiers(&bundle, false)?;
     let extracted_sums = fs::read(bundle.join("SHA256SUMS"))
         .map_err(|_| reject("target release checksums are unavailable"))?;

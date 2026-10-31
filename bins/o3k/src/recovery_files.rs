@@ -5,7 +5,7 @@
 
 use std::{
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::fd::AsFd,
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
@@ -308,6 +308,38 @@ impl ProtectedDirectory {
         Ok(bytes)
     }
 
+    /// Opens and authenticates a bounded regular file through this directory's
+    /// descriptor, returning the same descriptor rewound to byte zero. This is
+    /// for large inert artifacts that must be streamed after authentication;
+    /// callers never need to re-resolve the protected pathname.
+    pub fn open_digest_bounded(
+        &self,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        mode: u32,
+        max: u64,
+    ) -> Result<(File, String), RecoveryFileError> {
+        validate_name(name)?;
+        self.check()?;
+        let fd = openat(
+            self.dir.as_fd(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        let mut file = File::from(fd);
+        let digest = digest_protected_file(&file, uid, gid, mode, max)?;
+        file.seek(SeekFrom::Start(0))?;
+        self.check()?;
+        let entry = statat(self.dir.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW).map_err(errno)?;
+        let opened = fstat(file.as_fd())?;
+        if entry.st_dev != opened.st_dev || entry.st_ino != opened.st_ino {
+            return Err(RecoveryFileError::Unsafe("file entry replaced"));
+        }
+        Ok((file, digest))
+    }
+
     /// Root-only CAS replacement.  Unknown existing content is never overwritten.
     pub fn atomic_write(
         &self,
@@ -414,12 +446,16 @@ impl ProtectedDirectory {
         fchmod(file.as_fd(), Mode::from_raw_mode(mode)).map_err(errno)?;
         std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
         file.write_all(bytes)?;
+        a10_crash_hook(name, "after-temp-write-before-fsync")?;
         crash_hook("before-file-fsync")?;
         file.sync_all()?;
+        a10_crash_hook(name, "after-file-fsync")?;
         crash_hook("after-file-fsync")?;
         rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        a10_crash_hook(name, "after-rename-before-directory-fsync")?;
         crash_hook("after-rename")?;
         self.dir.sync_all()?;
+        a10_crash_hook(name, "after-directory-fsync-before-readback")?;
         crash_hook("after-directory-fsync")?;
         let readback = self.read_bounded(name, uid, gid, mode, bytes.len())?;
         if readback != bytes {
@@ -461,12 +497,16 @@ impl ProtectedDirectory {
         fchmod(file.as_fd(), Mode::from_raw_mode(mode)).map_err(errno)?;
         std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
         file.write_all(bytes)?;
+        a10_crash_hook(name, "after-temp-write-before-fsync")?;
         crash_hook("before-file-fsync")?;
         file.sync_all()?;
+        a10_crash_hook(name, "after-file-fsync")?;
         crash_hook("after-file-fsync")?;
         rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        a10_crash_hook(name, "after-rename-before-directory-fsync")?;
         crash_hook("after-rename")?;
         self.dir.sync_all()?;
+        a10_crash_hook(name, "after-directory-fsync-before-readback")?;
         crash_hook("after-directory-fsync")?;
         let readback = self.read_bounded(name, uid, gid, mode, bytes.len())?;
         if readback != bytes {
@@ -517,9 +557,13 @@ impl ProtectedDirectory {
         fchmod(file.as_fd(), Mode::from_raw_mode(new_mode)).map_err(errno)?;
         std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
         file.write_all(bytes)?;
+        a10_crash_hook(name, "after-temp-write-before-fsync")?;
         file.sync_all()?;
+        a10_crash_hook(name, "after-file-fsync")?;
         rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        a10_crash_hook(name, "after-rename-before-directory-fsync")?;
         self.dir.sync_all()?;
+        a10_crash_hook(name, "after-directory-fsync-before-readback")?;
         let readback = self.read_installer_file(name, uid, gid, new_mode, bytes.len())?;
         if readback != bytes {
             return Err(RecoveryFileError::Unsafe("executable replacement readback"));
@@ -620,8 +664,11 @@ impl ProtectedDirectory {
             ));
         }
         destination.sync_all()?;
+        a10_crash_hook(name, "after-file-fsync")?;
         rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        a10_crash_hook(name, "after-rename-before-directory-fsync")?;
         self.dir.sync_all()?;
+        a10_crash_hook(name, "after-directory-fsync-before-readback")?;
         let readback_fd = openat(
             self.dir.as_fd(),
             name,
@@ -776,6 +823,17 @@ fn crash_hook(_point: &str) -> Result<(), RecoveryFileError> {
     if std::env::var("O3K_RECOVERY_FILES_CRASH_AT").ok().as_deref() == Some(_point) {
         std::process::exit(86);
     }
+    Ok(())
+}
+
+fn a10_crash_hook(name: &str, point: &str) -> Result<(), RecoveryFileError> {
+    #[cfg(feature = "a10-process-test-hooks")]
+    if std::env::var("O3K_A10_MIGRATION_CRASH_AT").ok().as_deref()
+        == Some(format!("{name}:{point}").as_str())
+    {
+        std::process::exit(86);
+    }
+    let _ = (name, point);
     Ok(())
 }
 

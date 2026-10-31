@@ -29,7 +29,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
 };
@@ -170,8 +170,8 @@ fn certificate(
         purpose: purpose.to_string(),
         site_id: target.site_id.clone(),
         installation_id: target.installation_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
-        backend: "sqlite".to_string(),
+        profile: target.profile.clone(),
+        backend: target.backend.clone(),
         serial: serial.to_string(),
         not_before: now - 3_600,
         not_after: now + 80 * 86_400,
@@ -189,7 +189,7 @@ fn revocation_document(
     RevocationDocument {
         format: "o3k-recovery-revocations-v1".to_string(),
         site_id: target.site_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
+        profile: target.profile.clone(),
         sequence,
         issued_at,
         next_update: issued_at + 86_400,
@@ -297,9 +297,9 @@ fn build_bundle(target: &Target, now: i64, owner: &Era, revoking: Option<&Era>) 
     let bundle = TrustBundle {
         format: "o3k-recovery-trust-v1".to_string(),
         site_id: target.site_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
+        profile: target.profile.clone(),
         installation_id: target.installation_id.clone(),
-        backend: "sqlite".to_string(),
+        backend: target.backend.clone(),
         journal_root_key_id: owner.journal_root_id.clone(),
         journal_root_public_key: key_hex(&owner.journal_root.verifying_key()),
         evidence_root_key_id: owner.evidence_root_id.clone(),
@@ -344,9 +344,9 @@ fn build_policy(
         format: "o3k-installation-policy-v1".to_string(),
         installation_id: target.installation_id.clone(),
         site_id: target.site_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
-        backend: "sqlite".to_string(),
-        release_identity: RELEASE_SHA256.to_string(),
+        profile: target.profile.clone(),
+        backend: target.backend.clone(),
+        release_identity: target.release_artifact_digest.clone(),
         data_root: target.data_root.clone(),
         target_device: target.data_root_device,
         target_inode: target.data_root_inode,
@@ -507,6 +507,9 @@ fn authenticated_tip_hash(journal: &(Vec<u8>, String), signer: &Era) -> String {
 struct Target {
     installation_id: String,
     site_id: String,
+    profile: String,
+    backend: String,
+    release_artifact_digest: String,
     data_root: String,
     data_root_device: u64,
     data_root_inode: u64,
@@ -645,8 +648,8 @@ fn rotation_docs(
         format: CHECKPOINT_FORMAT.to_string(),
         installation_id: ctx.target.installation_id.clone(),
         site_id: ctx.target.site_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
-        backend: "sqlite".to_string(),
+        profile: ctx.target.profile.clone(),
+        backend: ctx.target.backend.clone(),
         sequence: checkpoint_sequence,
         prior_record_digest: prior_journal_tip,
         prior_checkpoint_digest,
@@ -673,8 +676,8 @@ fn rotation_docs(
         format: REANCHOR_FORMAT.to_string(),
         installation_id: ctx.target.installation_id.clone(),
         site_id: ctx.target.site_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
-        backend: "sqlite".to_string(),
+        profile: ctx.target.profile.clone(),
+        backend: ctx.target.backend.clone(),
         preserved_state: preserved,
         sequence: tips.state_tip_sequence + 1,
         prior_record_digest: tips.state_tip_digest.clone(),
@@ -708,8 +711,8 @@ fn rotation_docs(
             format: REVALIDATION_FORMAT.to_string(),
             installation_id: ctx.target.installation_id.clone(),
             site_id: ctx.target.site_id.clone(),
-            profile: "o3k-demo-v1".to_string(),
-            backend: "sqlite".to_string(),
+            profile: ctx.target.profile.clone(),
+            backend: ctx.target.backend.clone(),
             operation_id: operation_id.to_string(),
             artifact_sha256: ARTIFACT.to_string(),
             target_device: ctx.target.data_root_device,
@@ -792,8 +795,8 @@ fn r_only_rotation_docs(
         format: REANCHOR_FORMAT.to_string(),
         installation_id: ctx.target.installation_id.clone(),
         site_id: ctx.target.site_id.clone(),
-        profile: "o3k-demo-v1".to_string(),
-        backend: "sqlite".to_string(),
+        profile: ctx.target.profile.clone(),
+        backend: ctx.target.backend.clone(),
         preserved_state: RecoveryState::NeverRecovered,
         sequence: tips.state_tip_sequence + 1,
         prior_record_digest: tips.state_tip_digest.clone(),
@@ -838,7 +841,22 @@ fn root_fixture() -> Result<PathBuf, String> {
             rustix::process::geteuid().as_raw()
         ));
     }
-    let path = PathBuf::from(format!("/var/lib/o3k-c1-reanchor-{}", uuid::Uuid::now_v7()));
+    let fixture_parent = std::env::var_os("O3K_A10_FIXTURE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib"));
+    let parent = fs::symlink_metadata(&fixture_parent).map_err(|error| {
+        format!(
+            "NOT_RUN: cannot inspect fixture parent {}: {error}",
+            fixture_parent.display()
+        )
+    })?;
+    if !parent.is_dir() || parent.uid() != 0 || parent.mode() & 0o022 != 0 {
+        return Err(format!(
+            "NOT_RUN: fixture parent {} is not a protected root-owned directory",
+            fixture_parent.display()
+        ));
+    }
+    let path = fixture_parent.join(format!("o3k-c1-reanchor-{}", uuid::Uuid::now_v7()));
     fs::create_dir(&path).map_err(|error| {
         format!(
             "NOT_RUN: cannot create root-owned fixture {}: {error}",
@@ -856,11 +874,37 @@ fn root_fixture() -> Result<PathBuf, String> {
 }
 
 fn setup_fixture(ctx: &mut Ctx, fixture: &Path, designate: bool) -> Installation {
+    setup_fixture_for_release(
+        ctx,
+        fixture,
+        designate,
+        "o3k-demo-v1",
+        "sqlite",
+        RELEASE_SHA256,
+        None,
+    )
+}
+
+fn setup_fixture_for_release(
+    ctx: &mut Ctx,
+    fixture: &Path,
+    designate: bool,
+    profile: &str,
+    backend: &str,
+    release_artifact_digest: &str,
+    installed_manifest: Option<Vec<u8>>,
+) -> Installation {
     let var = fixture.join("var");
     let etc = var.join("etc-fixture");
     let share = var.join("share-fixture");
+    let bins = var.join("bin-fixture");
+    let systemd = etc.join("systemd/system");
+    let run = var.join("run-fixture");
     fs::create_dir_all(&etc).unwrap();
     fs::create_dir_all(&share).unwrap();
+    fs::create_dir_all(&bins).unwrap();
+    fs::create_dir_all(&systemd).unwrap();
+    fs::create_dir_all(&run).unwrap();
     fs::set_permissions(&etc, fs::Permissions::from_mode(0o755)).unwrap();
     fs::set_permissions(&share, fs::Permissions::from_mode(0o755)).unwrap();
     let data = var.join("o3k");
@@ -881,24 +925,32 @@ fn setup_fixture(ctx: &mut Ctx, fixture: &Path, designate: bool) -> Installation
         b"root:x:0:\no3k:x:900:\no3k-compute:x:901:\nkvm:x:108:\n",
     )
     .unwrap();
-    let manifest = format!(
-        r#"{{"version":"v0.4.0-rc.5","profile":"libvirt","profile_id":"o3k-demo-v1","source_commit":"{SOURCE_COMMIT}","workflow":"test","installer_sha256":"{INSTALLER_SHA256}","release_artifact_sha256":"{RELEASE_SHA256}","schema_version":"1","installation_policy_format":"o3k-installation-policy-v1","installation_policy_path":"/etc/o3k/installation-policy.json","installation_policy_authority":{{"key_id":"{POLICY_SIGNER_ID}","ed25519_public_key":"{}"}}}}"#,
-        key_hex(&ctx.keys.policy.verifying_key())
-    );
+    let manifest = installed_manifest.unwrap_or_else(|| {
+        format!(
+            r#"{{"version":"v0.4.0-rc.5","profile":"test","profile_id":"{profile}","source_commit":"{SOURCE_COMMIT}","workflow":"test","installer_sha256":"{INSTALLER_SHA256}","release_artifact_sha256":"{release_artifact_digest}","schema_version":"1","installation_policy_format":"o3k-installation-policy-v1","installation_policy_path":"/etc/o3k/installation-policy.json","installation_policy_authority":{{"key_id":"{POLICY_SIGNER_ID}","ed25519_public_key":"{}"}}}}"#,
+            key_hex(&ctx.keys.policy.verifying_key())
+        )
+        .into_bytes()
+    });
     fs::write(share.join("release-manifest.json"), &manifest).unwrap();
     fs::set_permissions(
         share.join("release-manifest.json"),
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();
-    let prepare = "{binary} recovery-provision-prepare --data-root /var/lib/o3k --backend sqlite";
-    let (stdout, stderr, status) = run_in_namespace(fixture, prepare, &[]);
+    let prepare = format!(
+        "{{binary}} recovery-provision-prepare --data-root /var/lib/o3k --backend {backend}"
+    );
+    let (stdout, stderr, status) = run_in_namespace(fixture, &prepare, &[]);
     assert!(stderr.contains("C1_REANCHOR_NAMESPACE_READY"));
     assert!(status.success(), "prepare failed: {stderr}");
     let value = descriptor(&stdout);
     ctx.target = Target {
         installation_id: value["installation_id"].as_str().unwrap().to_string(),
         site_id: value["site_id"].as_str().unwrap().to_string(),
+        profile: profile.to_string(),
+        backend: backend.to_string(),
+        release_artifact_digest: release_artifact_digest.to_string(),
         data_root: value["data_root"].as_str().unwrap().to_string(),
         data_root_device: value["data_root_device"].as_u64().unwrap(),
         data_root_inode: value["data_root_inode"].as_u64().unwrap(),
@@ -911,7 +963,7 @@ fn setup_fixture(ctx: &mut Ctx, fixture: &Path, designate: bool) -> Installation
     };
     assert_eq!(ctx.target.data_root, "/var/lib/o3k");
 
-    ctx.manifest_digest = sha256_hex(manifest.as_bytes());
+    ctx.manifest_digest = sha256_hex(&manifest);
 
     let era1 = era(1);
     let era1_bundle = build_bundle(&ctx.target, ctx.now, &era1, None);
@@ -1024,11 +1076,21 @@ fn run_in_namespace(
     script: &str,
     envs: &[(&str, &str)],
 ) -> (String, String, ExitStatus) {
-    let binary = env!("CARGO_BIN_EXE_o3k");
+    let binary = envs
+        .iter()
+        .find(|(key, _)| *key == "O3K_A10_CLI_BINARY")
+        .map(|(_, path)| *path)
+        .unwrap_or(env!("CARGO_BIN_EXE_o3k"));
     let script = format!(
-        "set -u; umask 077; mount --make-rprivate /; mount --bind {0} /var/lib; mount --bind /var/lib/etc-fixture /etc; mount --bind /var/lib/share-fixture /usr/local/share/o3k; echo C1_REANCHOR_NAMESPACE_READY >&2; {1}",
+        "set -eu; umask 077; mount --make-rprivate /; mount --bind {0} /var/lib; mount --bind /var/lib/etc-fixture /etc; mkdir -p /usr/local/share/o3k /etc/systemd/system; mount --bind /var/lib/share-fixture /usr/local/share/o3k; mount --bind /var/lib/bin-fixture /usr/local/bin; mount --bind /var/lib/etc-fixture/systemd/system /etc/systemd/system; mount --bind /var/lib/run-fixture /run; {2}; echo C1_REANCHOR_NAMESPACE_READY >&2; {1}",
         fixture.join("var").display(),
-        script.replace("{binary}", binary)
+        script.replace("{binary}", binary),
+        envs.iter()
+            .find(|(key, _)| *key == "O3K_A10_ASSET_DIR")
+            .map(|(_, path)| format!(
+                "mkdir -p /root/o3k-a10-assets; mount --bind {path} /root/o3k-a10-assets"
+            ))
+            .unwrap_or_else(|| ":".to_string())
     );
     let mut command = Command::new("unshare");
     command.args(["--mount", "--fork", "--", "sh", "-c", &script]);
@@ -1175,6 +1237,9 @@ fn fresh_ctx() -> Ctx {
         target: Target {
             installation_id: String::new(),
             site_id: String::new(),
+            profile: String::new(),
+            backend: String::new(),
+            release_artifact_digest: String::new(),
             data_root: String::new(),
             data_root_device: 0,
             data_root_inode: 0,
@@ -1188,6 +1253,783 @@ fn fresh_ctx() -> Ctx {
         keys: Keys::test_only(),
         manifest_digest: String::new(),
         now: chrono::Utc::now().timestamp(),
+    }
+}
+
+fn a10_release_key() -> openssl::pkey::PKey<openssl::pkey::Private> {
+    use openssl::pkey::{Id, PKey};
+    // Ed25519 PKCS#8 PrivateKeyInfo for the test-only seed. It is created only
+    // in this process and is never written into the fixture or runtime.
+    let mut der = vec![
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    der.extend_from_slice(&[0xA3; 32]);
+    let key = PKey::private_key_from_der(&der).expect("fixture Ed25519 PKCS#8 key");
+    assert_eq!(key.id(), Id::ED25519);
+    assert_eq!(
+        key.public_key_to_pem().expect("public PEM"),
+        include_bytes!("fixtures/a10-release-verify.pub")
+    );
+    key
+}
+
+fn a10_release_signature(message: &[u8]) -> Vec<u8> {
+    let key = a10_release_key();
+    let mut signer =
+        openssl::sign::Signer::new_without_digest(&key).expect("fixture release signer");
+    signer
+        .sign_oneshot_to_vec(message)
+        .expect("fixture release signature")
+}
+
+fn a10_release_digests(
+    version: &str,
+    archive_digest: &str,
+    raw_manifest: &[u8],
+    sums: &[u8],
+    sbom: &[u8],
+) -> Vec<u8> {
+    let bundle = format!("o3k-{}", version.strip_prefix('v').unwrap_or(version));
+    let mut assets = BTreeMap::new();
+    assets.insert("install.sh".to_string(), sha256_hex(b"test-only installer"));
+    assets.insert(
+        format!("{bundle}-linux-x86_64.tar.gz"),
+        archive_digest.to_string(),
+    );
+    assets.insert(
+        format!("{bundle}-linux-x86_64.tar.gz.sha256"),
+        sha256_hex(archive_digest.as_bytes()),
+    );
+    assets.insert(format!("{bundle}/manifest.json"), sha256_hex(raw_manifest));
+    assets.insert(format!("{bundle}/SHA256SUMS"), sha256_hex(sums));
+    assets.insert(format!("{bundle}/sbom.spdx.json"), sha256_hex(sbom));
+    assets
+        .into_iter()
+        .map(|(name, digest)| format!("{digest}  {name}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn copy_test_executable(name: &str, destination: &Path, candidate: bool) {
+    let source = match name {
+        "o3k" if candidate => PathBuf::from(
+            std::env::var_os("O3K_A10_CANDIDATE_O3K")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_o3k").into()),
+        ),
+        "o3k" => PathBuf::from(
+            std::env::var_os("O3K_A10_SOURCE_O3K")
+                .expect("qualification harness supplies a separately built source executable"),
+        ),
+        "o3kd" => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/o3kd"),
+        "o3k-compute" => {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/o3k-compute-bin")
+        }
+        "o3k-network" => {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/o3k-network-bin")
+        }
+        _ => panic!("unknown executable"),
+    };
+    fs::copy(source, destination).expect("copy source-built executable");
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o755)).unwrap();
+    let strip = Command::new("strip")
+        .args(["--strip-debug"])
+        .arg(destination)
+        .status()
+        .expect("qualification worker must provide strip(1)");
+    assert!(strip.success(), "strip --strip-debug failed for {name}");
+    if candidate {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(destination)
+            .expect("open candidate executable for inert fixture trailer");
+        file.write_all(b"\nO3K A10 signed test candidate\n")
+            .expect("append inert candidate identity trailer");
+        file.sync_all().expect("sync candidate fixture executable");
+    }
+}
+
+fn signed_release_manifest(
+    version: &str,
+    source_commit: &str,
+    profile: &str,
+    signer: &VerifyingKey,
+) -> Vec<u8> {
+    let key_hex = key_hex(signer);
+    serde_json::to_vec(&serde_json::json!({
+        "version": version,
+        "profile": "test-small-edge",
+        "profile_id": profile,
+        "source_commit": source_commit,
+        "workflow": "isolated-a10-process-fixture",
+        "installer_sha256": INSTALLER_SHA256,
+        "schema_version": "1",
+        "installation_policy_format": "o3k-installation-policy-v1",
+        "installation_policy_path": "/etc/o3k/installation-policy.json",
+        "installation_policy_authority": {
+            "key_id": POLICY_SIGNER_ID,
+            "ed25519_public_key": key_hex,
+        },
+        "installation_policy_v2_authority": {
+            "format": "o3k-installation-policy-v2",
+            "policy_path": "/etc/o3k/installation-policy.json",
+            "key_id": POLICY_SIGNER_ID,
+            "ed25519_public_key": key_hex,
+        },
+    }))
+    .unwrap()
+}
+
+fn source_release_manifest(
+    version: &str,
+    source_commit: &str,
+    profile: &str,
+    signer: &VerifyingKey,
+) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "version": version,
+        "profile": "test-small-edge",
+        "profile_id": profile,
+        "source_commit": source_commit,
+        "workflow": "isolated-a10-process-fixture",
+        "installer_sha256": INSTALLER_SHA256,
+        "schema_version": "1",
+        "installation_policy_format": "o3k-installation-policy-v1",
+        "installation_policy_path": "/etc/o3k/installation-policy.json",
+        "installation_policy_authority": {
+            "key_id": POLICY_SIGNER_ID,
+            "ed25519_public_key": key_hex(signer),
+        },
+    }))
+    .unwrap()
+}
+
+fn executable_checksums(bundle: &Path) -> Vec<u8> {
+    let mut entries = BTreeMap::new();
+    for name in ["o3kd", "o3k", "o3k-compute", "o3k-network"] {
+        entries.insert(
+            format!("./bin/{name}"),
+            sha256_hex(&fs::read(bundle.join("bin").join(name)).unwrap()),
+        );
+    }
+    entries
+        .into_iter()
+        .map(|(name, digest)| format!("{digest}  {name}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn fixture_checksums(bundle: &Path) -> Vec<u8> {
+    let mut entries = BTreeMap::new();
+    for line in std::str::from_utf8(&executable_checksums(bundle))
+        .unwrap()
+        .lines()
+    {
+        let (digest, name) = line.split_once("  ").unwrap();
+        entries.insert(name.to_string(), digest.to_string());
+    }
+    for name in ["manifest.json", "sbom.spdx.json"] {
+        entries.insert(
+            format!("./{name}"),
+            sha256_hex(&fs::read(bundle.join(name)).unwrap()),
+        );
+    }
+    entries
+        .into_iter()
+        .map(|(name, digest)| format!("{digest}  {name}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn make_candidate_archive(bundle: &Path, archive_path: &Path) {
+    let tar_file = fs::File::create(archive_path).unwrap();
+    let encoder = flate2::write::GzEncoder::new(tar_file, flate2::Compression::fast());
+    let mut archive = tar::Builder::new(encoder);
+    archive
+        .append_dir_all(bundle.file_name().unwrap(), bundle)
+        .unwrap();
+    archive.finish().unwrap();
+    archive
+        .into_inner()
+        .unwrap()
+        .finish()
+        .unwrap()
+        .sync_all()
+        .unwrap();
+}
+
+fn install_fake_systemctl(bin_dir: &Path, _systemd_dir: &Path, fixture: &Path) {
+    let active = fixture.join("active-units");
+    fs::create_dir_all(&active).unwrap();
+    for unit in ["o3kd.service", "o3k-network.service", "o3k-compute.service"] {
+        fs::write(active.join(unit), b"active").unwrap();
+    }
+    let script = "#!/bin/sh\nset -eu\ncmd=$1; shift || true\ncase $cmd in\n  show) prop=$1; shift; test \"$1\" = --value && shift; unit=$1; case $prop in --property=ActiveState) if test -e /var/lib/active-units/$unit; then echo active; else echo inactive; fi;; --property=UnitFileState) if test -L /etc/systemd/system/$unit; then echo masked; else echo enabled; fi;; esac;;\n  stop) rm -f /var/lib/active-units/$1;;\n  mask) test \"$1\" = --now && shift; for unit do ln -sfn /dev/null /etc/systemd/system/$unit; done;;\n  unmask) rm -f /etc/systemd/system/$1;;\n  start) : > /var/lib/active-units/$1;;\n  daemon-reload) :;;\n  *) exit 2;;\nesac\n";
+    let path = bin_dir.join("systemctl");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+#[ignore = "requires root, private mount namespace, ext4 fixture, test binaries and test-only signer"]
+fn signed_never_recovered_migration_runs_through_real_cli() {
+    let fixture = root_fixture().expect("root fixture available");
+    let mut ctx = fresh_ctx();
+    let var = fixture.join("var");
+    let assets = std::env::temp_dir().join(format!("o3k-a10-assets-{}", uuid::Uuid::now_v7()));
+    fs::create_dir_all(assets.join("inputs")).unwrap();
+    fs::set_permissions(&assets, fs::Permissions::from_mode(0o700)).unwrap();
+    let source_version = "v0.4.0-rc.5";
+    let source_commit = SOURCE_COMMIT;
+    let source_bundle = var.join("source-bundle/o3k-0.4.0-rc.5");
+    fs::create_dir_all(source_bundle.join("bin")).unwrap();
+    for name in ["o3kd", "o3k", "o3k-compute", "o3k-network"] {
+        copy_test_executable(name, &source_bundle.join("bin").join(name), false);
+    }
+    let source_raw_manifest = source_release_manifest(
+        source_version,
+        source_commit,
+        "o3k-small-edge-v1",
+        &ctx.keys.policy.verifying_key(),
+    );
+    fs::write(source_bundle.join("manifest.json"), &source_raw_manifest).unwrap();
+    let source_sbom = b"test-only source sbom";
+    fs::write(source_bundle.join("sbom.spdx.json"), source_sbom).unwrap();
+    let source_sums = fixture_checksums(&source_bundle);
+    fs::write(source_bundle.join("SHA256SUMS"), &source_sums).unwrap();
+    let source_artifact = assets.join("source-release.tar.gz");
+    make_candidate_archive(&source_bundle, &source_artifact);
+    let source_artifact_digest = sha256_hex(&fs::read(&source_artifact).unwrap());
+    let source_installed_manifest =
+        o3k::upgrade::release_identity::manifest_with_verified_artifact(
+            &source_raw_manifest,
+            &source_artifact_digest,
+        )
+        .unwrap();
+    let installation = setup_fixture_for_release(
+        &mut ctx,
+        &fixture,
+        false,
+        "o3k-small-edge-v1",
+        "postgresql",
+        &source_artifact_digest,
+        Some(source_installed_manifest.clone()),
+    );
+    let share = var.join("share-fixture");
+    let bin = var.join("bin-fixture");
+    let systemd = var.join("etc-fixture/systemd/system");
+    let inputs = assets.join("inputs");
+    fs::create_dir_all(&inputs).unwrap();
+    for name in ["o3kd", "o3k", "o3k-compute", "o3k-network"] {
+        // Installed executables must have a single protected pathname. A
+        // hard link to the release bundle would correctly fail the publisher's
+        // executable identity/link-count gate and would not model installation.
+        fs::copy(source_bundle.join("bin").join(name), bin.join(name)).unwrap();
+    }
+    install_fake_systemctl(&bin, &systemd, &var);
+
+    let source_manifest = source_raw_manifest;
+    fs::write(share.join("SHA256SUMS"), &source_sums).unwrap();
+    fs::set_permissions(share.join("SHA256SUMS"), fs::Permissions::from_mode(0o644)).unwrap();
+    let source_digests = a10_release_digests(
+        source_version,
+        &source_artifact_digest,
+        &source_manifest,
+        &source_sums,
+        source_sbom,
+    );
+    let source_signature = a10_release_signature(&source_digests);
+    for (name, bytes) in [
+        ("source-manifest.json", source_manifest.clone()),
+        ("source-release-digests.txt", source_digests.clone()),
+        ("source-release-signature.sig", source_signature.clone()),
+    ] {
+        write_root_owned(&inputs.join(name), &bytes, 0, 0, 0o600);
+    }
+
+    let target_version = "v0.4.1-a10";
+    let target_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let raw_manifest = signed_release_manifest(
+        target_version,
+        target_commit,
+        "o3k-small-edge-v1",
+        &ctx.keys.policy.verifying_key(),
+    );
+    let bundle = assets.join("candidate-bundle/o3k-0.4.1-a10");
+    fs::create_dir_all(bundle.join("bin")).unwrap();
+    for name in ["o3kd", "o3k", "o3k-compute", "o3k-network"] {
+        copy_test_executable(name, &bundle.join("bin").join(name), true);
+        assert_ne!(
+            sha256_hex(&fs::read(bundle.join("bin").join(name)).unwrap()),
+            sha256_hex(&fs::read(source_bundle.join("bin").join(name)).unwrap()),
+            "test release candidate must exercise replacement for {name}"
+        );
+    }
+    fs::write(bundle.join("manifest.json"), &raw_manifest).unwrap();
+    fs::write(bundle.join("sbom.spdx.json"), b"test-only sbom").unwrap();
+    let target_sums = fixture_checksums(&bundle);
+    fs::write(bundle.join("SHA256SUMS"), &target_sums).unwrap();
+    let artifact = inputs.join("candidate.tar.gz");
+    make_candidate_archive(&bundle, &artifact);
+    let artifact_metadata = fs::metadata(&artifact).unwrap();
+    eprintln!(
+        "A10 fixture artifact: uid={} gid={} mode={:o} nlink={} bytes={}",
+        artifact_metadata.uid(),
+        artifact_metadata.gid(),
+        artifact_metadata.mode() & 0o7777,
+        artifact_metadata.nlink(),
+        artifact_metadata.len(),
+    );
+    let artifact_bytes = fs::read(&artifact).unwrap();
+    let artifact_digest = sha256_hex(&artifact_bytes);
+    let target_manifest = o3k::upgrade::release_identity::manifest_with_verified_artifact(
+        &raw_manifest,
+        &artifact_digest,
+    )
+    .unwrap();
+    let target_manifest_digest = sha256_hex(&target_manifest);
+    let release_digests = a10_release_digests(
+        target_version,
+        &artifact_digest,
+        &raw_manifest,
+        &target_sums,
+        b"test-only sbom",
+    );
+    let release_signature = a10_release_signature(&release_digests);
+
+    let source = &installation.era1_policy;
+    let policy_payload = serde_json::json!({
+        "format": "o3k-installation-policy-v2",
+        "installation_id": ctx.target.installation_id,
+        "site_id": ctx.target.site_id,
+        "profile": source.policy.profile,
+        "backend": source.policy.backend,
+        "backend_version": "16",
+        "deployment": "virtualized",
+        "restore_branch_authorization": "inactive-materialization-only",
+        "release_identity": artifact_digest,
+        "release_version": target_version,
+        "source_commit": target_commit,
+        "release_manifest_sha256": target_manifest_digest,
+        "data_root": source.policy.data_root,
+        "target_device": source.policy.target_device,
+        "target_inode": source.policy.target_inode,
+        "policy_revision": source.policy.policy_revision + 1,
+        "prior_policy_digest": source.digest,
+        "policy_path": source.policy.policy_path,
+        "trust_bundle_path": source.policy.trust_bundle_path,
+        "trust_bundle_digest": source.policy.trust_bundle_digest,
+        "recovery_state_root": source.policy.recovery_state_root,
+        "recovery_state_device": source.policy.recovery_state_device,
+        "recovery_state_inode": source.policy.recovery_state_inode,
+        "journal_directory": source.policy.journal_directory,
+        "journal_device": source.policy.journal_device,
+        "journal_inode": source.policy.journal_inode,
+        "journal_trust_root_id": source.policy.journal_trust_root_id,
+        "journal_trust_root_public_key": source.policy.journal_trust_root_public_key,
+        "evidence_trust_root_id": source.policy.evidence_trust_root_id,
+        "evidence_trust_root_public_key": source.policy.evidence_trust_root_public_key,
+        "signer_key_id": POLICY_SIGNER_ID,
+    });
+    let policy_bytes = sign(&policy_payload, &ctx.keys.policy, POLICY_SIGNER_ID);
+    let state_tip = fs::read(installation.state_root.join("state.json")).unwrap();
+    let migration_payload = serde_json::json!({
+        "format": "o3k-installation-policy-migration-v1",
+        "installation_id": ctx.target.installation_id,
+        "site_id": ctx.target.site_id,
+        "sequence": 1,
+        "prior_record_digest": sha256_hex(&state_tip),
+        "preserved_state": "NEVER_RECOVERED",
+        "prior_policy_format": "o3k-installation-policy-v1",
+        "prior_policy_revision": source.policy.policy_revision,
+        "prior_policy_digest": source.digest,
+        "new_policy_format": "o3k-installation-policy-v2",
+        "new_policy_revision": source.policy.policy_revision + 1,
+        "new_policy_digest": sha256_hex(&policy_bytes),
+        "prior_release_manifest_sha256": ctx.manifest_digest,
+        "new_release_manifest_sha256": target_manifest_digest,
+        "prior_release_identity": {
+            "version": "v0.4.0-rc.5",
+            "source_commit": SOURCE_COMMIT,
+            "release_artifact_sha256": source_artifact_digest,
+            "profile_id": "o3k-small-edge-v1",
+            "schema_version": 1,
+        },
+        "new_release_identity": {
+            "version": target_version,
+            "source_commit": target_commit,
+            "release_artifact_sha256": artifact_digest,
+            "profile_id": "o3k-small-edge-v1",
+            "schema_version": 1,
+        },
+        "target_device": ctx.target.data_root_device,
+        "target_inode": ctx.target.data_root_inode,
+        "trust_bundle_digest": source.policy.trust_bundle_digest,
+        "checkpoint_digest": null,
+        "signer_manifest_digest": target_manifest_digest,
+    });
+    let event_bytes = sign(&migration_payload, &ctx.keys.policy, POLICY_SIGNER_ID);
+    for (name, bytes) in [
+        ("policy-v2.json", policy_bytes),
+        ("migration-event.json", event_bytes),
+        ("release-manifest-v2.json", target_manifest.clone()),
+        ("release-digests.txt", release_digests.clone()),
+        ("release-signature.sig", release_signature.clone()),
+    ] {
+        write_root_owned(&inputs.join(name), &bytes, 0, 0, 0o600);
+    }
+    fsync_test_tree(&inputs);
+
+    let invocation = "stat -c 'A10 mounted artifact: uid=%u gid=%g mode=%a links=%h bytes=%s type=%F' /root/o3k-a10-assets/inputs/candidate.tar.gz; {binary} recovery-migrate-v2 --policy /root/o3k-a10-assets/inputs/policy-v2.json --event /root/o3k-a10-assets/inputs/migration-event.json --manifest /root/o3k-a10-assets/inputs/release-manifest-v2.json --artifact /root/o3k-a10-assets/inputs/candidate.tar.gz --release-digests /root/o3k-a10-assets/inputs/release-digests.txt --release-signature /root/o3k-a10-assets/inputs/release-signature.sig --source-manifest /root/o3k-a10-assets/inputs/source-manifest.json --source-release-digests /root/o3k-a10-assets/inputs/source-release-digests.txt --source-release-signature /root/o3k-a10-assets/inputs/source-release-signature.sig";
+    let asset_dir = assets.to_str().unwrap();
+    let candidate_cli = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/a10-fixture/candidate-o3k"
+    );
+    let v1_policy = fs::read(var.join("etc-fixture/o3k/installation-policy.json")).unwrap();
+    let v1_high_water = fs::read(installation.state_root.join("policy.json")).unwrap();
+    let v1_manifest = fs::read(share.join("release-manifest.json")).unwrap();
+    let v1_selector = fs::read(installation.state_root.join("state.json")).unwrap();
+    let v1_selector_digest = sha256_hex(&v1_selector);
+    let pristine = root_fixture().expect("pristine fixture snapshot location available");
+    let copied = Command::new("cp")
+        .args(["-a"])
+        .arg(format!("{}/.", fixture.display()))
+        .arg(&pristine)
+        .status()
+        .expect("cp for disposable fixture snapshot");
+    assert!(copied.success(), "could not snapshot pristine v1 fixture");
+    let crash_env = [
+        ("O3K_A10_ASSET_DIR", asset_dir),
+        ("O3K_A10_CLI_BINARY", candidate_cli),
+        (
+            "O3K_A10_MIGRATION_CRASH_AT",
+            "state.json:after-rename-before-directory-fsync",
+        ),
+    ];
+    let (_, crash_stderr, crash_status) = run_in_namespace(&fixture, invocation, &crash_env);
+    assert_eq!(
+        crash_status.code(),
+        Some(86),
+        "selector rename fault point did not terminate the real publisher: {crash_stderr}"
+    );
+    assert_eq!(
+        fs::read(installation.state_root.join("state.json")).unwrap(),
+        fs::read(inputs.join("migration-event.json")).unwrap(),
+        "rename-before-directory-fsync process exit must expose only exact signed selector bytes"
+    );
+    assert_eq!(
+        fs::read(var.join("etc-fixture/o3k/installation-policy.json")).unwrap(),
+        v1_policy,
+        "policy must remain v1 when selector publication is interrupted"
+    );
+    assert_eq!(
+        fs::read(installation.state_root.join("policy.json")).unwrap(),
+        v1_high_water,
+        "high-water must remain v1 when selector publication is interrupted"
+    );
+    assert_eq!(
+        fs::read(share.join("release-manifest.json")).unwrap(),
+        v1_manifest,
+        "release manifest must remain v1 when selector publication is interrupted"
+    );
+    eprintln!(
+        "PASS selector rename-before-directory-fsync: exact signed event visible; v1 policy/high-water/manifest preserved"
+    );
+    let exact_retry = invocation
+        .split_once("; ")
+        .expect("publisher invocation includes artifact diagnostic")
+        .1
+        .replace(
+            "/root/o3k-a10-assets/inputs/",
+            "/root/o3k-a10-assets/removed/",
+        );
+    let retry_env = [
+        ("O3K_A10_ASSET_DIR", asset_dir),
+        ("O3K_A10_CLI_BINARY", candidate_cli),
+    ];
+    let (retry_stdout, retry_stderr, retry_status) =
+        run_in_namespace(&fixture, &exact_retry, &retry_env);
+    assert!(
+        retry_status.success() && retry_stdout.contains("V2Complete"),
+        "post-selector process restart did not exact-forward from staged authenticated inputs: stdout={retry_stdout} stderr={retry_stderr}"
+    );
+    assert_eq!(
+        fs::read(share.join("release-manifest.json")).unwrap(),
+        target_manifest
+    );
+    assert!(
+        installation
+            .journal_dir
+            .join("unsigned-denial.marker")
+            .exists()
+    );
+    let selector_before_replay = fs::read(installation.state_root.join("state.json")).unwrap();
+    let state_snapshot = hash_tree(&installation.state_root);
+    let share_snapshot = hash_tree(&share);
+    let (replay_stdout, replay_stderr, replay_status) =
+        run_in_namespace(&fixture, &exact_retry, &retry_env);
+    assert!(
+        replay_status.success() && replay_stdout.contains("V2Complete"),
+        "exact-forward replay failed: stdout={replay_stdout} stderr={replay_stderr}"
+    );
+    assert_eq!(
+        fs::read(installation.state_root.join("state.json")).unwrap(),
+        selector_before_replay,
+        "replay must not publish a second selector"
+    );
+    assert_eq!(hash_tree(&installation.state_root), state_snapshot);
+    assert_eq!(hash_tree(&share), share_snapshot);
+    eprintln!(
+        "PASS signed NEVER_RECOVERED v1-to-v2 migration, restart exact-forward completion, and idempotent replay"
+    );
+    for unit in ["o3kd.service", "o3k-network.service", "o3k-compute.service"] {
+        assert_eq!(
+            fs::read_link(systemd.join(unit)).ok().as_deref(),
+            Some(Path::new("/dev/null")),
+            "restart retry must preserve a conservative persistent deny for {unit}"
+        );
+    }
+    assert_eq!(
+        fs::metadata(bin.join("o3k-compute"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644,
+        "restart retry must preserve direct-execution denial"
+    );
+
+    // Each case starts from the same inode-bound authenticated v1 fixture.
+    // The child is the real publisher; exit 86 is injected only after the
+    // named filesystem operation has reached its actual boundary.
+    let crash_cases = [
+        ("compute-execution-disabled", false),
+        ("compute-processes-quiesced", false),
+        ("d8-exclusions-acquired", false),
+        ("authenticated-inputs-staged", false),
+        ("executable-replaced:o3kd", false),
+        ("executable-replaced:o3k", false),
+        ("executable-replaced:o3k-compute", false),
+        ("executable-replaced:o3k-network", false),
+        ("state.json:after-temp-write-before-fsync", false),
+        ("state.json:after-file-fsync", false),
+        ("state.json:after-directory-fsync-before-readback", true),
+        (
+            "installation-policy.json:after-rename-before-directory-fsync",
+            true,
+        ),
+        ("v2-policy-published", true),
+        ("policy.json:after-rename-before-directory-fsync", true),
+        ("v2-high-water-published", true),
+        (
+            "release-manifest.json:after-rename-before-directory-fsync",
+            true,
+        ),
+        ("v2-release-manifest-published", true),
+        ("v2-generation-verified-before-guard-release", true),
+        ("before-d8-guard-release", true),
+        ("after-d8-guard-release", true),
+    ];
+    let signed_event = fs::read(inputs.join("migration-event.json")).unwrap();
+    let signed_policy = fs::read(inputs.join("policy-v2.json")).unwrap();
+    for (point, selector_is_v2) in crash_cases {
+        restore_test_tree(&pristine, &fixture);
+        let case_env = [
+            ("O3K_A10_ASSET_DIR", asset_dir),
+            ("O3K_A10_CLI_BINARY", candidate_cli),
+            ("O3K_A10_MIGRATION_CRASH_AT", point),
+        ];
+        let (_, case_stderr, case_status) = run_in_namespace(&fixture, invocation, &case_env);
+        assert_eq!(
+            case_status.code(),
+            Some(86),
+            "fault point {point} did not terminate after the real publisher boundary: {case_stderr}"
+        );
+        let selected = fs::read(installation.state_root.join("state.json")).unwrap();
+        assert_eq!(
+            selected.as_slice(),
+            if selector_is_v2 {
+                signed_event.as_slice()
+            } else {
+                v1_selector.as_slice()
+            },
+            "fault point {point} left an unexpected active selector"
+        );
+        let policy_after_crash =
+            fs::read(var.join("etc-fixture/o3k/installation-policy.json")).unwrap();
+        assert!(
+            policy_after_crash == v1_policy || policy_after_crash == signed_policy,
+            "fault point {point} left policy bytes outside the authenticated endpoints"
+        );
+        let manifest_after_crash = fs::read(share.join("release-manifest.json")).unwrap();
+        assert!(
+            manifest_after_crash == v1_manifest || manifest_after_crash == target_manifest,
+            "fault point {point} left release-manifest bytes outside the authenticated endpoints"
+        );
+        if !selector_is_v2 {
+            assert_eq!(
+                policy_after_crash, v1_policy,
+                "pre-selector interruption changed the active v1 policy at {point}"
+            );
+            assert_eq!(
+                fs::read(installation.state_root.join("policy.json")).unwrap(),
+                v1_high_water,
+                "pre-selector interruption changed v1 high-water at {point}"
+            );
+            assert_eq!(
+                manifest_after_crash, v1_manifest,
+                "pre-selector interruption changed the active v1 release manifest at {point}"
+            );
+        }
+        let retry = if selector_is_v2 {
+            exact_retry.as_str()
+        } else {
+            invocation
+        };
+        let (case_stdout, case_stderr, case_status) = run_in_namespace(&fixture, retry, &retry_env);
+        assert!(
+            case_status.success() && case_stdout.contains("V2Complete"),
+            "fault point {point} did not converge via the permitted retry: stdout={case_stdout} stderr={case_stderr}"
+        );
+        assert_eq!(
+            fs::read(installation.state_root.join("state.json")).unwrap(),
+            signed_event,
+            "fault point {point} retry did not preserve the exact signed selector"
+        );
+        assert_eq!(
+            fs::read(var.join("etc-fixture/o3k/installation-policy.json")).unwrap(),
+            signed_policy,
+            "fault point {point} retry did not publish exact signed policy bytes"
+        );
+        assert_eq!(
+            fs::read(share.join("release-manifest.json")).unwrap(),
+            target_manifest,
+            "fault point {point} retry did not publish the exact release manifest"
+        );
+        let state_after_retry = hash_tree(&installation.state_root);
+        let share_after_retry = hash_tree(&share);
+        let (replay_out, replay_err, replay_status) =
+            run_in_namespace(&fixture, exact_retry.as_str(), &retry_env);
+        assert!(
+            replay_status.success() && replay_out.contains("V2Complete"),
+            "fault point {point} exact-forward replay failed: stdout={replay_out} stderr={replay_err}"
+        );
+        assert_eq!(hash_tree(&installation.state_root), state_after_retry);
+        assert_eq!(hash_tree(&share), share_after_retry);
+        eprintln!("PASS A10 publication crash/restart boundary: {point}");
+    }
+    restore_test_tree(&pristine, &fixture);
+    let state_rel = installation
+        .state_root
+        .strip_prefix(fixture.join("var"))
+        .expect("state path is below the fixture's /var bind")
+        .display()
+        .to_string();
+    let publisher_command = invocation
+        .split_once("; ")
+        .expect("publisher invocation includes artifact posture diagnostic")
+        .1;
+    let concurrent_script = format!(
+        "{publisher_command} >/var/lib/a10-publisher.out 2>/var/lib/a10-publisher.err & publisher=$!; i=0; while test ! -e /var/lib/a10-pause-marker; do i=$((i + 1)); test $i -lt 600 || exit 70; sleep 0.05; done; active=$(sha256sum /var/lib/{state_rel}/state.json | cut -d' ' -f1); test \"$active\" = \"{v1_selector_digest}\"; test ! -x /usr/local/bin/o3k-compute; test \"$(readlink /etc/systemd/system/o3k-compute.service)\" = /dev/null; if /usr/local/bin/o3k-compute; then exit 71; else result=$?; test $result -eq 126; fi; test ! -e /var/lib/active-units/o3k-compute.service; touch /var/lib/a10-resume-marker; wait $publisher"
+    );
+    let pause_env = [
+        ("O3K_A10_ASSET_DIR", asset_dir),
+        ("O3K_A10_CLI_BINARY", candidate_cli),
+        ("O3K_A10_MIGRATION_PAUSE_AT", "d8-exclusions-acquired"),
+        (
+            "O3K_A10_MIGRATION_PAUSE_MARKER",
+            "/var/lib/a10-pause-marker",
+        ),
+        (
+            "O3K_A10_MIGRATION_RESUME_MARKER",
+            "/var/lib/a10-resume-marker",
+        ),
+    ];
+    let (concurrent_out, concurrent_err, concurrent_status) =
+        run_in_namespace(&fixture, &concurrent_script, &pause_env);
+    assert!(
+        concurrent_status.success(),
+        "compute direct-start while D8 was held did not remain denied: stdout={concurrent_out} stderr={concurrent_err}"
+    );
+    assert!(
+        fs::read(fixture.join("var/a10-publisher.out"))
+            .unwrap()
+            .windows(b"V2Complete".len())
+            .any(|window| window == b"V2Complete"),
+        "paused publisher did not complete after D8 direct-start assertion"
+    );
+    eprintln!("PASS A10 direct compute invocation denied during D8; publisher resumed");
+    fs::remove_dir_all(fixture).unwrap();
+    fs::remove_dir_all(pristine).unwrap();
+    fs::remove_dir_all(assets).unwrap();
+}
+
+fn fsync_test_tree(directory: &Path) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fsync_test_tree(&path);
+        } else {
+            fs::File::open(path).unwrap().sync_all().unwrap();
+        }
+    }
+    fs::File::open(directory).unwrap().sync_all().unwrap();
+}
+
+/// Restores a disposable process-test fixture without replacing any existing
+/// directory inode (installation policy binds several of those identities).
+fn restore_test_tree(source: &Path, destination: &Path) {
+    let source_entries: BTreeMap<_, _> = fs::read_dir(source)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), entry.path())
+        })
+        .collect();
+    for entry in fs::read_dir(destination).unwrap() {
+        let entry = entry.unwrap();
+        if !source_entries.contains_key(&entry.file_name()) {
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                fs::remove_dir_all(path).unwrap();
+            } else {
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+    for (name, source_path) in source_entries {
+        let target_path = destination.join(&name);
+        let source_type = fs::symlink_metadata(&source_path).unwrap().file_type();
+        if source_type.is_dir() {
+            if fs::symlink_metadata(&target_path)
+                .map(|metadata| !metadata.is_dir())
+                .unwrap_or(false)
+            {
+                fs::remove_file(&target_path).unwrap();
+            }
+            fs::create_dir_all(&target_path).unwrap();
+            restore_test_tree(&source_path, &target_path);
+        } else if source_type.is_symlink() {
+            if fs::symlink_metadata(&target_path).is_ok() {
+                fs::remove_file(&target_path).unwrap();
+            }
+            let link = fs::read_link(&source_path).unwrap();
+            std::os::unix::fs::symlink(link, &target_path).unwrap();
+        } else {
+            fs::copy(&source_path, &target_path).unwrap();
+        }
+        if source_type.is_dir() || source_type.is_file() {
+            let metadata = fs::metadata(&source_path).unwrap();
+            fs::set_permissions(
+                &target_path,
+                fs::Permissions::from_mode(metadata.mode() & 0o7777),
+            )
+            .unwrap();
+            std::os::unix::fs::chown(&target_path, Some(metadata.uid()), Some(metadata.gid()))
+                .unwrap();
+        }
     }
 }
 

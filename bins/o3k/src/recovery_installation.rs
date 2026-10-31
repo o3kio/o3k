@@ -770,6 +770,25 @@ fn verify_migration_predecessor_high_water(
                 return Err("migration state archive contains a stale or conflicting tip");
             }
         }
+        if name.starts_with("policy-high-water-") && name.ends_with(".json") {
+            let digest = name
+                .strip_prefix("policy-high-water-")
+                .and_then(|suffix| suffix.strip_suffix(".json"))
+                .ok_or("migration policy high-water archive name is malformed")?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err("migration policy high-water archive name is malformed");
+            }
+            // This content-addressed snapshot is the predecessor's selector
+            // high-water, not a signed policy archive. Exact-forward recovery
+            // compares its bytes against the authenticated migration
+            // publication plan; parsing it as `policy-<digest>.json` would
+            // reject every valid migration.
+            continue;
+        }
         if !name.starts_with("policy-") || !name.ends_with(".json") {
             continue;
         }
@@ -1135,6 +1154,16 @@ impl InstalledRecovery {
                     .map_err(|_| "installation state signature is invalid")?;
                     identity::verify_initial_state_transition(None, &initial, &policy)
                         .map_err(|_| "installation state predecessor is invalid")?;
+                    // A NEVER_RECOVERED state does not need trust to verify
+                    // its state signature, but A10 migration still has to
+                    // authenticate the installed trust and revocation
+                    // high-water before it can carry that authority forward.
+                    fixed_bundle_bytes =
+                        read_protected_config(Path::new(&policy.trust_bundle_path), gid)
+                            .map_err(|_| "installed recovery trust is unsafe or unavailable")?;
+                    trust_high_water_bytes = state_directory
+                        .read_bounded("trust.json", 0, gid, 0o640, MAX_DOCUMENT)
+                        .map_err(|_| "durable recovery trust high-water state is unavailable")?;
                     // The provisioned journal directory stays observed on a
                     // NEVER_RECOVERED tip: designation (and the C1.1 rotation
                     // driver) require it, and its identity is policy-bound.
@@ -1600,6 +1629,16 @@ impl InstalledRecovery {
 
     pub(crate) fn migration_trust_bundle_bytes(&self) -> &[u8] {
         &self.fixed_bundle_bytes
+    }
+
+    /// Authenticate the fixed trust bundle against its installation policy
+    /// and durable revocation high-water before migration consumes it. Normal
+    /// NEVER_RECOVERED startup does not need this authority to verify its
+    /// initial state signature, so the migration publisher calls this
+    /// explicitly at its preflight boundary.
+    pub(crate) fn verify_migration_trust(&self) -> Result<()> {
+        let (_, gid) = service_identity()?;
+        load_trust(&self.policy, &self.state_directory, gid).map(|_| ())
     }
 
     pub(crate) fn migration_policy_high_water_bytes(&self) -> &[u8] {
