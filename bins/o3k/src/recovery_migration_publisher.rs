@@ -96,6 +96,140 @@ struct UpgradeExclusion {
     inode: u64,
 }
 
+/// Ephemeral extraction workspace. Authenticated retry authority is staged
+/// separately in the protected recovery-state directory; extracted files are
+/// disposable and must not accumulate there across retries or reboots.
+struct CandidateScratch {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl CandidateScratch {
+    fn create(label: &str, digest: &str) -> Result<Self, MigrationError> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let parent = Path::new("/run");
+        crate::recovery_files::check_ancestors(parent)
+            .map_err(|_| reject("candidate scratch parent is unsafe"))?;
+        let parent_metadata = fs::symlink_metadata(parent)
+            .map_err(|_| reject("candidate scratch parent is unavailable"))?;
+        if !parent_metadata.is_dir()
+            || parent_metadata.uid() != 0
+            || parent_metadata.mode() & 0o022 != 0
+        {
+            return Err(reject("candidate scratch parent posture is unsafe"));
+        }
+        Self::remove_stale(parent)?;
+
+        let path = parent.join(format!(
+            ".o3k-a10-{label}-{digest}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+            .create(&path)
+            .map_err(|_| MigrationError::Persistence("candidate scratch creation failed"))?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                let _ = fs::remove_dir(&path);
+                return Err(MigrationError::Persistence(
+                    "candidate scratch readback failed",
+                ));
+            }
+        };
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o7777 != 0o700 {
+            let _ = fs::remove_dir(&path);
+            return Err(reject("candidate scratch identity or mode is unsafe"));
+        }
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    /// A SIGKILL can leave a scratch tree until reboot clears `/run`. The
+    /// publisher exclusion is held before this method runs, so matching
+    /// root-owned private scratch directories can only belong to a terminated
+    /// earlier attempt. Other `/run` entries are never touched.
+    fn remove_stale(parent: &Path) -> Result<(), MigrationError> {
+        let mut removed = false;
+        for entry in fs::read_dir(parent)
+            .map_err(|_| MigrationError::Persistence("candidate scratch parent cannot be read"))?
+        {
+            let entry = entry.map_err(|_| {
+                MigrationError::Persistence("candidate scratch entry cannot be read")
+            })?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(".o3k-a10-candidate-") && !name.starts_with(".o3k-a10-resume-") {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|_| reject("stale candidate scratch identity cannot be inspected"))?;
+            if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o7777 != 0o700 {
+                return Err(reject("stale candidate scratch posture is unsafe"));
+            }
+            fs::remove_dir_all(path).map_err(|_| {
+                MigrationError::Persistence("stale candidate scratch cleanup failed")
+            })?;
+            removed = true;
+        }
+        if removed {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| {
+                    MigrationError::Persistence("stale candidate scratch cleanup sync failed")
+                })?;
+        }
+        Ok(())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup(&self) -> Result<(), MigrationError> {
+        let metadata = fs::symlink_metadata(&self.path).map_err(|_| {
+            MigrationError::Persistence("candidate scratch identity is unavailable")
+        })?;
+        if metadata.dev() != self.device || metadata.ino() != self.inode || !metadata.is_dir() {
+            return Err(reject("candidate scratch identity changed"));
+        }
+        fs::remove_dir_all(&self.path)
+            .map_err(|_| MigrationError::Persistence("candidate scratch cleanup failed"))?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| reject("candidate scratch parent disappeared"))?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| MigrationError::Persistence("candidate scratch cleanup sync failed"))
+    }
+}
+
+impl Drop for CandidateScratch {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::symlink_metadata(&self.path)
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+            && metadata.is_dir()
+        {
+            let _ = fs::remove_dir_all(&self.path);
+            if let Some(parent) = self.path.parent()
+                && let Ok(directory) = fs::File::open(parent)
+            {
+                let _ = directory.sync_all();
+            }
+        }
+    }
+}
+
 impl Drop for UpgradeExclusion {
     fn drop(&mut self) {
         use std::os::unix::fs::MetadataExt;
@@ -1590,27 +1724,9 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         gid,
     )?;
 
-    let stage_name = format!(
-        ".a10-candidate-{}-{}-{}",
-        authenticated.artifact_digest,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    );
-    let stage_root = installed
-        .migration_state_directory()
-        .path()
-        .join(&stage_name);
-    let mut builder = fs::DirBuilder::new();
-    use std::os::unix::fs::DirBuilderExt;
-    builder.mode(0o700);
-    builder
-        .create(&stage_root)
-        .map_err(|_| MigrationError::Persistence("candidate staging directory creation failed"))?;
-    fs::File::open(installed.migration_state_directory().path())
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| MigrationError::Persistence("candidate staging parent sync failed"))?;
+    let stage_root = CandidateScratch::create("candidate", &authenticated.artifact_digest)?;
     let bundle =
-        extract_verified_candidate(inputs.candidate_artifact, &authenticated, &stage_root)?;
+        extract_verified_candidate(inputs.candidate_artifact, &authenticated, stage_root.path())?;
     let candidate_sums = fs::read(bundle.join("SHA256SUMS"))
         .map_err(|_| reject("candidate SHA256SUMS is unavailable"))?;
     if candidate_sums != authenticated.candidate_sums {
@@ -1633,6 +1749,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         // C1 disposition is still denial authority. Leave all affected units
         // masked and compute non-executable even though migration itself
         // authenticated successfully.
+        stage_root.cleanup()?;
         drop(store_guard);
         return Ok(PublicationPosition::V2Complete);
     }
@@ -1643,6 +1760,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
     drop(store_guard);
     enable_compute_executable()?;
     verify_dual_verifiers(&bundle, true)?;
+    stage_root.cleanup()?;
     run_systemctl(&["daemon-reload"])?;
     restore_service_posture(&service_posture)?;
     Ok(PublicationPosition::V2Complete)
@@ -1893,14 +2011,7 @@ fn resume_selected_v2(
     fs::File::open(state_directory.path())
         .and_then(|directory| directory.sync_all())
         .map_err(|_| MigrationError::Persistence("migration selector directory sync failed"))?;
-    let staged_root = state_directory.path().join(format!(
-        ".a10-resume-{}-{}-{}",
-        migration.new_policy_digest,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    fs::create_dir(&staged_root)
-        .map_err(|_| MigrationError::Persistence("exact-forward staging directory failed"))?;
+    let staged_root = CandidateScratch::create("resume", &migration.new_policy_digest)?;
     let release_digests = state_directory
         .read_bounded(
             &format!("migration-v2-release-digests-{artifact_digest}.txt"),
@@ -1986,7 +2097,7 @@ fn resume_selected_v2(
         source_release_digests,
         source_release_signature,
     };
-    let bundle = extract_verified_candidate(&artifact, &authenticated, &staged_root)?;
+    let bundle = extract_verified_candidate(&artifact, &authenticated, staged_root.path())?;
     verify_dual_verifiers(&bundle, false)?;
     let extracted_sums = fs::read(bundle.join("SHA256SUMS"))
         .map_err(|_| reject("target release checksums are unavailable"))?;
@@ -2074,6 +2185,7 @@ fn resume_selected_v2(
     )
     .map_err(|_| MigrationError::Persistence("exact-forward generation verification failed"))?;
     verify_dual_verifiers(&bundle, false)?;
+    staged_root.cleanup()?;
     // A process restart loses the pre-migration service snapshot. Keep
     // services masked and compute non-executable rather than infer that
     // controller startup was previously permitted.
@@ -2392,6 +2504,7 @@ fn mask_and_quiesce_services() -> Result<(), MigrationError> {
 mod publication_tests {
     use super::*;
     use openssl::{pkey::PKey, sign::Signer};
+    use std::os::unix::fs::MetadataExt;
 
     const OLD_STATE: &[u8] = b"signed-v1-state";
     const OLD_POLICY: &[u8] = b"signed-v1-policy";
@@ -2435,6 +2548,27 @@ mod publication_tests {
         assert!(verify_release_signature(message, &signature, &public).is_ok());
         assert!(verify_release_signature(b"tampered", &signature, &public).is_err());
         assert!(verify_release_signature(message, b"wrong signature", &public).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_scratch_cleanup_removes_only_the_recorded_inode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parent = std::env::temp_dir().join(format!("o3k-a10-scratch-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&parent)?;
+        let path = parent.join("candidate");
+        fs::create_dir(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let scratch = CandidateScratch {
+            path: path.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+
+        scratch.cleanup()?;
+        assert!(!path.exists());
+        drop(scratch);
+        fs::remove_dir(parent)?;
         Ok(())
     }
 
