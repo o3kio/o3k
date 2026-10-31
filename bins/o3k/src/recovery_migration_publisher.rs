@@ -251,9 +251,8 @@ impl Drop for UpgradeExclusion {
 fn acquire_upgrade_exclusion() -> Result<UpgradeExclusion, MigrationError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    let mut path = crate::upgrade::state::default_state_path().into_os_string();
-    path.push(".lock");
-    let path = PathBuf::from(path);
+    let state_path = crate::upgrade::state::default_state_path();
+    let path = upgrade_lock_path(&state_path)?;
     let parent = path
         .parent()
         .ok_or_else(|| reject("upgrade lock path has no parent"))?;
@@ -328,7 +327,19 @@ fn acquire_upgrade_exclusion() -> Result<UpgradeExclusion, MigrationError> {
             inode: metadata.ino(),
         });
     }
-    Err(reject("upgrade lock raced with another invocation"))
+    Err(reject("upgrade exclusion raced with another invocation"))
+}
+
+fn upgrade_lock_path(state_path: &Path) -> Result<PathBuf, MigrationError> {
+    const INSTALLED_STATE_PATH: &str = "/var/lib/o3k/.o3k-upgrade-state.json";
+    if state_path != Path::new(INSTALLED_STATE_PATH) {
+        return Err(reject(
+            "migration requires the canonical installed upgrade exclusion path",
+        ));
+    }
+    let mut path = state_path.as_os_str().to_os_string();
+    path.push(".lock");
+    Ok(PathBuf::from(path))
 }
 
 /// Unpacks an already authenticated release asset into a new, empty inert
@@ -2528,6 +2539,17 @@ mod publication_tests {
     const POLICY: &[u8] = b"signed-v2-policy";
     const HIGH_WATER: &[u8] = b"v2-high-water";
     const MANIFEST: &[u8] = b"authenticated-v2-manifest";
+
+    #[test]
+    fn migration_upgrade_exclusion_requires_the_canonical_installed_state_path()
+    -> Result<(), MigrationError> {
+        assert_eq!(
+            upgrade_lock_path(Path::new("/var/lib/o3k/.o3k-upgrade-state.json"))?,
+            PathBuf::from("/var/lib/o3k/.o3k-upgrade-state.json.lock")
+        );
+        assert!(upgrade_lock_path(Path::new("/tmp/alternate-state.json")).is_err());
+        Ok(())
+    }
 
     fn classify(
         state: Option<&[u8]>,
