@@ -258,9 +258,9 @@ fn main() -> ExitCode {
             trust,
             mode,
         } => {
-            if !require_selector_if_installed() {
-                return ExitCode::from(1);
-            }
+            // This root-only installer command publishes the first
+            // authenticated selector. The selector cannot be required before
+            // its signed inputs have been verified and provisioned.
             let Some(mode) = o3k::recovery_provision::ProvisionMode::parse(&mode) else {
                 eprintln!("invalid installation provision mode: {mode}");
                 return ExitCode::from(2);
@@ -274,9 +274,13 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryProvisionPrepare { data_root, backend } => {
-            if !require_selector_if_installed() {
-                return ExitCode::from(1);
-            }
+            // This is the root-only first-install bootstrap that creates the
+            // protected selector paths themselves. Requiring an installed
+            // selector here makes a C1 release impossible to provision: the
+            // selector cannot exist until this command has created its bound
+            // directories. `prepare` authenticates the installed release and
+            // refuses pre-existing recovery contents, so it cannot be used to
+            // bypass an existing installation's selector.
             let data_root = data_root.unwrap_or_else(|| Path::new("/var/lib/o3k").to_path_buf());
             match o3k::recovery_prepare::prepare(&data_root, &backend) {
                 Ok(descriptor) => match serde_json::to_string(&descriptor) {
@@ -297,9 +301,11 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryTrustUpdate { policy, trust } => {
-            if !require_maintenance_selector() {
-                return ExitCode::from(1);
-            }
+            // Trust maintenance can be required precisely because the
+            // installed generation denies operational admission. The updater
+            // independently authenticates policy/trust, locks the data root,
+            // and performs its protected compare-and-swap without opening the
+            // canonical store.
             match o3k::recovery_trust_update::update(&policy, &trust) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
@@ -372,13 +378,12 @@ fn main() -> ExitCode {
             revalidation,
             custody_record,
         } => {
-            if !require_maintenance_selector() {
-                return ExitCode::from(1);
-            }
             // The plan builder authenticates a complete generation and
             // verifies the signed R/C against the durable prior bytes for an
-            // exact-forward resume; a full startup load here would deny the
-            // legitimate partial generation after a crash.
+            // exact-forward resume; a full operational selector check here
+            // would deny designated/released installations that require this
+            // maintenance operation. This path opens no store and grants no
+            // operational readiness.
             let installed = match o3k::recovery_installation::InstalledRecovery::load_partial(
                 Path::new("/var/lib/o3k"),
             ) {
