@@ -249,7 +249,25 @@ fn verify_startup_policy_selector(data_dir: &Path) -> Result<(String, RecoverySt
             Ok((backend, state))
         }
         crate::recovery_migration_selector::V2_FORMAT => {
-            verify_v2_selected_generation(data_dir, &manifest_bytes, &policy_bytes)
+            let generation =
+                verify_v2_selected_generation(data_dir, &manifest_bytes, &policy_bytes)?;
+            if generation.1 == RecoveryState::NeverRecovered {
+                let compute = Path::new("/usr/local/bin/o3k-compute");
+                crate::recovery_files::check_ancestors(compute)
+                    .map_err(|_| "installed compute path is unsafe")?;
+                let metadata = fs::symlink_metadata(compute)
+                    .map_err(|_| "installed compute executable is unavailable")?;
+                use std::os::unix::fs::MetadataExt;
+                if !metadata.is_file()
+                    || metadata.uid() != 0
+                    || metadata.gid() != 0
+                    || metadata.nlink() != 1
+                    || metadata.mode() & 0o7777 != 0o755
+                {
+                    return Err("installed compute admission is incomplete");
+                }
+            }
+            Ok(generation)
         }
         _ => Err("installation policy format is unsupported"),
     }
@@ -512,6 +530,15 @@ fn verify_v2_generation(
         || policy.signer_key_id != new_authority.key_id
     {
         return Err("installation migration transition is invalid");
+    }
+
+    if require_complete_generation {
+        crate::recovery_migration_publisher::verify_active_v2_release_inventory(
+            &state_directory,
+            service_gid,
+            &migration.new_release_identity.release_artifact_sha256,
+            &migration.new_release_identity.version,
+        )?;
     }
 
     let mut current_policy = legacy_policy_view(&policy);

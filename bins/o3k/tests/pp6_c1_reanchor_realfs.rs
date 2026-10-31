@@ -1154,6 +1154,59 @@ fn doctor(fixture: &Path, as_service: bool) -> (String, ExitStatus) {
     (stdout, status)
 }
 
+/// Independently exercises the installed startup and maintenance entry points
+/// against a partially published v2 generation. Each command must fail at the
+/// authenticated installation-selector gate, before it can open canonical
+/// state or advertise readiness. This is process-level evidence: these are
+/// the installed fixture binaries at their supported absolute paths, not a
+/// verifier classifier.
+fn assert_incomplete_v2_consumers_denied(fixture: &Path) {
+    let script = r#"
+set -eu
+deny() {
+    name=$1
+    shift
+    log="/var/lib/a10-consumer-${name}.log"
+    set +e
+    timeout 4 "$@" >"$log" 2>&1
+    code=$?
+    set -e
+    test "$code" -ne 0 || { echo "${name} unexpectedly succeeded" >&2; exit 91; }
+    test "$code" -ne 124 || { echo "${name} stayed alive / advertised readiness" >&2; exit 92; }
+    grep -Eiq 'installation (policy|authority|state)|selector|migration|installed recovery release|installed release .* authority is unavailable|active release checksum inventory|installed compute admission is incomplete' "$log" || {
+        cat "$log" >&2
+        echo "${name} failed for a reason other than selector denial" >&2
+        exit 93
+    }
+}
+deny o3kd setpriv --reuid=900 --regid=900 --clear-groups /usr/local/bin/o3kd --data-dir /var/lib/o3k --listen-addr 127.0.0.1:0
+deny o3k-doctor setpriv --reuid=900 --regid=900 --clear-groups /usr/local/bin/o3k doctor --json
+deny o3k-upgrade /usr/local/bin/o3k upgrade --check --json
+deny o3k-rollback /usr/local/bin/o3k rollback --json
+if test -x /usr/local/bin/o3k-compute; then
+    deny o3k-compute setpriv --reuid=901 --regid=901 --clear-groups /usr/local/bin/o3k-compute
+else
+    set +e
+    /usr/local/bin/o3k-compute >/var/lib/a10-compute-exec-denied.log 2>&1
+    code=$?
+    set -e
+    test "$code" -eq 126 || { echo "non-executable compute returned $code, expected kernel denial 126" >&2; exit 94; }
+    # Exercise compute's own selector gate as well. The canonical installed
+    # inode is deliberately non-executable during migration preparation, so
+    # invoke an identical temporary copy to prove that restoring execute
+    # permission or moving the bytes cannot bypass the fixed release gate.
+    cp /usr/local/bin/o3k-compute /var/lib/a10-compute-probe
+    chmod 0755 /var/lib/a10-compute-probe
+    deny o3k-compute-probe setpriv --reuid=901 --regid=901 --clear-groups /var/lib/a10-compute-probe
+fi
+"#;
+    let (_, stderr, status) = run_in_namespace(fixture, script, &[]);
+    assert!(
+        status.success(),
+        "an installed consumer did not independently deny the incomplete v2 generation: {stderr}"
+    );
+}
+
 struct Installation {
     var: PathBuf,
     state_root: PathBuf,
@@ -1881,6 +1934,39 @@ fn signed_never_recovered_migration_runs_through_real_cli() {
             assert_eq!(
                 manifest_after_crash, v1_manifest,
                 "pre-selector interruption changed the active v1 release manifest at {point}"
+            );
+        } else {
+            // The selector is now v2 authority. Independently run the
+            // installed daemon, operator, upgrade, rollback, and compute
+            // entry points before allowing exact-forward retry. Their
+            // denials must be side-effect free.
+            let state_before_consumers = hash_tree(&installation.state_root);
+            let journal_before_consumers = hash_tree(&installation.journal_dir);
+            let share_before_consumers = hash_tree(&share);
+            let canonical_before_consumers = hash_tree(&var.join("o3k"));
+            assert_incomplete_v2_consumers_denied(&fixture);
+            assert_eq!(
+                hash_tree(&installation.state_root),
+                state_before_consumers,
+                "consumer denial changed authenticated state at {point}"
+            );
+            assert_eq!(
+                hash_tree(&installation.journal_dir),
+                journal_before_consumers,
+                "consumer denial changed the journal at {point}"
+            );
+            assert_eq!(
+                hash_tree(&share),
+                share_before_consumers,
+                "consumer denial changed release authority at {point}"
+            );
+            assert_eq!(
+                hash_tree(&var.join("o3k")),
+                canonical_before_consumers,
+                "consumer denial mutated canonical state at {point}"
+            );
+            eprintln!(
+                "PASS incomplete-generation consumer denial: o3kd, o3k doctor/upgrade/rollback, o3k-compute at {point}"
             );
         }
         let retry = if selector_is_v2 {

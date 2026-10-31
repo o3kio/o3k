@@ -1601,6 +1601,104 @@ fn verify_release_signature(
     }
 }
 
+/// Verifies that the active release checksum inventory and installed dual
+/// verifiers are the exact release assets authenticated by the offline
+/// release signature. Startup uses this after the v2 selector is chosen so
+/// the interval between release-manifest publication and checksum-inventory
+/// publication remains operationally denied.
+pub(crate) fn verify_active_v2_release_inventory(
+    state_directory: &crate::recovery_files::ProtectedDirectory,
+    gid: u32,
+    artifact_digest: &str,
+    release_version: &str,
+) -> Result<(), &'static str> {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::MetadataExt;
+
+    let digests_name = format!("migration-v2-release-digests-{artifact_digest}.txt");
+    let signature_name = format!("migration-v2-release-signature-{artifact_digest}.sig");
+    let digests = state_directory
+        .read_bounded(&digests_name, 0, gid, 0o640, MAX_INPUT as usize)
+        .map_err(|_| "authenticated target release provenance is unavailable")?;
+    let signature = state_directory
+        .read_bounded(&signature_name, 0, gid, 0o640, MAX_INPUT as usize)
+        .map_err(|_| "authenticated target release signature is unavailable")?;
+    verify_release_signature(&digests, &signature, RELEASE_VERIFY_KEY)
+        .map_err(|_| "target release provenance signature is invalid")?;
+
+    let text =
+        std::str::from_utf8(&digests).map_err(|_| "target release provenance is malformed")?;
+    let mut assets = BTreeMap::new();
+    for line in text.lines() {
+        let mut columns = line.split_whitespace();
+        let (Some(digest), Some(path)) = (columns.next(), columns.next()) else {
+            return Err("target release provenance is malformed");
+        };
+        if columns.next().is_some()
+            || digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || assets.insert(path.to_owned(), digest.to_owned()).is_some()
+        {
+            return Err("target release provenance is malformed");
+        }
+    }
+    let version = release_version.strip_prefix('v').unwrap_or(release_version);
+    let bundle = format!("o3k-{version}");
+    let archive = format!("{bundle}-linux-x86_64.tar.gz");
+    let required = [
+        "install.sh".to_owned(),
+        archive.clone(),
+        format!("{archive}.sha256"),
+        format!("{bundle}/manifest.json"),
+        format!("{bundle}/SHA256SUMS"),
+        format!("{bundle}/sbom.spdx.json"),
+    ];
+    if assets.len() != required.len() || required.iter().any(|name| !assets.contains_key(name)) {
+        return Err("target release provenance asset set is invalid");
+    }
+    if assets.get(&archive).map(String::as_str) != Some(artifact_digest) {
+        return Err("target release provenance names a different artifact");
+    }
+    let expected_sums = assets
+        .get(&format!("{bundle}/SHA256SUMS"))
+        .ok_or("target release provenance omits executable inventory")?;
+    let active_sums = read_root_file(Path::new("/usr/local/share/o3k/SHA256SUMS"), MAX_INPUT)
+        .map_err(|_| "active release checksum inventory is unavailable")?;
+    if hex::encode(Sha256::digest(&active_sums)) != *expected_sums {
+        return Err("active release checksum inventory is not the signed target inventory");
+    }
+    let hashes = parse_release_sums(&active_sums)
+        .map_err(|_| "active release checksum inventory is malformed")?;
+    for name in ["o3kd", "o3k", "o3k-compute", "o3k-network"] {
+        let relative = format!("./bin/{name}");
+        let expected = hashes
+            .get(&relative)
+            .ok_or("active release inventory omits a dual verifier")?;
+        let path = Path::new("/usr/local/bin").join(name);
+        crate::recovery_files::check_ancestors(&path)
+            .map_err(|_| "installed dual-verifier path is unsafe")?;
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| "installed dual verifier is unavailable")?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.gid() != 0
+            || metadata.nlink() != 1
+            || (name != "o3k-compute" && metadata.mode() & 0o7777 != 0o755)
+            || (name == "o3k-compute" && !matches!(metadata.mode() & 0o7777, 0o644 | 0o755))
+        {
+            return Err("installed dual-verifier posture is invalid");
+        }
+        let actual = digest_root_artifact(&path)
+            .map_err(|_| "installed dual verifier cannot be authenticated")?;
+        if actual != *expected {
+            return Err("installed dual verifier differs from signed target inventory");
+        }
+    }
+    Ok(())
+}
+
 /// Authenticates a candidate migration entirely before mutation. `load`
 /// authenticates the full installed v1 state chain, trust/high-water, release,
 /// and C1.1 checkpoint where required. A v2 journal cannot be admitted by the
