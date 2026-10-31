@@ -1207,19 +1207,37 @@ fn verify_target_release_provenance(
     installed_manifest: &[u8],
     artifact_digest: &str,
 ) -> Result<Vec<u8>, MigrationError> {
+    let digests = read_root_input(inputs.release_digests)?;
+    let signature = read_root_input(inputs.release_signature)?;
+    verify_target_release_provenance_bytes(
+        inputs.candidate_artifact,
+        &digests,
+        &signature,
+        release,
+        installed_manifest,
+        artifact_digest,
+    )
+}
+
+fn verify_target_release_provenance_bytes(
+    candidate_artifact: &Path,
+    digests: &[u8],
+    signature: &[u8],
+    release: &BackupReleaseIdentity,
+    installed_manifest: &[u8],
+    artifact_digest: &str,
+) -> Result<Vec<u8>, MigrationError> {
     use flate2::read::GzDecoder;
     use std::collections::BTreeMap;
 
-    let digests = read_root_input(inputs.release_digests)?;
-    let signature = read_root_input(inputs.release_signature)?;
     verify_release_signature(
-        &digests,
-        &signature,
+        digests,
+        signature,
         include_bytes!("../../../packaging/release-verify.pub"),
     )?;
 
     let mut signed_assets = BTreeMap::new();
-    for line in std::str::from_utf8(&digests)
+    for line in std::str::from_utf8(digests)
         .map_err(|_| reject("release digest statement is not UTF-8"))?
         .lines()
     {
@@ -1272,7 +1290,7 @@ fn verify_target_release_provenance(
     }
 
     let mut archive = tar::Archive::new(GzDecoder::new(
-        fs::File::open(inputs.candidate_artifact)
+        fs::File::open(candidate_artifact)
             .map_err(|_| MigrationError::Input("candidate artifact cannot be reopened"))?,
     ));
     let mut raw_manifest = None;
@@ -1343,11 +1361,29 @@ fn verify_source_release_provenance(
     installed_manifest: &[u8],
     installed_sums: &[u8],
 ) -> Result<SourceReleaseProvenance, MigrationError> {
-    use std::collections::BTreeMap;
-
     let raw_manifest = read_root_input(inputs.source_manifest)?;
     let digests = read_root_input(inputs.source_release_digests)?;
     let signature = read_root_input(inputs.source_release_signature)?;
+    verify_source_release_provenance_bytes(
+        raw_manifest,
+        digests,
+        signature,
+        release,
+        installed_manifest,
+        installed_sums,
+    )
+}
+
+fn verify_source_release_provenance_bytes(
+    raw_manifest: Vec<u8>,
+    digests: Vec<u8>,
+    signature: Vec<u8>,
+    release: &BackupReleaseIdentity,
+    installed_manifest: &[u8],
+    installed_sums: &[u8],
+) -> Result<SourceReleaseProvenance, MigrationError> {
+    use std::collections::BTreeMap;
+
     verify_release_signature(
         &digests,
         &signature,
@@ -1650,7 +1686,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
         return Err(MigrationError::RootRequired);
     }
     let data_dir = Path::new("/var/lib/o3k");
-    if let Some(position) = resume_selected_v2(inputs)? {
+    if let Some(position) = resume_selected_v2()? {
         return Ok(position);
     }
     let installed = match InstalledRecovery::load(data_dir) {
@@ -1769,9 +1805,7 @@ pub fn publish_v2(inputs: &MigrationInputs<'_>) -> Result<PublicationPosition, M
 /// Resume only from the exact event and target bytes durably staged before the
 /// selector rename. Caller-supplied retry paths are deliberately ignored once
 /// the v2 selector is active.
-fn resume_selected_v2(
-    inputs: &MigrationInputs<'_>,
-) -> Result<Option<PublicationPosition>, MigrationError> {
+fn resume_selected_v2() -> Result<Option<PublicationPosition>, MigrationError> {
     use crate::recovery_files::ProtectedDirectory;
 
     let data_dir = Path::new("/var/lib/o3k");
@@ -1816,9 +1850,6 @@ fn resume_selected_v2(
     {
         return Ok(None);
     }
-    if read_root_input(inputs.migration_event)? != selector_bytes {
-        return Err(reject("retry migration event differs from active selector"));
-    }
     let migration: identity::Signed<selector::InstallationPolicyMigrationV1> =
         identity::decode_canonical(&selector_bytes)
             .map_err(|_| reject("active migration selector is malformed"))?;
@@ -1861,14 +1892,6 @@ fn resume_selected_v2(
     if hex::encode(Sha256::digest(&target_policy)) != migration.new_policy_digest {
         return Err(reject("staged target policy digest changed"));
     }
-    if read_root_input(inputs.policy_v2)? != target_policy {
-        return Err(reject("retry v2 policy differs from staged signed bytes"));
-    }
-    if read_root_input(inputs.release_manifest_v2)? != target_manifest {
-        return Err(reject(
-            "retry release manifest differs from staged signed bytes",
-        ));
-    }
     let policy = selector::verify_v2_policy(
         &target_policy,
         &target_authority.key_id,
@@ -1896,11 +1919,6 @@ fn resume_selected_v2(
     let artifact_digest = digest_root_artifact(&artifact)?;
     if artifact_digest != migration.new_release_identity.release_artifact_sha256 {
         return Err(reject("staged candidate artifact digest changed"));
-    }
-    if digest_root_artifact(inputs.candidate_artifact)? != artifact_digest {
-        return Err(reject(
-            "retry candidate differs from staged authenticated artifact",
-        ));
     }
     crate::recovery_installation::verify_v2_migration_predecessor(
         data_dir,
@@ -1964,7 +1982,6 @@ fn resume_selected_v2(
     let old_sums = state_directory
         .read_bounded(&old_sums_name, 0, gid, 0o640, MAX_INPUT as usize)
         .map_err(|_| reject("authenticated predecessor checksum inventory is unavailable"))?;
-    verify_source_release_provenance(inputs, &old_release_identity, &old_release, &old_sums)?;
     let old_high_water_name = format!("policy-high-water-{}.json", migration.prior_policy_digest);
     let old_high_water = state_directory
         .read_bounded(&old_high_water_name, 0, gid, 0o640, MAX_INPUT as usize)
@@ -2030,11 +2047,6 @@ fn resume_selected_v2(
             MAX_INPUT as usize,
         )
         .map_err(|_| reject("exact release signature is not staged"))?;
-    if read_root_input(inputs.release_digests)? != release_digests
-        || read_root_input(inputs.release_signature)? != release_signature
-    {
-        return Err(reject("retry release provenance differs from staged bytes"));
-    }
     let source_manifest = state_directory
         .read_bounded(
             &format!(
@@ -2065,21 +2077,23 @@ fn resume_selected_v2(
             MAX_INPUT as usize,
         )
         .map_err(|_| reject("exact source release signature is not staged"))?;
-    if read_root_input(inputs.source_manifest)? != source_manifest
-        || read_root_input(inputs.source_release_digests)? != source_release_digests
-        || read_root_input(inputs.source_release_signature)? != source_release_signature
-    {
-        return Err(reject(
-            "retry source release provenance differs from staged bytes",
-        ));
-    }
     let release_identity = BackupReleaseIdentity::from_manifest_bytes(&target_manifest)
         .map_err(|_| reject("staged target release identity is invalid"))?;
-    let candidate_sums = verify_target_release_provenance(
-        inputs,
+    let candidate_sums = verify_target_release_provenance_bytes(
+        &artifact,
+        &release_digests,
+        &release_signature,
         &release_identity,
         &target_manifest,
         &artifact_digest,
+    )?;
+    verify_source_release_provenance_bytes(
+        source_manifest.clone(),
+        source_release_digests.clone(),
+        source_release_signature.clone(),
+        &old_release_identity,
+        &old_release,
+        &old_sums,
     )?;
     let authenticated = AuthenticatedMigration {
         policy_bytes: target_policy.clone(),
