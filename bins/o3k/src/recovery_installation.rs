@@ -255,10 +255,32 @@ fn verify_startup_policy_selector(data_dir: &Path) -> Result<(String, RecoverySt
     }
 }
 
-fn verify_v2_selected_generation(
+pub(crate) fn verify_v2_selected_generation(
     data_dir: &Path,
     manifest_bytes: &[u8],
     policy_bytes: &[u8],
+) -> Result<(String, RecoveryState)> {
+    verify_v2_generation(data_dir, manifest_bytes, policy_bytes, true)
+}
+
+/// Authenticates the signed migration selector and its complete v1/C1.1
+/// predecessor chain during exact-forward recovery. Active v2 policy,
+/// high-water, and release-manifest files may still be byte-exact v1 values;
+/// this function deliberately does not open the canonical store or grant
+/// operational admission.
+pub(crate) fn verify_v2_migration_predecessor(
+    data_dir: &Path,
+    target_manifest_bytes: &[u8],
+    target_policy_bytes: &[u8],
+) -> Result<(String, RecoveryState)> {
+    verify_v2_generation(data_dir, target_manifest_bytes, target_policy_bytes, false)
+}
+
+fn verify_v2_generation(
+    data_dir: &Path,
+    manifest_bytes: &[u8],
+    policy_bytes: &[u8],
+    require_complete_generation: bool,
 ) -> Result<(String, RecoveryState)> {
     use crate::recovery_migration_selector as selector;
 
@@ -317,11 +339,13 @@ fn verify_v2_selected_generation(
     )
     .map_err(|_| "recovery journal identity or protection changed")?;
     let policy_digest = hex::encode(Sha256::digest(policy_bytes));
-    let high_water = state_directory
-        .read_bounded("policy.json", 0, service_gid, 0o640, MAX_DOCUMENT)
-        .map_err(|_| "installation policy high-water state is unavailable")?;
-    selector::verify_v2_high_water(&high_water, &policy_digest, policy.policy_revision)
-        .map_err(|_| "installation policy format high-water is stale or invalid")?;
+    if require_complete_generation {
+        let high_water = state_directory
+            .read_bounded("policy.json", 0, service_gid, 0o640, MAX_DOCUMENT)
+            .map_err(|_| "installation policy high-water state is unavailable")?;
+        selector::verify_v2_high_water(&high_water, &policy_digest, policy.policy_revision)
+            .map_err(|_| "installation policy format high-water is stale or invalid")?;
+    }
 
     // The migration event is the only v2 selector. Missing or different tip
     // formats fail closed; v2 is never inferred from the v2 policy file.
@@ -499,10 +523,14 @@ fn verify_v2_selected_generation(
 
     // Open the canonical store only after the authenticated migration event,
     // policy/high-water, prior generation and trust bindings have all passed.
-    let (installation, site) = o3k_store::identity_tokens(data_dir)
-        .map_err(|_| "installation identity cannot be resolved")?;
-    if policy.installation_id != hex::encode(installation) || policy.site_id != hex::encode(site) {
-        return Err("installation v2 policy does not match canonical identity");
+    if require_complete_generation {
+        let (installation, site) = o3k_store::identity_tokens(data_dir)
+            .map_err(|_| "installation identity cannot be resolved")?;
+        if policy.installation_id != hex::encode(installation)
+            || policy.site_id != hex::encode(site)
+        {
+            return Err("installation v2 policy does not match canonical identity");
+        }
     }
     let _data_directory = open_data_root(data_dir, uid, service_gid, &current_policy)
         .map_err(|_| "recovery target identity or protection changed")?;
@@ -1546,6 +1574,52 @@ impl InstalledRecovery {
     /// Whether the state-chain tip is a C1.1 re-anchor record.
     pub fn tip_is_reanchor(&self) -> bool {
         self.tip_is_reanchor
+    }
+
+    /// Values needed by the A10.1 publisher after `load` has authenticated
+    /// the complete v1 installation. These are observations only; callers
+    /// must still hold the D8 store-access guard before publishing anything.
+    pub(crate) fn migration_predecessor(&self) -> (u64, &str, &[u8], &[u8], &[u8]) {
+        (
+            self.tip_sequence,
+            &self.state_digest,
+            &self.state_tip_bytes,
+            &self.policy_bytes,
+            &self.manifest_bytes,
+        )
+    }
+
+    /// The authenticated C1.1 checkpoint's exact digest, if this source
+    /// generation has a checkpoint. `load` has already verified its chain
+    /// and disposition bindings before exposing the bytes here.
+    pub(crate) fn migration_checkpoint_digest(&self) -> Option<String> {
+        self.checkpoint_bytes
+            .as_deref()
+            .map(|bytes| hex::encode(Sha256::digest(bytes)))
+    }
+
+    pub(crate) fn migration_trust_bundle_bytes(&self) -> &[u8] {
+        &self.fixed_bundle_bytes
+    }
+
+    pub(crate) fn migration_policy_high_water_bytes(&self) -> &[u8] {
+        self.policy_high_water_bytes
+            .as_deref()
+            .unwrap_or(&self.policy_bytes)
+    }
+
+    pub(crate) fn migration_state_directory(&self) -> &ProtectedDirectory {
+        &self.state_directory
+    }
+
+    pub(crate) fn migration_lock_journal_directory(&self) -> Result<()> {
+        let journal = self
+            .journal_directory
+            .as_ref()
+            .ok_or("authenticated recovery journal directory is unavailable")?;
+        journal
+            .lock()
+            .map_err(|_| "recovery journal exclusion is unavailable")
     }
 
     fn state_tip_view(&self) -> identity::StateTipView<'_> {

@@ -31,6 +31,8 @@ rustix = { workspace = true, features = ["fs", "process"] }
 uuid.workspace = true
 sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 tokio = { workspace = true, features = ["time"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [features]
 # Crash-injection hooks for the PP.6 backup-handoff and artifact campaigns. Off
