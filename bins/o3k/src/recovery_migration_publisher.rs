@@ -2315,11 +2315,7 @@ fn process_uses_inode(device: u64, inode: u64) -> Result<bool, MigrationError> {
 }
 
 fn run_systemctl(args: &[&str]) -> Result<String, MigrationError> {
-    use std::{process::Command, time::Duration};
-
-    let mut command = Command::new("systemctl");
-    command.args(args);
-    let outcome = crate::sys::run_bounded_with_timeout(&mut command, Duration::from_secs(120))
+    let outcome = crate::sys::run_systemctl_with_timeout(args, std::time::Duration::from_secs(120))
         .map_err(|_| reject("systemctl could not be started"))?;
     if !outcome.completed || !outcome.output.status.success() {
         return Err(MigrationError::Persistence("systemd operation failed"));
