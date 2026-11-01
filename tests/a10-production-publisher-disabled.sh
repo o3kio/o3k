@@ -9,16 +9,20 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release -p o3k --bin o3k
 RELEASE_BIN="$ROOT_DIR/target/release/o3k"
 bash "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$RELEASE_BIN"
 
-if cargo check --manifest-path "$ROOT_DIR/Cargo.toml" --release -p o3k \
-  --features a10-process-test-hooks >"$WORK_DIR/feature-build.log" 2>&1; then
-  echo "optimized o3k unexpectedly accepted a10-process-test-hooks" >&2
-  exit 1
-fi
-if ! grep -Fq 'a10-process-test-hooks is a debug-only qualification feature' "$WORK_DIR/feature-build.log"; then
-  echo "optimized feature rejection did not come from the compile-time guard" >&2
-  tail -80 "$WORK_DIR/feature-build.log" >&2
-  exit 1
-fi
+for debug_assertions in false true; do
+  if CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS="$debug_assertions" \
+    cargo check --manifest-path "$ROOT_DIR/Cargo.toml" --release -p o3k \
+      --features a10-process-test-hooks >"$WORK_DIR/feature-build-$debug_assertions.log" 2>&1; then
+    echo "optimized o3k unexpectedly accepted a10-process-test-hooks (debug assertions=$debug_assertions)" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'a10-process-test-hooks is a debug-only qualification feature' \
+    "$WORK_DIR/feature-build-$debug_assertions.log"; then
+    echo "optimized feature rejection did not come from the build-time guard (debug assertions=$debug_assertions)" >&2
+    tail -80 "$WORK_DIR/feature-build-$debug_assertions.log" >&2
+    exit 1
+  fi
+done
 
 PACKAGE="$WORK_DIR/package"
 mkdir -p "$PACKAGE/bin"
