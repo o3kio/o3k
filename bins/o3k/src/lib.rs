@@ -16,6 +16,8 @@
 // hard process exits from production code paths.
 #[cfg(all(feature = "backup-test-hooks", not(debug_assertions)))]
 compile_error!("backup-test-hooks is a debug-only test feature");
+#[cfg(all(feature = "a10-process-test-hooks", not(debug_assertions)))]
+compile_error!("a10-process-test-hooks is a debug-only qualification feature");
 
 // Artifact format primitives (manifest contract, member encryption, streaming
 // verify, offline signing input). Kept crate-private: the operator journey goes
@@ -72,6 +74,11 @@ pub mod recovery_files;
 pub mod recovery_identity;
 #[cfg(target_os = "linux")]
 pub mod recovery_installation;
+// The signed migration publisher is retained only for debug qualification.
+// Optimized builds cannot enable its feature (see the compile_error above),
+// and ordinary builds do not compile or link its mutating APIs at all.
+#[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
+pub mod recovery_migration_publisher;
 #[cfg(target_os = "linux")]
 pub mod recovery_migration_selector;
 #[cfg(target_os = "linux")]
@@ -80,6 +87,8 @@ pub mod recovery_prepare;
 pub mod recovery_provision;
 #[cfg(target_os = "linux")]
 pub mod recovery_reanchor;
+#[cfg(target_os = "linux")]
+pub(crate) mod recovery_release_inventory;
 #[cfg(target_os = "linux")]
 pub mod recovery_trust;
 #[cfg(target_os = "linux")]

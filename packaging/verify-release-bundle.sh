@@ -67,6 +67,13 @@ PY
 # check skips non-ELF files, so scripts and documentation in the bundle are
 # unaffected.
 if [[ -d "$BUNDLE_DIR/bin" ]]; then
+  if [[ -f "$BUNDLE_DIR/bin/o3k" ]]; then
+    release_binaries=()
+    while IFS= read -r -d '' binary; do
+      release_binaries+=("$binary")
+    done < <(find "$BUNDLE_DIR/bin" -maxdepth 1 -type f -perm /111 -print0 | sort -z)
+    bash "$SCRIPT_DIR/check-a10-publisher-disabled.sh" "$BUNDLE_DIR/bin/o3k" "${release_binaries[@]}"
+  fi
   BINARIES=()
   while IFS= read -r -d '' binary; do
     BINARIES+=("$binary")

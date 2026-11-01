@@ -70,7 +70,7 @@ chroot "$ROOTFS" /bin/bash -c '
   set -Eeuo pipefail
   export DEBIAN_FRONTEND=noninteractive LC_ALL=C
   apt-get update -qq
-  apt-get install -y -qq build-essential cmake pkg-config libvirt-dev \
+  apt-get install -y -qq build-essential cmake pkg-config libssl-dev libvirt-dev \
     libsqlite3-dev protobuf-compiler curl ca-certificates perl
 '
 
@@ -90,7 +90,7 @@ chroot "$ROOTFS" /bin/bash -c '
 
 echo "==> copying the workspace sources into the rootfs"
 mkdir -p "$ROOTFS/build"
-(cd "$ROOT_DIR" && tar -cf - Cargo.toml Cargo.lock rust-toolchain.toml bins crates proto) \
+(cd "$ROOT_DIR" && tar -cf - Cargo.toml Cargo.lock rust-toolchain.toml bins crates proto contracts packaging) \
   | tar -xf - -C "$ROOTFS/build"
 
 echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt, o3k-network)"

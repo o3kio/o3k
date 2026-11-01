@@ -106,7 +106,7 @@ impl StoreAccessLock {
             // would otherwise leave it group-writable.
             fchmod(&dir_fd, Mode::from_raw_mode(0o700))?;
         }
-        Self::lock_open_directory(parent_fd, dir_fd, false)
+        Self::lock_open_directory(parent_fd, dir_fd, false, geteuid().as_raw())
     }
 
     /// Acquires the same exclusive lifetime guard without creating directories
@@ -129,16 +129,52 @@ impl StoreAccessLock {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
         )?;
-        Self::lock_open_directory(parent_fd, dir_fd, true)
+        Self::lock_open_directory(parent_fd, dir_fd, true, geteuid().as_raw())
+    }
+
+    /// Acquires the installed daemon's existing data lock from a privileged
+    /// maintenance process after authenticating the data-directory owner.
+    /// This is intentionally root-only: ordinary readers continue to require
+    /// their own process UID, while the maintenance caller supplies the exact
+    /// service UID bound by the installed policy.
+    pub fn acquire_read_only_for_owner(
+        data_dir: impl AsRef<Path>,
+        expected_owner_uid: u32,
+    ) -> io::Result<Self> {
+        let data_dir = data_dir.as_ref();
+        if geteuid().as_raw() != 0 || expected_owner_uid == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-bound store lock acquisition requires root and a non-root owner",
+            ));
+        }
+        let parent_path = data_dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_fd = open(
+            parent_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        validate_parent_directory(&fstat(&parent_fd)?)?;
+        acquire_parent_setup_lock(&parent_fd)?;
+        let dir_fd = open(
+            data_dir,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        Self::lock_open_directory(parent_fd, dir_fd, true, expected_owner_uid)
     }
 
     fn lock_open_directory(
         parent_fd: OwnedFd,
         dir_fd: OwnedFd,
         read_only: bool,
+        expected_owner_uid: u32,
     ) -> io::Result<Self> {
         let dir_stat = fstat(&dir_fd)?;
-        validate_directory(&dir_stat)?;
+        validate_directory(&dir_stat, expected_owner_uid)?;
 
         // Lock the opened directory inode before touching the lock-file name.
         // The lock-file remains the shared, visible lock authority, while this
@@ -165,7 +201,7 @@ impl StoreAccessLock {
             Mode::from_raw_mode(0o600),
         )?;
         let lock_stat = fstat(&lock_fd)?;
-        validate_lock_file(&dir_stat, &lock_stat)?;
+        validate_lock_file(&dir_stat, &lock_stat, expected_owner_uid)?;
         validate_directory_entry(&dir_fd, &lock_stat)?;
 
         // Nonblocking acquisition avoids allowing a second daemon to open
@@ -178,7 +214,7 @@ impl StoreAccessLock {
         })?;
         // Recheck after acquisition so a replacement race fails closed.
         let locked_stat = fstat(&lock_fd)?;
-        validate_lock_file(&dir_stat, &locked_stat)?;
+        validate_lock_file(&dir_stat, &locked_stat, expected_owner_uid)?;
         validate_directory_entry(&dir_fd, &locked_stat)?;
 
         Ok(Self {
@@ -366,9 +402,10 @@ impl StoreAccessLock {
             let lock_file = descriptors.remove(0);
             let data_dir = descriptors.remove(0);
             let directory_stat = fstat(&data_dir)?;
-            validate_directory(&directory_stat)?;
+            let owner_uid = geteuid().as_raw();
+            validate_directory(&directory_stat, owner_uid)?;
             let lock_stat = fstat(&lock_file)?;
-            validate_lock_file(&directory_stat, &lock_stat)?;
+            validate_lock_file(&directory_stat, &lock_stat, owner_uid)?;
             validate_directory_entry(&data_dir, &lock_stat)?;
             // Re-locking the same open-file description is idempotent. If the
             // sender passed a separately opened descriptor, this fails while
@@ -405,8 +442,9 @@ impl StoreAccessLock {
     fn validate_current_entries(&self) -> io::Result<()> {
         let directory_stat = fstat(&self._data_dir)?;
         let lock_stat = fstat(&self._lock_file)?;
-        validate_directory(&directory_stat)?;
-        validate_lock_file(&directory_stat, &lock_stat)?;
+        let owner_uid = geteuid().as_raw();
+        validate_directory(&directory_stat, owner_uid)?;
+        validate_lock_file(&directory_stat, &lock_stat, owner_uid)?;
         validate_directory_entry(&self._data_dir, &lock_stat)
     }
 }
@@ -556,13 +594,13 @@ fn validate_parent_directory(stat: &rustix::fs::Stat) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_directory(stat: &rustix::fs::Stat) -> io::Result<()> {
+fn validate_directory(stat: &rustix::fs::Stat, expected_owner_uid: u32) -> io::Result<()> {
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
         return Err(invalid_data("O3K data path is not a directory"));
     }
-    if stat.st_uid != geteuid().as_raw() {
+    if stat.st_uid != expected_owner_uid {
         return Err(invalid_data(
-            "O3K data directory is not owned by the effective uid",
+            "O3K data directory is not owned by the expected process uid",
         ));
     }
     if stat.st_mode & DATA_DIR_MODE != 0 {
@@ -577,15 +615,19 @@ fn validate_directory(stat: &rustix::fs::Stat) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_lock_file(dir: &rustix::fs::Stat, lock: &rustix::fs::Stat) -> io::Result<()> {
+fn validate_lock_file(
+    dir: &rustix::fs::Stat,
+    lock: &rustix::fs::Stat,
+    expected_owner_uid: u32,
+) -> io::Result<()> {
     if FileType::from_raw_mode(lock.st_mode) != FileType::RegularFile
-        || lock.st_uid != geteuid().as_raw()
+        || lock.st_uid != expected_owner_uid
         || lock.st_dev != dir.st_dev
         || lock.st_nlink != 1
         || lock.st_mode & LOCK_FILE_MODE != 0o600
     {
         return Err(invalid_data(
-            "O3K store lock must be a process-owned, mode-0600 regular file on the data-directory device",
+            "O3K store lock must be an expected-owner, mode-0600 regular file on the data-directory device",
         ));
     }
     Ok(())
@@ -1169,6 +1211,32 @@ mod tests {
         assert!(!missing.exists());
         assert!(StoreAccessLock::acquire_read_only(&root.0).is_err());
         assert!(!root.0.join(LOCK_FILE).exists());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires root to create a service-owned installation lock fixture"]
+    fn root_owner_bound_read_only_guard_locks_service_owned_state() -> io::Result<()> {
+        if rustix::process::geteuid().as_raw() != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "root-only owner-bound lock test was not run as root",
+            ));
+        }
+        let root = TestDir::new()?;
+        const SERVICE_UID: u32 = 65_534;
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700))?;
+        std::os::unix::fs::chown(&root.0, Some(SERVICE_UID), Some(SERVICE_UID))?;
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o711))?;
+        let lock_path = root.0.join(LOCK_FILE);
+        fs::write(&lock_path, b"")?;
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))?;
+        std::os::unix::fs::chown(&lock_path, Some(SERVICE_UID), Some(SERVICE_UID))?;
+
+        let owner_guard = StoreAccessLock::acquire_read_only_for_owner(&root.0, SERVICE_UID)?;
+        assert!(StoreAccessLock::acquire_read_only_for_owner(&root.0, SERVICE_UID).is_err());
+        drop(owner_guard);
+        StoreAccessLock::acquire_read_only_for_owner(&root.0, SERVICE_UID)?;
         Ok(())
     }
 

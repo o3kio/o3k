@@ -120,6 +120,8 @@ jobs:
           for file in packaging/*.sh tests/*.sh scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
           bash tests/ci-apt-provision.sh
           python3 -m compileall -q scripts
+      - name: Verify A10.1 publisher is absent from production artifacts
+        run: bash tests/a10-production-publisher-disabled.sh
       - name: Validate PP.5 evidence validator fail-closed guards
         # Tests the validator's own correctness (mutation/negative coverage)
         # against locally-generated fixtures. It needs no real PP.5 campaign

@@ -19,7 +19,14 @@ cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passw
 
 printf '#!/usr/bin/env bash\nprintf bundled-o3kd\n' >"$BUNDLE_DIR/bin/o3kd"
 chmod 0755 "$BUNDLE_DIR/bin/o3kd"
-printf '#!/usr/bin/env bash\nprintf bundled-o3k\n' >"$BUNDLE_DIR/bin/o3k"
+cat >"$BUNDLE_DIR/bin/o3k" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1-}" == "recovery-migrate-v2" ]]; then
+  printf "error: unrecognized subcommand 'recovery-migrate-v2'\n" >&2
+  exit 2
+fi
+printf bundled-o3k
+EOF
 chmod 0755 "$BUNDLE_DIR/bin/o3k"
 printf '#!/usr/bin/env bash\nprintf bundled-o3k-compute\n' >"$BUNDLE_DIR/bin/o3k-compute"
 chmod 0755 "$BUNDLE_DIR/bin/o3k-compute"
