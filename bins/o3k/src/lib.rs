@@ -97,6 +97,7 @@ pub mod recovery_trust_update;
 pub mod restore_fence;
 #[cfg(target_os = "linux")]
 pub mod restore_journal;
+pub mod restore_journal_v2;
 #[cfg(target_os = "linux")]
 pub mod restore_preflight;
 pub mod sys;

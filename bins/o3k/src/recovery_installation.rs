@@ -251,6 +251,7 @@ fn verify_startup_policy_selector(data_dir: &Path) -> Result<(String, RecoverySt
         crate::recovery_migration_selector::V2_FORMAT => {
             let generation =
                 verify_v2_selected_generation(data_dir, &manifest_bytes, &policy_bytes)?;
+            verify_selected_v2_journal_startup(data_dir)?;
             if generation.1 == RecoveryState::NeverRecovered {
                 let compute = Path::new("/usr/local/bin/o3k-compute");
                 crate::recovery_files::check_ancestors(compute)
@@ -271,6 +272,101 @@ fn verify_startup_policy_selector(data_dir: &Path) -> Result<(String, RecoverySt
         }
         _ => Err("installation policy format is unsupported"),
     }
+}
+
+/// Reject operational startup whenever a journal-v2 publication exists. The
+/// journal is authenticated against the same complete selected v2 generation
+/// and current C1 trust/revocation state used by A10.1. A missing file is the
+/// only state that leaves ordinary startup eligible.
+fn verify_selected_v2_journal_startup(data_dir: &Path) -> Result<()> {
+    let context = selected_v2_journal_context(data_dir)?;
+    let policy = &context.policy;
+    let (uid, gid) = service_identity()?;
+    let directory = ProtectedDirectory::open(
+        Path::new(&policy.journal_directory),
+        uid,
+        gid,
+        0o700,
+        policy.journal_device,
+        policy.journal_inode,
+    )
+    .map_err(|_| "recovery journal identity or protection changed")?;
+    let journal_path = Path::new(&policy.journal_directory).join("restore-journal-v2.json");
+    match fs::symlink_metadata(&journal_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("recovery journal state is unavailable"),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err("recovery journal path is unsafe"),
+        Ok(_) => {
+            let bytes = directory
+                .read_bounded(
+                    "restore-journal-v2.json",
+                    uid,
+                    gid,
+                    0o600,
+                    crate::restore_journal_v2::MAX_JOURNAL_BYTES,
+                )
+                .map_err(|_| "recovery journal is unsafe or unavailable")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "system clock is invalid")?
+                .as_secs() as i64;
+            crate::restore_journal_v2::authenticate_selected_chain(&bytes, &context, now).map_err(
+                |_| "authenticated inactive recovery journal denies operational startup",
+            )?;
+            Err("authenticated inactive recovery journal denies operational startup")
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn selected_v2_journal_context(
+    data_dir: &Path,
+) -> Result<crate::restore_journal_v2::SelectedV2JournalContext> {
+    use crate::recovery_migration_selector as selector;
+
+    let manifest_bytes = release_identity::read_fixed_installed_release_manifest()
+        .map_err(|_| "installed recovery release is unsafe or unavailable")?;
+    let old_authority = BackupReleaseIdentity::c1_authority_from_manifest(&manifest_bytes)
+        .map_err(|_| "installed release v1 policy authority is unavailable")?;
+    let authority = BackupReleaseIdentity::c1_v2_authority_from_manifest(&manifest_bytes)
+        .map_err(|_| "installed release v2 policy authority is unavailable")?;
+    let policy_bytes =
+        read_protected_config(Path::new(&old_authority.policy_path), service_identity()?.1)?;
+    verify_v2_selected_generation(data_dir, &manifest_bytes, &policy_bytes)?;
+    let release = BackupReleaseIdentity::from_manifest_bytes(&manifest_bytes)
+        .map_err(|_| "installed release identity is incomplete")?;
+    let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
+    let policy_key = key(&authority.ed25519_public_key)?;
+    let policy = selector::verify_v2_policy(
+        &policy_bytes,
+        &authority.key_id,
+        &policy_key,
+        &manifest_digest,
+        &release.release_artifact_sha256,
+        &release.o3k_version,
+        &release.source_sha,
+    )
+    .map_err(|_| "installation v2 policy binding is invalid")?;
+    let (_, service_gid) = service_identity()?;
+    let state_directory = ProtectedDirectory::open(
+        Path::new(&policy.recovery_state_root),
+        0,
+        service_gid,
+        0o750,
+        policy.recovery_state_device,
+        policy.recovery_state_inode,
+    )
+    .map_err(|_| "protected recovery state directory is unsafe")?;
+    let mut legacy_policy = legacy_policy_view(&policy);
+    legacy_policy.format = "o3k-installation-policy-v1".to_owned();
+    let trust = load_trust(&legacy_policy, &state_directory, service_gid)?;
+    Ok(
+        crate::restore_journal_v2::SelectedV2JournalContext::from_verified_generation(
+            policy,
+            hex::encode(Sha256::digest(&policy_bytes)),
+            trust,
+        ),
+    )
 }
 
 pub(crate) fn verify_v2_selected_generation(
