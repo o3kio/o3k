@@ -106,23 +106,20 @@ jobs:
           cat > release-notes.md <<EOF
           ## O3K $tag
 
-          PP.4 Core candidate. Not production-ready and not PP.7 certified.
+          PP.6 Stage 1 qualification candidate. Not production-ready and not
+          PP.6-certified. No PP.7 or Araf certification is claimed.
 
-          This candidate includes the accumulated PP.4 corrections since the
-          previous failed candidates, including:
+          This candidate carries the PP.6 recovery-source milestones merged
+          since rc.24 (#1198-#1202). Its explicit limits:
 
-          - canonical native compute-create replay convergence;
-          - bounded Keystone Horizon login/bootstrap compatibility;
-          - authorization-filtered project visibility required by the pinned
-            Horizon witness;
-          - bounded Nova/Neutron collection marker/limit pagination required by
-            the PP.4 witness;
-          - server-owned network dependency cleanup across the native and
-            OpenStack lifecycle, including terminal create-failure
-            compensation, so both interfaces converge on identical durable
-            state;
-          - previously accepted native networking, keypair/config-drive and
-            release-trust repairs.
+          - the A10 migration publisher is disabled in production binaries and
+            is not a working installed migration path;
+          - signed journal-v2 Phase B is an authenticated consumer only; it is
+            not an operational restore capability;
+          - PostgreSQL restore-target mutation and controller activation are
+            not authorized;
+          - installed-release qualification and independent security
+            acceptance remain outstanding.
 
           This does not claim full OpenStack or Horizon parity.
 
