@@ -80,8 +80,27 @@ fn crash_boundaries_preserve_only_old_or_new_bytes() {
     let dir = fixture.open();
     fs::write(fixture.0.join("state"), b"old").unwrap();
     fs::set_permissions(fixture.0.join("state"), fs::Permissions::from_mode(0o640)).unwrap();
-    assert_eq!(child_crash("before-file-fsync", &fixture.0), Some(86));
-    assert_eq!(dir.read_bounded("state", 0, 0, 0o640, 32).unwrap(), b"old");
+    for (point, durable_bytes) in [
+        ("before-file-fsync", b"old".as_slice()),
+        ("after-file-fsync", b"old".as_slice()),
+        ("after-rename", b"new".as_slice()),
+        ("after-directory-fsync", b"new".as_slice()),
+    ] {
+        if dir
+            .read_bounded("state", 0, 0, 0o640, 32)
+            .is_ok_and(|bytes| bytes != b"old")
+        {
+            fs::write(fixture.0.join("state"), b"old").unwrap();
+            fs::set_permissions(fixture.0.join("state"), fs::Permissions::from_mode(0o640))
+                .unwrap();
+        }
+        assert_eq!(child_crash(point, &fixture.0), Some(86), "{point}");
+        assert_eq!(
+            dir.read_bounded("state", 0, 0, 0o640, 32).unwrap(),
+            durable_bytes,
+            "{point}"
+        );
+    }
 }
 
 #[test]
