@@ -263,7 +263,6 @@ impl SelectedV2JournalContext {
             || bundle.site_id != policy.site_id
             || bundle.profile != PROFILE
             || bundle.backend != BACKEND
-            || certificate.key_id != bundle.journal_certificate.payload.key_id
             || certificate.purpose != SIGNING_PURPOSE
             || certificate.installation_id != policy.installation_id
             || certificate.site_id != policy.site_id
