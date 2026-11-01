@@ -772,6 +772,24 @@ fn decode_canonical<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, 
     Ok(decoded)
 }
 
+fn validate_exact_extension(
+    prior_bytes: &[u8],
+    candidate_bytes: &[u8],
+    prior: &AuthenticatedJournal,
+    candidate: &AuthenticatedJournal,
+) -> Result<(), JournalError> {
+    let prior_journal: Journal = decode_canonical(prior_bytes)?;
+    let candidate_journal: Journal = decode_canonical(candidate_bytes)?;
+    if candidate.sequence != prior.sequence.saturating_add(1)
+        || candidate.operation_id != prior.operation_id
+        || candidate_journal.records.len() != prior_journal.records.len() + 1
+        || candidate_journal.records[..prior_journal.records.len()] != prior_journal.records
+    {
+        return Err(JournalError::ReplayOrFork);
+    }
+    Ok(())
+}
+
 /// D8 protected-directory journal publisher. It uses the existing anchored,
 /// no-follow, ext4-only `ProtectedDirectory` and its CAS/fsync/rename/fsync/
 /// readback operation; this function adds the v2 authentication and append
@@ -799,12 +817,8 @@ pub fn publish_chain(
     let current = match prior {
         Some(bytes) => {
             let current = authenticate_chain(bytes, authority, now_unix)?;
-            if candidate != bytes
-                && (next.sequence != current.sequence + 1
-                    || next.operation_id != current.operation_id
-                    || next.signed_record_sha256 == current.signed_record_sha256)
-            {
-                return Err(JournalError::ReplayOrFork);
+            if candidate != bytes {
+                validate_exact_extension(bytes, candidate, &current, &next)?;
             }
             Some(bytes)
         }
@@ -1248,6 +1262,41 @@ mod tests {
         assert_eq!(
             retry_request(&bytes, &changed),
             Err(JournalError::ReplayOrFork)
+        );
+    }
+
+    #[test]
+    fn append_requires_the_exact_authenticated_prior_record_prefix() {
+        let key = key();
+        let authority = authority(&key);
+        let prior_bytes = chain(&[InactivePhase::Preflighted], &key);
+        let prior = authenticate_chain(&prior_bytes, &authority, NOW).unwrap();
+
+        let mut forked_prior: Journal = serde_json::from_slice(&prior_bytes).unwrap();
+        forked_prior.records[0].request.target_inode += 1;
+        forked_prior.records[0] = signed(forked_prior.records[0].request.clone(), &key);
+        let forked_record_hash = digest(&canonical(&forked_prior.records[0]).unwrap());
+        let mut forked_next = request(2, forked_record_hash, InactivePhase::TargetReservedInactive);
+        forked_next.target_inode += 1;
+        forked_prior.records.push(signed(forked_next, &key));
+        let forked_bytes = canonical(&forked_prior).unwrap();
+        let forked = authenticate_chain(&forked_bytes, &authority, NOW).unwrap();
+        assert_eq!(
+            validate_exact_extension(&prior_bytes, &forked_bytes, &prior, &forked),
+            Err(JournalError::ReplayOrFork)
+        );
+
+        let valid_bytes = chain(
+            &[
+                InactivePhase::Preflighted,
+                InactivePhase::TargetReservedInactive,
+            ],
+            &key,
+        );
+        let valid = authenticate_chain(&valid_bytes, &authority, NOW).unwrap();
+        assert_eq!(
+            validate_exact_extension(&prior_bytes, &valid_bytes, &prior, &valid),
+            Ok(())
         );
     }
 
