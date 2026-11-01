@@ -153,6 +153,10 @@ bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
     --output "${OUTPUT}"
 grep -q '"status": "ready"' "${OUTPUT}"
+EXPECTED_RELEASE="v$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "${ROOT_DIR}/Cargo.toml" | head -1)"
+EXPECTED_INSTALLER_PIN="$(sed -n 's/^O3K_INSTALLER_VERSION="\([^"]*\)"$/\1/p' "${ROOT_DIR}/packaging/get-o3k.sh")"
+[[ "${EXPECTED_INSTALLER_PIN}" == "${EXPECTED_RELEASE}" ]]
+grep -Fq '"release": "'"${EXPECTED_RELEASE}"'"' "${OUTPUT}"
 
 if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --e2e "${ARTIFACT_DIR}/e2e.json" \
