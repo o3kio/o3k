@@ -41,7 +41,8 @@ for artifact in "${artifacts[@]}"; do
         exit 1
       fi
     done
-    fixture_key="$(awk 'NF { print; exit }' "$(dirname "$0")/../bins/o3k/tests/fixtures/a10-release-verify.pub")"
+    fixture_key="$(awk 'NF && $0 !~ /^-----BEGIN / && $0 !~ /^-----END / { print; exit }' \
+      "$(dirname "$0")/../bins/o3k/tests/fixtures/a10-release-verify.pub")"
     if [[ -n "$fixture_key" ]] && strings "$artifact" | grep -Fq -- "$fixture_key"; then
       echo "release executable contains the A10 fixture verification key: $artifact" >&2
       exit 1
