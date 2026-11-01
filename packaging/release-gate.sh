@@ -87,7 +87,14 @@ try:
 except OSError as error:
     cargo_text = ""
     errors.append(f"release_version: cannot read workspace Cargo.toml ({error})")
-version_match = re.search(r"(?ms)^\[workspace\.package\]\s+.*?^version\s*=\s*\"([^\"]+)\"", cargo_text)
+workspace_section = re.search(
+    r"(?ms)^\[workspace\.package\][ \t]*\n(.*?)(?=^\[|\Z)", cargo_text
+)
+version_match = (
+    re.search(r'(?m)^[ \t]*version[ \t]*=[ \t]*"([^"]+)"[ \t]*(?:#.*)?$', workspace_section.group(1))
+    if workspace_section
+    else None
+)
 workspace_version = version_match.group(1) if version_match else ""
 if not workspace_version:
     errors.append("release_version: workspace package version is missing")
