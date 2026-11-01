@@ -24,6 +24,19 @@ for debug_assertions in false true; do
   fi
 done
 
+if RUSTFLAGS='-C opt-level=3' \
+  cargo check --manifest-path "$ROOT_DIR/Cargo.toml" -p o3k \
+    --features a10-process-test-hooks >"$WORK_DIR/custom-rustflags.log" 2>&1; then
+  echo "optimized rustflags unexpectedly accepted a10-process-test-hooks" >&2
+  exit 1
+fi
+if ! grep -Fq 'a10-process-test-hooks is a debug-only qualification feature' \
+  "$WORK_DIR/custom-rustflags.log"; then
+  echo "optimized rustflags rejection did not come from the build-time guard" >&2
+  tail -80 "$WORK_DIR/custom-rustflags.log" >&2
+  exit 1
+fi
+
 PACKAGE="$WORK_DIR/package"
 mkdir -p "$PACKAGE/bin"
 cat >"$PACKAGE/bin/o3k" <<EOF
