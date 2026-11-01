@@ -74,7 +74,10 @@ pub mod recovery_files;
 pub mod recovery_identity;
 #[cfg(target_os = "linux")]
 pub mod recovery_installation;
-#[cfg(target_os = "linux")]
+// The signed migration publisher is retained only for debug qualification.
+// Optimized builds cannot enable its feature (see the compile_error above),
+// and ordinary builds do not compile or link its mutating APIs at all.
+#[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
 pub mod recovery_migration_publisher;
 #[cfg(target_os = "linux")]
 pub mod recovery_migration_selector;
@@ -84,6 +87,8 @@ pub mod recovery_prepare;
 pub mod recovery_provision;
 #[cfg(target_os = "linux")]
 pub mod recovery_reanchor;
+#[cfg(target_os = "linux")]
+pub(crate) mod recovery_release_inventory;
 #[cfg(target_os = "linux")]
 pub mod recovery_trust;
 #[cfg(target_os = "linux")]

@@ -286,6 +286,7 @@ pub(crate) fn verify_v2_selected_generation(
 /// high-water, and release-manifest files may still be byte-exact v1 values;
 /// this function deliberately does not open the canonical store or grant
 /// operational admission.
+#[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
 pub(crate) fn verify_v2_migration_predecessor(
     data_dir: &Path,
     target_manifest_bytes: &[u8],
@@ -533,7 +534,7 @@ fn verify_v2_generation(
     }
 
     if require_complete_generation {
-        crate::recovery_migration_publisher::verify_active_v2_release_inventory(
+        crate::recovery_release_inventory::verify_active_v2_release_inventory(
             &state_directory,
             service_gid,
             &migration.new_release_identity.release_artifact_sha256,
@@ -1635,6 +1636,7 @@ impl InstalledRecovery {
     /// Values needed by the A10.1 publisher after `load` has authenticated
     /// the complete v1 installation. These are observations only; callers
     /// must still hold the D8 store-access guard before publishing anything.
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn migration_predecessor(&self) -> (u64, &str, &[u8], &[u8], &[u8]) {
         (
             self.tip_sequence,
@@ -1648,12 +1650,14 @@ impl InstalledRecovery {
     /// The authenticated C1.1 checkpoint's exact digest, if this source
     /// generation has a checkpoint. `load` has already verified its chain
     /// and disposition bindings before exposing the bytes here.
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn migration_checkpoint_digest(&self) -> Option<String> {
         self.checkpoint_bytes
             .as_deref()
             .map(|bytes| hex::encode(Sha256::digest(bytes)))
     }
 
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn migration_trust_bundle_bytes(&self) -> &[u8] {
         &self.fixed_bundle_bytes
     }
@@ -1663,21 +1667,25 @@ impl InstalledRecovery {
     /// NEVER_RECOVERED startup does not need this authority to verify its
     /// initial state signature, so the migration publisher calls this
     /// explicitly at its preflight boundary.
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn verify_migration_trust(&self) -> Result<()> {
         let (_, gid) = service_identity()?;
         load_trust(&self.policy, &self.state_directory, gid).map(|_| ())
     }
 
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn migration_policy_high_water_bytes(&self) -> &[u8] {
         self.policy_high_water_bytes
             .as_deref()
             .unwrap_or(&self.policy_bytes)
     }
 
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn migration_state_directory(&self) -> &ProtectedDirectory {
         &self.state_directory
     }
 
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     pub(crate) fn migration_lock_journal_directory(&self) -> Result<()> {
         let journal = self
             .journal_directory

@@ -90,6 +90,7 @@ enum Commands {
     },
     /// Publish an offline-signed v1-to-v2 installation-policy migration
     /// (root-only; no signing authority or restore-target mutation)
+    #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
     #[command(hide = true)]
     RecoveryMigrateV2 {
         #[arg(long)]
@@ -472,6 +473,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        #[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
         Commands::RecoveryMigrateV2 {
             policy,
             event,

@@ -91,6 +91,7 @@ pub(crate) fn run_bounded_with_timeout(
 
 /// Runs `systemctl` through the shared bounded host-execution adapter.
 /// Callers remain responsible for authorization and verifying postconditions.
+#[cfg(all(target_os = "linux", feature = "a10-process-test-hooks"))]
 pub(crate) fn run_systemctl_with_timeout(
     args: &[&str],
     timeout: Duration,

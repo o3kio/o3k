@@ -1173,7 +1173,7 @@ deny() {
     set -e
     test "$code" -ne 0 || { echo "${name} unexpectedly succeeded" >&2; exit 91; }
     test "$code" -ne 124 || { echo "${name} stayed alive / advertised readiness" >&2; exit 92; }
-    grep -Eiq 'installation (policy|authority|state)|selector|migration|installed recovery release|installed release .* authority is unavailable|active release checksum inventory|installed compute admission is incomplete' "$log" || {
+    grep -Eiq 'installation (policy|authority|state)|selector|migration|installed recovery release|installed release .* authority is unavailable|active release checksum inventory|target release provenance signature is invalid|installed compute admission is incomplete' "$log" || {
         cat "$log" >&2
         echo "${name} failed for a reason other than selector denial" >&2
         exit 93
@@ -1374,13 +1374,9 @@ fn copy_test_executable(name: &str, destination: &Path, candidate: bool) {
             std::env::var_os("O3K_A10_SOURCE_O3K")
                 .expect("qualification harness supplies a separately built source executable"),
         ),
-        "o3kd" => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/o3kd"),
-        "o3k-compute" => {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/o3k-compute-bin")
-        }
-        "o3k-network" => {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/o3k-network-bin")
-        }
+        "o3kd" => source_process_executable("O3K_A10_SOURCE_O3KD", "o3kd"),
+        "o3k-compute" => source_process_executable("O3K_A10_SOURCE_O3K_COMPUTE", "o3k-compute-bin"),
+        "o3k-network" => source_process_executable("O3K_A10_SOURCE_O3K_NETWORK", "o3k-network-bin"),
         _ => panic!("unknown executable"),
     };
     fs::copy(source, destination).expect("copy source-built executable");
@@ -1401,6 +1397,16 @@ fn copy_test_executable(name: &str, destination: &Path, candidate: bool) {
             .expect("append inert candidate identity trailer");
         file.sync_all().expect("sync candidate fixture executable");
     }
+}
+
+fn source_process_executable(variable: &str, binary_name: &str) -> PathBuf {
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug")
+                .join(binary_name)
+        })
 }
 
 fn signed_release_manifest(
@@ -1526,6 +1532,7 @@ fn install_fake_systemctl(bin_dir: &Path, _systemd_dir: &Path, fixture: &Path) {
 
 #[test]
 #[ignore = "requires root, private mount namespace, ext4 fixture, test binaries and test-only signer"]
+#[cfg(feature = "a10-process-test-hooks")]
 fn signed_never_recovered_migration_runs_through_real_cli() {
     let fixture = root_fixture().expect("root fixture available");
     let mut ctx = fresh_ctx();

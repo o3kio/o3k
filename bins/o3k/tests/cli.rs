@@ -47,6 +47,16 @@ fn version_prints_version_and_exits_zero() {
     );
 }
 
+#[cfg(not(feature = "a10-process-test-hooks"))]
+#[test]
+fn production_cli_does_not_dispatch_a10_migration_publisher() {
+    let (code, stdout, stderr) = run(&["recovery-migrate-v2", "--help"]);
+    assert_ne!(code, 0);
+    assert!(!stdout.contains("recovery-migrate-v2"));
+    assert!(!stderr.contains("Usage: o3k recovery-migrate-v2"));
+    assert!(stderr.contains("unrecognized subcommand"));
+}
+
 /// `o3k` with no arguments prints usage on stderr and exits 2.
 #[test]
 fn no_arguments_exits_two_with_usage() {
