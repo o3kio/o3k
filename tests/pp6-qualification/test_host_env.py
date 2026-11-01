@@ -88,6 +88,63 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             HOST_ENV.network_identity(xml.replace("none", "nat"), "o3k-pp6-run123", "net-uuid", "p6123456")
 
+    def test_installed_release_capture_requires_exact_manifest_and_binary_inventory(self):
+        record = {
+            "release_manifest": {
+                "source_commit": "a" * 40,
+                "version": "0.4.0-rc.25",
+                "profile": "libvirt",
+                "release_artifact_sha256": "b" * 64,
+            },
+            "release_manifest_sha256": "c" * 64,
+            "release_manifest_inode": [8, 9],
+            "executables": {
+                name: {"path": f"/usr/local/bin/{name}", "sha256": "d" * 64,
+                       "uid": 0, "gid": 0, "mode": 0o755, "device": 8, "inode": 10}
+                for name in ("o3kd", "o3k", "o3k-compute", "o3k-network")
+            },
+        }
+        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.25", "b" * 64)
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.25", "b" * 64)
+        altered = {**record, "executables": dict(record["executables"])}
+        altered["executables"].pop("o3k-network")
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.25", "b" * 64)
+
+    def test_destroy_identity_check_rejects_unknown_and_replaced_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "private"
+            guest_dir = private / "debian12"
+            (guest_dir / "seed").mkdir(parents=True)
+            guest_dir.chmod(0o711)
+            (guest_dir / "seed").chmod(0o700)
+            network_xml = private / "network.xml"
+            network_xml.write_text("<network/>", encoding="utf-8")
+            recorded_file = guest_dir / "root.qcow2"
+            recorded_file.write_bytes(b"run-owned disk")
+            network_info = network_xml.lstat()
+            disk_info = recorded_file.lstat()
+            marker = {
+                "network_xml_inode": [network_info.st_dev, network_info.st_ino],
+                "guests": {"debian12": {"files": {
+                    "root.qcow2": [disk_info.st_dev, disk_info.st_ino]
+                }}},
+            }
+            HOST_ENV.verify_recorded_files(private, marker)
+            with self.assertRaises(RuntimeError):
+                HOST_ENV.verify_recorded_files(private, {**marker, "guests": {}})
+            foreign_file = guest_dir / "foreign-state.db"
+            foreign_file.write_bytes(b"preserve this")
+            with self.assertRaises(RuntimeError):
+                HOST_ENV.verify_recorded_files(private, marker)
+            foreign_file.unlink()
+            replacement = guest_dir / "replacement.tmp"
+            replacement.write_bytes(b"replacement")
+            replacement.replace(recorded_file)
+            with self.assertRaises(RuntimeError):
+                HOST_ENV.verify_recorded_files(private, marker)
+
 
 if __name__ == "__main__":
     unittest.main()

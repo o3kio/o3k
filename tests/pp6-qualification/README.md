@@ -32,9 +32,27 @@ they do not replace independent host hardening or firewall review.
 
 It records guest OS, kernel, systemd, filesystem source/type/label, device,
 inode, owner and mode, base-image digest, source SHA, and harness digest under
-the run's `evidence/` directory. Set `O3K_PP6_SOURCE_SHA` when qualifying a
-detached source tree; otherwise the checked-out Git HEAD is recorded. The
-private directory contains generated SSH keys, disks and cloud-init seeds.
+the run's `evidence/` directory. Once the authenticated release has been
+installed, capture its identity on each guest:
+
+```sh
+tests/pp6-qualification/host-env.py capture-installation \
+  --run-id pp6-20261101-run01 --guest debian12 \
+  --source-sha <exact-tag-commit> --version <release-version-without-v> \
+  --artifact-sha256 <archive-digest-from-verified-sigstore-manifest>
+```
+
+The capture requires the installed manifest to match the supplied source,
+version, `libvirt` profile and digest, then hashes the four installed
+executables and records their ownership, mode and inodes alongside the guest
+OS, kernel, systemd and filesystem identities. This records the caller's
+authenticated artifact identity; it does not perform Sigstore verification.
+Verify the OIDC/Sigstore provenance and release bundle before supplying these
+values. Set `O3K_PP6_SOURCE_SHA` when qualifying a detached source tree;
+otherwise the checked-out Git HEAD is recorded. The private directory
+contains run-only SSH user and host keys, disks and cloud-init seeds. The guest
+host key is pinned into `known_hosts` from the host-generated public key; the
+harness does not trust `ssh-keyscan` output.
 
 ```sh
 tests/pp6-qualification/host-env.py force-restart \
@@ -44,12 +62,13 @@ tests/pp6-qualification/host-env.py destroy --run-id pp6-20261101-run01
 
 `force-restart` abruptly powers off and restarts the selected VM, and labels
 that evidence as a guest-level interruption. It is not host power-loss
-evidence. `destroy` verifies the run marker, every domain disk and network
-interface, domain UUID when recorded, network UUID and bridge identity, removes
-only that run's stopped VMs/network/private files, and retains evidence. If
-provisioning fails, resources are deliberately retained for
-inspection and must be removed with the same run ID after reviewing the
-marker.
+evidence. `destroy` verifies the run marker, run/private/evidence directory
+inodes, every recorded file and domain disk, network interface, domain UUID,
+network UUID and bridge identity, removes only that run's stopped VMs/network
+and private files, and retains evidence. If provisioning fails, resources are
+deliberately retained for inspection. Cleanup fails closed when a partial run
+lacks the identity markers required for safe removal; inspect and remove that
+partial run manually.
 
 This infrastructure PR does not include an authenticated O3K candidate,
 release installation, PostgreSQL 16 target, independent host power-cut

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run-owned Debian 12/Ubuntu 24.04 systemd and ext4 qualification guests."""
-import argparse, hashlib, json, os, re, shutil, subprocess, sys, time
+import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import glob
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,7 @@ def run_path(run_id):
 
 
 def require_host(*, provisioning=False):
-    needed = ("virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "ssh-keygen", "ssh-keyscan")
+    needed = ("virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "ssh-keygen")
     if not provisioning:
         needed = ("virsh",)
     missing = [x for x in needed if shutil.which(x) is None]
@@ -43,7 +44,10 @@ def require_host(*, provisioning=False):
         raise RuntimeError("requires root" + (", /dev/kvm" if provisioning else "") +
                            " and tools; missing=" + ",".join(missing))
     if provisioning:
-        for name in ("/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv6/conf/all/forwarding"):
+        forwarding_controls = ["/proc/sys/net/ipv4/ip_forward"]
+        forwarding_controls.extend(glob.glob("/proc/sys/net/ipv4/conf/*/forwarding"))
+        forwarding_controls.extend(glob.glob("/proc/sys/net/ipv6/conf/*/forwarding"))
+        for name in sorted(set(forwarding_controls)):
             value = Path(name).read_text(encoding="ascii").strip()
             if value != "0":
                 raise RuntimeError(f"host forwarding must be disabled ({name}={value})")
@@ -123,13 +127,102 @@ def network_identity(xml_text, name, uuid, bridge):
 
 def file_identities(directory):
     result = {}
-    for name in ("base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso"):
+    names = ("base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso",
+             "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key",
+             "seed/user-data", "seed/meta-data")
+    for name in names:
         path = directory / name
         info = path.lstat()
-        if path.is_symlink() or not path.is_file() or info.st_uid != 0:
+        if path.is_symlink() or not path.is_file() or info.st_uid != os.geteuid():
             raise RuntimeError(f"unsafe run-owned file: {path}")
         result[name] = [info.st_dev, info.st_ino]
     return result
+
+
+def verify_recorded_files(private, marker):
+    network_xml = private / "network.xml"
+    network_info = network_xml.lstat()
+    if (network_xml.is_symlink() or not network_xml.is_file() or network_info.st_uid != os.geteuid()
+            or marker.get("network_xml_inode") != [network_info.st_dev, network_info.st_ino]):
+        raise RuntimeError("qualification network definition inode changed; refusing cleanup")
+    allowed_files = {"network.xml"}
+    allowed_dirs = set()
+    recorded_identities = {}
+    for guest_name in GUESTS:
+        allowed_dirs.add(guest_name)
+        allowed_dirs.add(f"{guest_name}/seed")
+        allowed_files.update(f"{guest_name}/{name}" for name in (
+            "base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso",
+            "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key",
+            "seed/user-data", "seed/meta-data"))
+    for guest_name, guest in marker.get("guests", {}).items():
+        recorded = guest.get("files")
+        if not isinstance(recorded, dict):
+            raise RuntimeError(f"missing run-owned file identities: {guest_name}")
+        for name, identity in recorded.items():
+            recorded_identities[f"{guest_name}/{name}"] = identity
+    for directory, names, files in os.walk(private, followlinks=False):
+        current = Path(directory)
+        for name in names:
+            entry = current / name
+            relative = entry.relative_to(private).as_posix()
+            info = entry.lstat()
+            if (relative not in allowed_dirs or entry.is_symlink() or not entry.is_dir()
+                    or info.st_uid != os.geteuid() or info.st_mode & 0o022):
+                raise RuntimeError(f"unexpected or unsafe private directory; refusing cleanup: {entry}")
+        for name in files:
+            entry = current / name
+            relative = entry.relative_to(private).as_posix()
+            info = entry.lstat()
+            if (relative not in allowed_files or entry.is_symlink() or not entry.is_file()
+                    or info.st_uid != os.geteuid()):
+                raise RuntimeError(f"unexpected or unsafe private file; refusing cleanup: {entry}")
+            if relative != "network.xml":
+                recorded = recorded_identities.get(relative)
+                if recorded != [info.st_dev, info.st_ino]:
+                    raise RuntimeError(f"unrecorded or replaced private file; refusing cleanup: {entry}")
+    for guest_name, guest in marker.get("guests", {}).items():
+        directory = private / guest_name
+        recorded = guest.get("files")
+        if not isinstance(recorded, dict):
+            raise RuntimeError(f"missing run-owned file identities: {guest_name}")
+        for name, identity in recorded.items():
+            path = directory / name
+            info = path.lstat()
+            if (path.is_symlink() or not path.is_file() or info.st_uid != os.geteuid()
+                    or identity != [info.st_dev, info.st_ino]):
+                raise RuntimeError(f"run-owned file identity changed; refusing cleanup: {path}")
+
+
+def validate_installation_record(record, source_sha, version, artifact_sha256):
+    manifest = record.get("release_manifest")
+    if not isinstance(manifest, dict):
+        raise RuntimeError("installed release manifest is missing or malformed")
+    expected = {"source_commit": source_sha, "version": version, "profile": "libvirt",
+                "release_artifact_sha256": artifact_sha256}
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("installed release manifest does not match authenticated candidate identity")
+    executables = record.get("executables")
+    required = {"o3kd", "o3k", "o3k-compute", "o3k-network"}
+    if not isinstance(executables, dict) or set(executables) != required:
+        raise RuntimeError("installed release executable inventory is incomplete")
+    for name, value in executables.items():
+        if (not isinstance(value, dict)
+                or value.get("path") != f"/usr/local/bin/{name}"
+                or not isinstance(value.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
+                or value.get("uid") != 0 or value.get("gid") != 0
+                or value.get("mode") != 0o755
+                or not isinstance(value.get("device"), int)
+                or not isinstance(value.get("inode"), int)
+                or value["device"] < 0 or value["inode"] <= 0):
+            raise RuntimeError(f"unsafe installed executable identity: {name}")
+    if (not isinstance(record.get("release_manifest_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", record["release_manifest_sha256"])
+            or not isinstance(record.get("release_manifest_inode"), list)
+            or len(record["release_manifest_inode"]) != 2
+            or any(not isinstance(x, int) or x < 0 for x in record["release_manifest_inode"])):
+        raise RuntimeError("installed release manifest identity is incomplete")
 
 
 def put(path, text, mode=0o600):
@@ -153,20 +246,17 @@ def lease_ip(network, mac):
     return None
 
 
-def wait_ssh(network, mac, key, known, timeout):
+def wait_ssh(network, mac, key, known, host_key_public, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         ip = lease_ip(network, mac)
         if ip:
-            scan = subprocess.run(["ssh-keyscan", "-T", "2", ip], text=True,
-                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            if scan.stdout:
-                put(known, scan.stdout)
-                try:
-                    ssh(ip, key, known, "systemctl --version | head -1")
-                    return ip
-                except (RuntimeError, subprocess.CalledProcessError):
-                    pass
+            put(known, f"{ip} {host_key_public}\n")
+            try:
+                ssh(ip, key, known, "systemctl --version | head -1")
+                return ip
+            except (RuntimeError, subprocess.CalledProcessError):
+                pass
         time.sleep(3)
     raise RuntimeError(f"guest SSH timeout for {mac}")
 
@@ -194,7 +284,10 @@ def provision(a):
     evidence.mkdir(mode=0o700)
     marker_path = path / ".o3k-pp6-owned.json"
     marker = {"format": "o3k-pp6-run-v1", "run_id": a.run_id, "network": network,
-              "bridge": bridge, "network_uuid": None, "private": str(private), "guests": {}}
+              "bridge": bridge, "network_uuid": None, "private": str(private), "guests": {},
+              "run_inode": [path.lstat().st_dev, path.lstat().st_ino],
+              "private_inode": [private.lstat().st_dev, private.lstat().st_ino],
+              "evidence_inode": [evidence.lstat().st_dev, evidence.lstat().st_ino]}
     put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
     try:
         if subprocess.run(["virsh", "net-info", network], stdout=subprocess.DEVNULL,
@@ -205,6 +298,8 @@ def provision(a):
 <bridge name='{bridge}' stp='off' delay='0'/><ip address='192.168.{octet}.1' netmask='255.255.255.0'>
 <dhcp><range start='192.168.{octet}.20' end='192.168.{octet}.99'/></dhcp></ip></network>
 """)
+        marker["network_xml_inode"] = [netxml.lstat().st_dev, netxml.lstat().st_ino]
+        put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
         call(["virsh", "net-define", str(netxml)])
         marker["network_uuid"] = call(["virsh", "net-info", network]).split("UUID:", 1)[1].splitlines()[0].strip()
         put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
@@ -231,11 +326,21 @@ def provision(a):
             key, pub, known = d / "id_ed25519", d / "id_ed25519.pub", d / "known_hosts"
             call(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"pp6-{a.run_id}-{guest}", "-f", str(key)])
             key.chmod(0o600)
+            host_key = d / "ssh_host_ed25519_key"
+            call(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C",
+                  f"pp6-host-{a.run_id}-{guest}", "-f", str(host_key)])
+            host_key.chmod(0o600)
+            host_key_public = call(["ssh-keygen", "-y", "-f", str(host_key)])
+            put(known, "", 0o600)
             mac = "52:54:00:" + ":".join(f"{b:02x}" for b in hashlib.sha256((a.run_id + guest).encode()).digest()[:3])
             state_label, journal_label = f"O3KSTATE{n}", f"O3KJOURNAL{n}"
+            host_key_config = "\n".join("    " + line for line in host_key.read_text().splitlines())
             user_data = f"""#cloud-config
 hostname: {name}
 manage_etc_hosts: true
+ssh_keys:
+  ed25519_private: |
+{host_key_config}
 users:
  - default
  - name: o3kqual
@@ -249,7 +354,7 @@ ssh_pwauth: false
 disable_root: true
 runcmd:
  - [systemctl, enable, --now, ssh]
- - [bash, -lc, "set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /nonexistent --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal"]
+ - [bash, -lc, "set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /nonexistent --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"]
 """
             seed = d / "seed"
             seed.mkdir(mode=0o700)
@@ -257,7 +362,8 @@ runcmd:
             put(seed / "meta-data", json.dumps({"instance-id": name, "local-hostname": name}) + "\n")
             iso = d / "seed.iso"
             call(["genisoimage", "-output", str(iso), "-volid", "cidata", "-joliet", "-rock",
-                  str(seed / "user-data"), str(seed / "meta-data")])
+                  "-graft-points", "user-data=" + str(seed / "user-data"),
+                  "meta-data=" + str(seed / "meta-data")])
             marker["guests"][guest] = {"domain": name, "mac": mac, "base_image_sha256": base_sha,
                                        "network": network, "files": file_identities(d)}
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
@@ -270,7 +376,7 @@ runcmd:
             marker["guests"][guest]["uuid"] = domain_identity(
                 call(["virsh", "dumpxml", name]), guest, marker["guests"][guest], private)
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
-            ip = wait_ssh(network, mac, key, known, a.timeout)
+            ip = wait_ssh(network, mac, key, known, host_key_public, a.timeout)
             expected_id, expected_version = (("debian", "12") if guest == "debian12"
                                              else ("ubuntu", "24.04"))
             os_check = (". /etc/os-release; test \"$ID\" = " + expected_id
@@ -328,6 +434,18 @@ def load_marker(run_id):
         raise RuntimeError("ownership identity mismatch")
     if marker.get("private") != str((path / "private").resolve()):
         raise RuntimeError("private path identity mismatch")
+    if path.lstat().st_uid != 0 or path.lstat().st_mode & 0o022:
+        raise RuntimeError("run directory ownership or permissions are unsafe")
+    expected_run_inode = marker.get("run_inode")
+    if expected_run_inode != [path.lstat().st_dev, path.lstat().st_ino]:
+        raise RuntimeError("run directory inode changed")
+    private = path / "private"
+    if private.exists() and marker.get("private_inode") != [private.lstat().st_dev, private.lstat().st_ino]:
+        raise RuntimeError("private run directory inode changed")
+    evidence = path / "evidence"
+    if (not evidence.is_dir() or evidence.is_symlink()
+            or marker.get("evidence_inode") != [evidence.lstat().st_dev, evidence.lstat().st_ino]):
+        raise RuntimeError("evidence directory inode changed")
     if marker.get("network") != "o3k-pp6-" + run_id[:12]:
         raise RuntimeError("network name does not match run identity")
     expected_bridge = "p6" + hashlib.sha256(run_id.encode()).hexdigest()[:6]
@@ -351,6 +469,12 @@ def destroy(a):
     evidence = path / "evidence"
     if private.is_symlink() or private.resolve() != private or evidence.is_symlink() or not evidence.is_dir():
         raise RuntimeError("unsafe run directories; refusing cleanup")
+    if private.lstat().st_uid != 0 or private.lstat().st_mode & 0o022:
+        raise RuntimeError("private run directory ownership or permissions changed; refusing cleanup")
+    if evidence.lstat().st_uid != 0 or evidence.lstat().st_mode & 0o077:
+        raise RuntimeError("evidence directory ownership or permissions changed; refusing cleanup")
+    if private.exists():
+        verify_recorded_files(private, marker)
     if not private.exists():
         domains_remain = any(subprocess.run(
             ["virsh", "dominfo", guest["domain"]], stdout=subprocess.DEVNULL,
@@ -403,6 +527,57 @@ def force_restart(a):
     print(json.dumps(event, sort_keys=True))
 
 
+def capture_installation(a):
+    require_host()
+    if not re.fullmatch(r"[0-9a-f]{40}", a.source_sha):
+        raise ValueError("source SHA must be 40 lowercase hexadecimal characters")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?", a.version):
+        raise ValueError("version must be an exact release version without the v prefix")
+    if not re.fullmatch(r"[0-9a-f]{64}", a.artifact_sha256):
+        raise ValueError("release artifact SHA-256 must be 64 lowercase hexadecimal characters")
+    path, marker = load_marker(a.run_id)
+    guest = marker["guests"].get(a.guest)
+    if not guest:
+        raise RuntimeError("guest not found in ownership marker")
+    domain_identity(call(["virsh", "dumpxml", guest["domain"]]), a.guest, guest, path / "private")
+    script = r'''import hashlib,json,os,pathlib,stat,subprocess,sys
+expected_source,expected_version,expected_artifact=sys.argv[1:4]
+manifest_path=pathlib.Path('/usr/local/share/o3k/release-manifest.json')
+raw=manifest_path.read_bytes()
+manifest=json.loads(raw)
+expected={'source_commit':expected_source,'version':expected_version,'profile':'libvirt','release_artifact_sha256':expected_artifact}
+if not isinstance(manifest,dict) or any(manifest.get(k)!=v for k,v in expected.items()):
+ raise SystemExit('installed release manifest does not match expected authenticated candidate')
+manifest_stat=manifest_path.lstat()
+if not stat.S_ISREG(manifest_stat.st_mode) or manifest_stat.st_uid!=0 or stat.S_IMODE(manifest_stat.st_mode)!=0o644:
+ raise SystemExit('installed release manifest ownership or mode is unsafe')
+executables={}
+for name in ('o3kd','o3k','o3k-compute','o3k-network'):
+ p=pathlib.Path('/usr/local/bin')/name
+ st=p.lstat()
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o755:
+  raise SystemExit('installed executable ownership or mode is unsafe: '+name)
+ h=hashlib.sha256()
+ with p.open('rb') as f:
+  for block in iter(lambda:f.read(1048576),b''): h.update(block)
+ executables[name]={'path':str(p),'sha256':h.hexdigest(),'uid':st.st_uid,'gid':st.st_gid,'mode':stat.S_IMODE(st.st_mode),'device':st.st_dev,'inode':st.st_ino}
+print(json.dumps({'release_manifest':manifest,'release_manifest_sha256':hashlib.sha256(raw).hexdigest(),'release_manifest_inode':[manifest_stat.st_dev,manifest_stat.st_ino],'executables':executables,'os_release':pathlib.Path('/etc/os-release').read_text(),'kernel':subprocess.check_output(['uname','-a'],text=True).strip(),'systemd':subprocess.check_output(['systemctl','--version'],text=True).splitlines()[0],'filesystem':{p:subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE','--target',p],text=True).strip() for p in ('/var/lib/o3k/state','/var/lib/o3k/journal')}},sort_keys=True))'''
+    command = "python3 -c " + shlex.quote(script) + " " + " ".join(
+        shlex.quote(value) for value in (a.source_sha, a.version, a.artifact_sha256))
+    raw = ssh(guest["ip"], path / "private" / a.guest / "id_ed25519",
+              path / "private" / a.guest / "known_hosts", command)
+    record = json.loads(raw)
+    validate_installation_record(record, a.source_sha, a.version, a.artifact_sha256)
+    record["guest"] = a.guest
+    record["captured_at"] = datetime.now(timezone.utc).isoformat()
+    evidence = path / "evidence"
+    destination = evidence / f"{a.guest}.installation.json"
+    temporary = evidence / f".{a.guest}.installation.tmp"
+    put(temporary, json.dumps(record, sort_keys=True, indent=2) + "\n", 0o600)
+    os.replace(temporary, destination)
+    print(f"recorded authenticated candidate identity for {a.guest}: {destination}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -421,6 +596,14 @@ def main():
     q.add_argument("--run-id", required=True)
     q.add_argument("--guest", choices=GUESTS, required=True)
     q.set_defaults(func=force_restart)
+    q = sub.add_parser("capture-installation")
+    q.add_argument("--run-id", required=True)
+    q.add_argument("--guest", choices=GUESTS, required=True)
+    q.add_argument("--source-sha", required=True)
+    q.add_argument("--version", required=True)
+    q.add_argument("--artifact-sha256", required=True,
+                    help="archive digest read from the already verified Sigstore digest manifest")
+    q.set_defaults(func=capture_installation)
     a = p.parse_args()
     try:
         a.func(a)
