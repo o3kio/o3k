@@ -82,6 +82,32 @@ required = {
 }
 required["benchmark"] = (os.environ["BENCHMARK"], "benchmark")
 errors = []
+try:
+    cargo_text = open(os.path.join(os.environ["REPOSITORY_ROOT"], "Cargo.toml"), encoding="utf-8").read()
+except OSError as error:
+    cargo_text = ""
+    errors.append(f"release_version: cannot read workspace Cargo.toml ({error})")
+workspace_section = re.search(
+    r"(?ms)^\[workspace\.package\][ \t]*\n(.*?)(?=^\[|\Z)", cargo_text
+)
+version_match = (
+    re.search(r'(?m)^[ \t]*version[ \t]*=[ \t]*"([^"]+)"[ \t]*(?:#.*)?$', workspace_section.group(1))
+    if workspace_section
+    else None
+)
+workspace_version = version_match.group(1) if version_match else ""
+if not workspace_version:
+    errors.append("release_version: workspace package version is missing")
+installer_path = os.path.join(os.environ["REPOSITORY_ROOT"], "packaging", "get-o3k.sh")
+try:
+    installer_text = open(installer_path, encoding="utf-8").read()
+except OSError as error:
+    installer_text = ""
+    errors.append(f"release_version: cannot read installer source ({error})")
+installer_match = re.search(r"(?m)^O3K_INSTALLER_VERSION=\"(v[^\"]+)\"$", installer_text)
+installer_version = installer_match.group(1) if installer_match else ""
+if workspace_version and installer_version != "v" + workspace_version:
+    errors.append("release_version: baked installer pin must match workspace package version")
 if max_age_error:
     errors.append(max_age_error)
 evidence = {}
@@ -511,7 +537,7 @@ if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
         elif evaluated != expected or not all(expected.values()):
             errors.append("benchmark: targets_evaluated does not match raw measurements")
 
-report = {"release": "v0.4.0-rc.5", "profile": "libvirt", "source_commit": source_commit, "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
+report = {"release": "v" + workspace_version if workspace_version else None, "profile": "libvirt", "source_commit": source_commit, "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
 with open(os.environ["OUTPUT"], "w", encoding="utf-8") as stream:
     json.dump(report, stream, indent=2, sort_keys=True); stream.write("\n")
 if errors:

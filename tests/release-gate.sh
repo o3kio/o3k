@@ -3,7 +3,14 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-release-gate.XXXXXX")"
-trap 'rm -rf -- "${ARTIFACT_DIR}"' EXIT
+MALFORMED_ROOT="${ARTIFACT_DIR}/malformed-workspace"
+cleanup() {
+  if [[ -d "${MALFORMED_ROOT}" ]]; then
+    git -C "${ROOT_DIR}" worktree remove --force "${MALFORMED_ROOT}" >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "${ARTIFACT_DIR}"
+}
+trap cleanup EXIT
 SOURCE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
 export SOURCE_COMMIT
 
@@ -153,6 +160,46 @@ bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
     --output "${OUTPUT}"
 grep -q '"status": "ready"' "${OUTPUT}"
+EXPECTED_RELEASE="v$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "${ROOT_DIR}/Cargo.toml" | head -1)"
+EXPECTED_INSTALLER_PIN="$(sed -n 's/^O3K_INSTALLER_VERSION="\([^"]*\)"$/\1/p' "${ROOT_DIR}/packaging/get-o3k.sh")"
+[[ "${EXPECTED_INSTALLER_PIN}" == "${EXPECTED_RELEASE}" ]]
+grep -Fq '"release": "'"${EXPECTED_RELEASE}"'"' "${OUTPUT}"
+
+# A later package stanza must never supply a missing workspace package version.
+git -C "${ROOT_DIR}" worktree add --detach "${MALFORMED_ROOT}" "${SOURCE_COMMIT}" >/dev/null
+cp "${ROOT_DIR}/packaging/release-gate.sh" "${MALFORMED_ROOT}/packaging/release-gate.sh"
+cat >"${MALFORMED_ROOT}/Cargo.toml" <<'EOF'
+[workspace.package]
+edition = "2024"
+
+[package]
+version = "9.9.9"
+EOF
+if bash "${MALFORMED_ROOT}/packaging/release-gate.sh" \
+    --e2e "${ARTIFACT_DIR}/e2e.json" \
+    --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
+    --install-debian "${ARTIFACT_DIR}/debian.json" \
+    --recovery "${ARTIFACT_DIR}/recovery.json" \
+    --benchmark "${ARTIFACT_DIR}/benchmark.json" \
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
+    --human-review "${HUMAN_REVIEW}" \
+    --source-commit "${SOURCE_COMMIT}" \
+    --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
+    --output "${ARTIFACT_DIR}/malformed-workspace-release.json"; then
+    echo "release gate accepted a later package version as the workspace version" >&2
+    exit 1
+fi
+grep -q 'release_version: workspace package version is missing' \
+    "${ARTIFACT_DIR}/malformed-workspace-release.json"
+python3 - "${ARTIFACT_DIR}/malformed-workspace-release.json" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    result = json.load(stream)
+assert result["status"] == "blocked"
+assert result["release"] is None
+PY
+git -C "${ROOT_DIR}" worktree remove --force "${MALFORMED_ROOT}" >/dev/null
 
 if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --e2e "${ARTIFACT_DIR}/e2e.json" \
