@@ -1168,7 +1168,13 @@ deny() {
     shift
     log="/var/lib/a10-consumer-${name}.log"
     set +e
-    timeout 4 "$@" >"$log" 2>&1
+    # A complete-but-inactive v2 generation makes every installed consumer
+    # run the full release-inventory verification (including hashing the
+    # installed executables) before it denies at the compute-posture gate;
+    # in an unoptimized debug build that takes tens of seconds. The bound
+    # below must stay large enough for that denial and small enough that a
+    # consumer advertising readiness still trips the 124 liveness failure.
+    timeout 120 "$@" >"$log" 2>&1
     code=$?
     set -e
     test "$code" -ne 0 || { echo "${name} unexpectedly succeeded" >&2; exit 91; }
