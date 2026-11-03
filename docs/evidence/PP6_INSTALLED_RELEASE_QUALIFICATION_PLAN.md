@@ -417,10 +417,13 @@ tests/pp6-qualification/host-env.py destroy --run-id "$RUN_ID"
 ## Next actionable tasks
 
 1. Immediate infrastructure task: provision the dedicated qualification host,
-   approved custody/trust/revocation material, independent D7 fencing, and
-   authorized BMC/PDU control, then execute Q1–Q11 against the authenticated
-   rc.26 release. No installed or power-loss lane may be marked PASS before
-   that execution.
+   authenticated guest images, approved custody/trust/revocation material, and
+   independent D7 fencing required by each recovery lane. Then execute the
+   applicable E4 checks against authenticated rc.26. Run Q9/E5 separately only
+   after written authorization, a suitable bare-metal host, and authorized
+   BMC/PDU control are available; their absence does not block E4 evidence.
+   Record each OS and evidence tier independently, and do not mark a lane PASS
+   before its own execution and evidence review.
 2. Next safe Phase B/C engineering slice: add selected-v2 signed-journal
    negative/restart and protected-filesystem publication-failure evidence,
    while extending only read-only restore preflight or validation code. The
