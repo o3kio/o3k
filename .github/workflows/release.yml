@@ -111,7 +111,7 @@ jobs:
           certification is claimed.
 
           This candidate carries the PP.6 recovery-source milestones merged
-          since rc.24 (#1198-#1207). Its explicit limits:
+          since rc.24 (#1198-#1203 and #1205-#1207). Its explicit limits:
 
           - the production bundle intentionally excludes the
             o3k recovery-migrate-v2 command; publisher process evidence is

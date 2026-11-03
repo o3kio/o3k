@@ -110,7 +110,7 @@ Version resolution precedence:
    precedence):
 
    ```sh
-   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.23 sh -
+   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.26 sh -
    ```
 
 2. an optional `O3K_PINNED_VERSION="<version>"` first line, kept for the
