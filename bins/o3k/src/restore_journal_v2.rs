@@ -1383,3 +1383,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "restore_journal_v2_realfs_tests.rs"]
+mod realfs_tests;
