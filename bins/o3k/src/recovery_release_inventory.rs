@@ -115,7 +115,9 @@ fn parse_release_sums(bytes: &[u8]) -> Result<BTreeMap<String, String>, &'static
 /// (`packaging/make-provenance-sigstore.sh`), so paths are bare relative
 /// asset names such as `install.sh` or `o3k-1.2.3/manifest.json`; extras
 /// beyond the required set are permitted, matching `packaging/get-o3k.sh`.
-fn parse_signed_release_digests(bytes: &[u8]) -> Result<BTreeMap<String, String>, &'static str> {
+pub(crate) fn parse_signed_release_digests(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, String>, &'static str> {
     let text =
         std::str::from_utf8(bytes).map_err(|_| "signed release digest manifest is malformed")?;
     let mut assets = BTreeMap::new();

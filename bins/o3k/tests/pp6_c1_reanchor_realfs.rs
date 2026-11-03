@@ -1363,6 +1363,12 @@ fn a10_release_digests(
     assets.insert(format!("{bundle}/manifest.json"), sha256_hex(raw_manifest));
     assets.insert(format!("{bundle}/SHA256SUMS"), sha256_hex(sums));
     assets.insert(format!("{bundle}/sbom.spdx.json"), sha256_hex(sbom));
+    // Authentic release provenance includes this signed extra asset. Keeping
+    // it in every source and target fixture exercises publisher acceptance.
+    assets.insert(
+        "provenance.json".to_string(),
+        sha256_hex(b"test provenance"),
+    );
     assets
         .into_iter()
         .map(|(name, digest)| format!("{digest}  {name}\n"))
