@@ -106,14 +106,17 @@ jobs:
           cat > release-notes.md <<EOF
           ## O3K $tag
 
-          PP.6 Stage 1 qualification candidate. Not production-ready and not
-          PP.6-certified. No PP.7 or Araf certification is claimed.
+          PP.6 Stage 2 installed-release qualification candidate. Not
+          production-ready and not PP.6-certified. No PP.7 or Araf
+          certification is claimed.
 
           This candidate carries the PP.6 recovery-source milestones merged
-          since rc.24 (#1198-#1202). Its explicit limits:
+          since rc.24 (#1198-#1203 and #1205-#1207). Its explicit limits:
 
-          - the A10 migration publisher is disabled in production binaries and
-            is not a working installed migration path;
+          - the production bundle intentionally excludes the
+            o3k recovery-migrate-v2 command; publisher process evidence is
+            qualification-only and is not an installed production migration
+            capability;
           - signed journal-v2 Phase B is an authenticated consumer only; it is
             not an operational restore capability;
           - PostgreSQL restore-target mutation and controller activation are
