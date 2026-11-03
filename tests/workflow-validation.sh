@@ -8,6 +8,12 @@ trap 'rm -rf -- "${WORK_DIR}"' EXIT
 
 bash "${ROOT_DIR}/scripts/validate-workflows.sh" "${ACTIONLINT}"
 
+closure_guard="${ROOT_DIR}/.github/workflows/pp6-epic-closure-guard.yml"
+grep -Fq 'types: [closed]' "${closure_guard}"
+grep -Fq 'github.event.issue.number == 975' "${closure_guard}"
+grep -Fq "!contains(github.event.issue.labels.*.name, 'pp6-final-go')" "${closure_guard}"
+grep -Fq 'gh api --method PATCH "$issue_api" --field state=open' "${closure_guard}"
+
 duplicate_workflow="${WORK_DIR}/duplicate.yml"
 cat >"${duplicate_workflow}" <<'YAML'
 name: duplicate-key-regression

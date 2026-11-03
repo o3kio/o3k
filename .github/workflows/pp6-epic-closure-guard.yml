@@ -1,0 +1,29 @@
+name: PP.6 epic closure guard
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  require-final-acceptance:
+    if: >-
+      github.event.issue.number == 975 &&
+      !contains(github.event.issue.labels.*.name, 'pp6-final-go')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reopen PP.6 tracking issue without final acceptance label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          issue_api="repos/${GH_REPOSITORY}/issues/${ISSUE_NUMBER}"
+          gh api --method PATCH "$issue_api" --field state=open >/dev/null
+          gh api --method POST "${issue_api}/comments" \
+            --field body="Reopened automatically by the PP.6 closure guard. Issue #975 tracks final PP.6 acceptance; milestone PR merges and release publication do not establish that acceptance. Before closing, record the final owner GO, link the required operational and release evidence, confirm zero actionable BLOCKER/HIGH/MEDIUM findings, and apply the pp6-final-go label." \
+            >/dev/null
