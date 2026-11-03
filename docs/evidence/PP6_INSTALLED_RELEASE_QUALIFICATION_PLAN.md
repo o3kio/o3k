@@ -1,8 +1,10 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
 **Status:** executable plan and read-only infrastructure assessment; PP.6 is
-**BLOCKED**. **Assessment source:** protected `main`
-`901af47b306aa779aed72ef61ef25184fabf24eb` (2026-11-03).
+**BLOCKED**. **Document source:** protected `main`
+`901af47b306aa779aed72ef61ef25184fabf24eb` (2026-11-03). **Host-preflight
+source:** `bf04c8b61c95435df973502f35197bb74df22f78`; the qualification harness
+is unchanged between those revisions.
 **Authority:** #975 and #1086 retain their original acceptance criteria. A10.1
 migration publication remains disabled in production; A10 Phase C PostgreSQL
 target mutation and controller activation are not authorized. No PP.7 or Araf
@@ -70,7 +72,8 @@ fixtures; they do not assert that a production publisher ran.
 The harness is identical to protected `main`; its SHA-256 is
 `0c5332ae5e1f9cc483b73738d5dc1fdfd4d9dc9321503f2e9e0e883b5e6f844c`.
 `python3 -m unittest discover -s tests/pp6-qualification -p 'test_*.py' -v`
-passed 7/7 at the assessment source. Only help, unit, and read-only host
+passed 7/7 at `bf04c8b61c95435df973502f35197bb74df22f78`; the harness is
+unchanged at this document source. Only help, unit, and read-only host
 commands ran. No forwarding, firewall, network, guest, route, disk, service,
 package, or file changes were made.
 
