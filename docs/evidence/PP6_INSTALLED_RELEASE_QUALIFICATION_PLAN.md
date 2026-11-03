@@ -181,7 +181,7 @@ sudo install -m 0644 /tmp/cirros-0.6.3-x86_64-disk.img \
   /var/lib/o3k/image-cache/cirros-0.6.3-x86_64-disk.img
 sudo env O3K_RELEASE_BASE=file:///tmp/o3k-release \
   O3K_TESTLAB_IMAGE_CACHE_DIR=/var/lib/o3k/image-cache O3K_SKIP_ARAF=1 \
-  "/tmp/o3k-release/$TAG/install.sh"
+  sh "/tmp/o3k-release/$TAG/install.sh"
 ```
 
 Then capture both installations separately:
