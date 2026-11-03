@@ -161,12 +161,29 @@ sudo -E env O3K_A10_SOURCE_O3K=$PWD/target/a10-fixture/source-o3k \
   -- --ignored --nocapture
 ```
 
-Result: PENDING at the time of writing; the journey now exercises the
-authentic seven-entry fixture through the real publisher. See the PR for the
-final verdict; a PASS/FAIL update is posted there when the run completes.
-Run log: `/tmp/pp6-journey-fix-after.log` (background task `bash-murjq568`,
-launched after every other gate passed; binaries pre-built as the ubuntu
-user per `PP6_RC25_STAGE1_QUALIFICATION.md` lessons).
+Result: **PASS** (`test result: ok. 1 passed; 0 failed; 5 filtered out;
+finished in 6942.35s`, exit 0). Log: `/tmp/pp6-journey-fix-after.log`
+(sha256 `71433f168e11a3ce97b35dc415a4f3756ccc00cda49f8588e03980afb121fba0`),
+33 PASS lines: the signed `NEVER_RECOVERED` v1-to-v2 migration with restart
+exact-forward completion and idempotent replay, all 20 A10 publication
+crash/restart boundaries each retrying to `V2Complete` and replaying
+byte-identically, incomplete-generation consumer denial
+(`o3kd`, `o3k doctor/upgrade/rollback`, `o3k-compute`) at every v2-selector
+fault point including `v2-generation-verified-before-guard-release`, and the
+A10 direct compute invocation denied during D8 with the publisher resuming.
+The journey exercised the authentic seven-entry signed fixture (including
+`provenance.json`) through the real `recovery-migrate-v2` publisher CLI.
+Staged binaries (sha256):
+`target/a10-fixture/candidate-o3k`
+`44bdf05b8b50f26e67c5cc6c11c4d8f06fad59ce3a70b5bb77f9498b1061133d` (feature
+`a10-process-test-hooks`), `target/a10-fixture/source-o3k`
+`687725b6d7140833d398c97dde7a0c1d271c632484d0c5ab9274f988496e351d` (no
+feature), `target/debug/o3kd`
+`0028aaa26e8eda72380bd8f98517f664f69f3ea67b4c3dccdfd2fce553c7f63b` (feature
+`backup-test-hooks`), `target/debug/o3k-compute-bin`
+`9c1d6c987dd8877da084b68eb0b7443436436209c25c942bd8deb57d4556e331`,
+`target/debug/o3k-network-bin`
+`3a400986cf53312d736e4bd528bd31b116a5d747c7c3fbbf931a33b98e4a2cae`.
 
 ## NOT_RUN
 
