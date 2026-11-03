@@ -1,8 +1,10 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
 **Status:** executable plan and read-only infrastructure assessment; PP.6 is
-**BLOCKED**. **Assessment source:** protected `main`
-`bf04c8b61c95435df973502f35197bb74df22f78` (2026-11-03).
+**BLOCKED**. **Document source:** protected `main`
+`901af47b306aa779aed72ef61ef25184fabf24eb` (2026-11-03). **Host-preflight
+source:** `bf04c8b61c95435df973502f35197bb74df22f78`; the qualification harness
+is unchanged between those revisions.
 **Authority:** #975 and #1086 retain their original acceptance criteria. A10.1
 migration publication remains disabled in production; A10 Phase C PostgreSQL
 target mutation and controller activation are not authorized. No PP.7 or Araf
@@ -10,10 +12,15 @@ work is included.
 
 Published `v0.4.0-rc.25` (`42de13cee64a37d69e900fd4272ff5e849a328b8`) lacks
 #1206/#1207 and cannot exercise the corrected signed-release provenance path.
-An authenticated successor is required. `v0.4.0-rc.26` was unused when checked;
-only the owner may authorize its immutable tag, and publication must use the
-protected release workflow and its `release` environment approval. This plan
-does not create a tag, release, or publication authorization.
+The authenticated successor `v0.4.0-rc.26` now exists: tag object
+`b295a9a031ae2969497b6311ea87ee1ff421f676` points to protected merge commit
+`901af47b306aa779aed72ef61ef25184fabf24eb`; release workflow run 41642704256
+passed after `release` environment approval and published the prerelease at
+2026-11-03T13:37:42Z. Independent exact-tag verification passed the protected
+workflow/OIDC identity, Sigstore/Rekor proof, seven-entry signed digest
+manifest, archive and bundle integrity, source/version/upgrade-floor binding,
+glibc floor, and production A10 publisher exclusion. This is release evidence
+only; installed-release qualification remains blocked on the dedicated host.
 
 ## Evidence classes
 
@@ -39,11 +46,11 @@ fixtures; they do not assert that a production publisher ran.
 
 ## Critical dependencies and current verdict
 
-1. **B0 — governance:** reverse the non-acceptance closure of #975; #1086 and
-   the other PP.6 acceptance workstreams remain open.
-2. **B1 — candidate and host:** merge/review the rc.26 readiness change, obtain
-   explicit owner tag authorization, and provision the dedicated host below.
-   All E4/E5 lanes are blocked until both exist.
+1. **B0 — governance:** PASS; #975 was reopened after the non-acceptance
+   closure. #1086 and the other PP.6 acceptance workstreams remain open.
+2. **B1 — candidate and host:** the authenticated rc.26 candidate is PASS;
+   provision the dedicated host below. All E4/E5 lanes remain blocked until the
+   host exists.
 3. **B2 — custody and fencing:** provide approved offline signer custody,
    trust/revocation distribution, independently administered D7 fencing, and
    witnessed BMC/PDU procedures. Test keys cannot substitute for these.
@@ -65,7 +72,8 @@ fixtures; they do not assert that a production publisher ran.
 The harness is identical to protected `main`; its SHA-256 is
 `0c5332ae5e1f9cc483b73738d5dc1fdfd4d9dc9321503f2e9e0e883b5e6f844c`.
 `python3 -m unittest discover -s tests/pp6-qualification -p 'test_*.py' -v`
-passed 7/7 at the assessment source. Only help, unit, and read-only host
+passed 7/7 at `bf04c8b61c95435df973502f35197bb74df22f78`; the harness is
+unchanged at this document source. Only help, unit, and read-only host
 commands ran. No forwarding, firewall, network, guest, route, disk, service,
 package, or file changes were made.
 
@@ -212,7 +220,11 @@ never PASS.
 - **Require:** matching source/version/digest and hashes for installed `o3kd`,
   `o3k`, `o3k-compute`, and `o3k-network`; production `o3k` rejects
   `recovery-migrate-v2` and omits it from help.
-- **Current:** E4 NOT_RUN; no rc.26 artifact exists. Overall **BLOCKED**.
+- **Current:** authenticated release identity **PASS** at `v0.4.0-rc.26` /
+  `901af47b306aa779aed72ef61ef25184fabf24eb` (Sigstore/Rekor, seven-entry
+  digest manifest, bundle, glibc floor, publisher exclusion, independent
+  Debian rebuild parity). Installed E4 capture is NOT_RUN because no dedicated
+  host is available. Overall **BLOCKED**.
 
 ### Q2 — clean Debian 12 and Ubuntu 24.04 installation
 
@@ -222,8 +234,8 @@ never PASS.
 - **Require:** real systemd, separate ext4 mounts, expected units/accounts,
   successful idempotent reinstall behavior where supported, and no foreign
   resource mutation.
-- **Current:** E4 NOT_RUN; dedicated host and authenticated candidate absent.
-  Overall **BLOCKED**.
+- **Current:** E4 NOT_RUN; authenticated candidate exists, but the dedicated
+  host and clean guests are absent. Overall **BLOCKED**.
 
 ### Q3 — C1/C1.1 policy, trust, revocation, and re-anchor
 
@@ -358,9 +370,11 @@ tests/pp6-qualification/host-env.py destroy --run-id "$RUN_ID"
 
 ## Next actionable tasks
 
-1. Immediate infrastructure/owner task: preserve #975 open, review the rc.26
-   readiness PR, authorize the immutable tag only when ready, and provision the
-   dedicated host and custody/fencing resources above.
+1. Immediate infrastructure task: provision the dedicated qualification host,
+   approved custody/trust/revocation material, independent D7 fencing, and
+   authorized BMC/PDU control, then execute Q1–Q11 against the authenticated
+   rc.26 release. No installed or power-loss lane may be marked PASS before
+   that execution.
 2. Next implementation PR after an exact-head accepted restore protocol:
    #1085 PostgreSQL 16 fresh-empty-owned-target restore with pre-mutation
    rejections, D4 writer exclusion, canonical parity, interruption/negative
