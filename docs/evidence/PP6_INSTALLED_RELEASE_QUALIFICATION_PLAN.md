@@ -1,14 +1,20 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
 **Status:** executable plan and read-only infrastructure assessment; PP.6 is
-**BLOCKED**. **Document source:** protected `main`
-`901af47b306aa779aed72ef61ef25184fabf24eb` (2026-11-03). **Host-preflight
+**BLOCKED**. **Current status snapshot:** protected `main`
+`10f420f0874dcc6e37f125ac2fd19f3bcf845eaf` (2026-11-03), including PR #1210
+and its #975 closure guard. **Release source:** immutable `v0.4.0-rc.26`
+source `901af47b306aa779aed72ef61ef25184fabf24eb`; tag object
+`b295a9a031ae2969497b6311ea87ee1ff421f676`. **Earlier host-preflight
 source:** `bf04c8b61c95435df973502f35197bb74df22f78`; the qualification harness
-is unchanged between those revisions.
-**Authority:** #975 and #1086 retain their original acceptance criteria. A10.1
-migration publication remains disabled in production; A10 Phase C PostgreSQL
-target mutation and controller activation are not authorized. No PP.7 or Araf
-work is included.
+is unchanged at current protected main.
+**Authority:** #975 and #1086 retain their original acceptance criteria and
+remain open. Exact-head owner decisions on PRs #1192 and #1193 ACCEPT bounded
+A10.1 contract implementation and testing under SPEC-0050 §7.4; PR #1210
+integrates the #975 closure guard. These decisions do not authorize production
+publisher enablement, PostgreSQL restore-target mutation, controller
+activation, independent security acceptance, or PP.6 final GO. No PP.7 or
+Araf work is included.
 
 Published `v0.4.0-rc.25` (`42de13cee64a37d69e900fd4272ff5e849a328b8`) lacks
 #1206/#1207 and cannot exercise the corrected signed-release provenance path.
@@ -46,8 +52,9 @@ fixtures; they do not assert that a production publisher ran.
 
 ## Critical dependencies and current verdict
 
-1. **B0 — governance:** PASS; #975 was reopened after the non-acceptance
-   closure. #1086 and the other PP.6 acceptance workstreams remain open.
+1. **B0 — governance:** PASS; PR #1210 merged at
+   `10f420f0874dcc6e37f125ac2fd19f3bcf845eaf` with the #975 closure guard.
+   #975 and #1086 remain OPEN, as do the other PP.6 acceptance workstreams.
 2. **B1 — candidate and host:** the authenticated rc.26 candidate is PASS;
    provision the dedicated host below. All E4/E5 lanes remain blocked until the
    host exists.
@@ -87,6 +94,29 @@ package, or file changes were made.
 | Trusted digest-pinned Debian 12 / Ubuntu 24.04 images | No qualification images supplied; nothing to verify | NOT_RUN |
 | Authorized physical power control | No observable BMC/PDU authority or IPMI device; guest force-restart is not a substitute | **BLOCKED** |
 | Guest provision/install/recovery/power tests | Prohibited on this host and not attempted | NOT_RUN |
+
+### Current dedicated-host readiness result (2026-11-03)
+
+The currently available execution host is **NOT READY** for qualification and
+is not authorized for provisioning. This session is `ubuntu` (UID 1000), not
+root. `systemd-detect-virt` reports KVM and `systemctl is-system-running`
+reports `degraded`. The host has a pre-existing stopped libvirt guest
+`o3k-a10-systemd-qualification`, multiple unrelated libvirt/container
+networks, and unrelated routed interfaces. Host IPv4 `ip_forward` and IPv6
+`conf/all/forwarding` are both `1`. No guest, route, firewall, forwarding,
+service, package, or disk state was changed. Q1/Q2 provisioning was not
+attempted. The BMC/PDU and image-authentication prerequisites were not
+available for verification in this session.
+
+The exact external resource needed is the dedicated disposable qualification
+host specified below, with explicit root administrative access and exclusive
+authorization for the qualification run. Disable every IPv4/IPv6 forwarding
+control on that host before the read-only harness preflight; do not reuse this
+shared development runner. Supply authenticated official Debian 12 and Ubuntu
+24.04 cloud images with their vendor metadata/digests, and retain the host-only
+package/image fixtures and run evidence as specified. Until that resource and
+authorization are supplied, Q1/Q2 remain BLOCKED/NOT_RUN; the already verified
+rc.26 authenticity is not installed E4 evidence.
 
 ## Exact dedicated-host provisioning specification
 
@@ -223,8 +253,16 @@ never PASS.
 - **Current:** authenticated release identity **PASS** at `v0.4.0-rc.26` /
   `901af47b306aa779aed72ef61ef25184fabf24eb` (Sigstore/Rekor, seven-entry
   digest manifest, bundle, glibc floor, publisher exclusion, independent
-  Debian rebuild parity). Installed E4 capture is NOT_RUN because no dedicated
-  host is available. Overall **BLOCKED**.
+  Debian rebuild parity). Re-downloaded the immutable release assets and
+  independently reran `packaging/verify-release-sigstore.sh` for
+  `v0.4.0-rc.26` on 2026-11-03 with
+  `RELEASE_SOURCE_COMMIT=901af47b306aa779aed72ef61ef25184fabf24eb`;
+  Sigstore provenance
+  policy and digest checks passed. The archive SHA-256 is
+  `6d7d034aa2f5fdc8ad78dd237ec64605a8623d8042bf23ac420a678051a76685`.
+  Installed manifest/executable capture is NOT_RUN because no dedicated host
+  is available. Q1 authenticity is PASS; Q1 installed identity is NOT_RUN and
+  overall installed Q1 remains BLOCKED.
 
 ### Q2 — clean Debian 12 and Ubuntu 24.04 installation
 
@@ -375,8 +413,11 @@ tests/pp6-qualification/host-env.py destroy --run-id "$RUN_ID"
    authorized BMC/PDU control, then execute Q1–Q11 against the authenticated
    rc.26 release. No installed or power-loss lane may be marked PASS before
    that execution.
-2. Next implementation PR after an exact-head accepted restore protocol:
-   #1085 PostgreSQL 16 fresh-empty-owned-target restore with pre-mutation
-   rejections, D4 writer exclusion, canonical parity, interruption/negative
-   coverage, and disposable target evidence. This does not authorize Phase C
-   activation.
+2. Next safe Phase B/C engineering slice: add selected-v2 signed-journal
+   negative/restart and protected-filesystem publication-failure evidence,
+   while extending only read-only restore preflight or validation code. The
+   SPEC-0050 contract is accepted; no further decision on that same contract is
+   pending. Do not mutate a PostgreSQL target until a distinct disposable
+   Phase C mutation authorization and every listed pre-mutation prerequisite
+   are present. Any inactive materialization must stop at `INACTIVE_VERIFIED`
+   and cannot satisfy the original #1086/#975 activation scope.
