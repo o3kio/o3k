@@ -44,6 +44,9 @@ additionally have rejected the authentic 7-entry manifest (it includes
   tolerates extra signed assets;
 - `parse_release_sums` is unchanged and remains used only for the installed
   bundle `SHA256SUMS` (strict `./` format).
+- The A10.1 migration publisher uses this same strict signed-manifest parser
+  for both source and candidate provenance, and requires the required assets
+  while permitting additional signed assets such as `provenance.json`.
 
 ## Harness correction (not a product change)
 
@@ -126,11 +129,20 @@ part of this fix, not a product change.)
   --all-features`: all suites ok, 0 failed (workspace run repeated after the
   test-file edit).
 
+## PR review follow-up
+
+Review found that the migration publisher had two separate exact-six-asset
+checks for source and candidate releases. Both now share the signed-manifest
+parser and permit authenticated extra entries; the source/candidate realfs
+fixture includes `provenance.json` to cover that case. After this follow-up,
+`cargo fmt --all -- --check`, workspace Clippy, and
+`cargo test --workspace --all-features` pass. The latter does not run the
+ignored root/private-mount-namespace realfs migration test, so the fixture
+change is compiled but that host gate has not been rerun here.
+
 ## NOT_RUN
 
 - Installed-release / production qualification of the A10.1 path (this is
   source-built fixture evidence with a test-only signer).
-- `recovery_migration_publisher.rs`'s similar strict 6-asset checks
-  (~lines 1400, 1548): flagged follow-up, out of scope for #1204.
 - Consumer-deny latency was measured only in this unoptimized debug build; a
   release-profile installed host hashes far faster.

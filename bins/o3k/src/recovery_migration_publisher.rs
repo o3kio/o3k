@@ -1358,31 +1358,10 @@ fn verify_target_release_provenance_reader<R: std::io::Read>(
     artifact_digest: &str,
 ) -> Result<Vec<u8>, MigrationError> {
     use flate2::read::GzDecoder;
-    use std::collections::BTreeMap;
-
     verify_release_signature(digests, signature, RELEASE_VERIFY_KEY)?;
 
-    let mut signed_assets = BTreeMap::new();
-    for line in std::str::from_utf8(digests)
-        .map_err(|_| reject("release digest statement is not UTF-8"))?
-        .lines()
-    {
-        let mut columns = line.split_whitespace();
-        let (Some(digest), Some(path)) = (columns.next(), columns.next()) else {
-            return Err(reject("release digest statement is malformed"));
-        };
-        if columns.next().is_some()
-            || digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            || signed_assets
-                .insert(path.to_owned(), digest.to_owned())
-                .is_some()
-        {
-            return Err(reject("release digest statement has invalid entries"));
-        }
-    }
+    let signed_assets = crate::recovery_release_inventory::parse_signed_release_digests(digests)
+        .map_err(|_| reject("release digest statement has invalid entries"))?;
     let version = release
         .o3k_version
         .strip_prefix('v')
@@ -1397,10 +1376,9 @@ fn verify_target_release_provenance_reader<R: std::io::Read>(
         format!("{bundle}/SHA256SUMS"),
         format!("{bundle}/sbom.spdx.json"),
     ];
-    if signed_assets.len() != required.len()
-        || required
-            .iter()
-            .any(|name| !signed_assets.contains_key(name))
+    if required
+        .iter()
+        .any(|name| !signed_assets.contains_key(name))
     {
         return Err(reject(
             "release digest statement has an unexpected asset set",
@@ -1505,32 +1483,10 @@ fn verify_source_release_provenance_bytes(
     installed_manifest: &[u8],
     installed_sums: &[u8],
 ) -> Result<SourceReleaseProvenance, MigrationError> {
-    use std::collections::BTreeMap;
-
     verify_release_signature(&digests, &signature, RELEASE_VERIFY_KEY)?;
-    let mut signed_assets = BTreeMap::new();
-    for line in std::str::from_utf8(&digests)
-        .map_err(|_| reject("source release digest statement is not UTF-8"))?
-        .lines()
-    {
-        let mut columns = line.split_whitespace();
-        let (Some(digest), Some(path)) = (columns.next(), columns.next()) else {
-            return Err(reject("source release digest statement is malformed"));
-        };
-        if columns.next().is_some()
-            || digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            || signed_assets
-                .insert(path.to_owned(), digest.to_owned())
-                .is_some()
-        {
-            return Err(reject(
-                "source release digest statement has invalid entries",
-            ));
-        }
-    }
+    let signed_assets =
+        crate::recovery_release_inventory::parse_signed_release_digests(&digests)
+            .map_err(|_| reject("source release digest statement has invalid entries"))?;
     let version = release
         .o3k_version
         .strip_prefix('v')
@@ -1545,10 +1501,9 @@ fn verify_source_release_provenance_bytes(
         format!("{bundle}/SHA256SUMS"),
         format!("{bundle}/sbom.spdx.json"),
     ];
-    if signed_assets.len() != required.len()
-        || required
-            .iter()
-            .any(|name| !signed_assets.contains_key(name))
+    if required
+        .iter()
+        .any(|name| !signed_assets.contains_key(name))
     {
         return Err(reject("source release has an unexpected signed asset set"));
     }
@@ -2928,5 +2883,474 @@ mod publication_tests {
                 PublicationPosition::Deny
             );
         }
+    }
+}
+
+/// Regression coverage for authentic signed `release-digests.txt` manifests.
+///
+/// `packaging/make-provenance-sigstore.sh` signs seven bare-name entries
+/// (the six required assets plus `provenance.json`), so both provenance
+/// verifiers must accept that exact layout. These tests run only with the
+/// test-only signer (`a10-process-test-hooks`); the private key material is
+/// constructed in memory and never written to disk.
+#[cfg(all(test, feature = "a10-process-test-hooks"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod signed_release_provenance_tests {
+    use super::*;
+    use openssl::{pkey::PKey, sign::Signer};
+
+    const TEST_VERSION: &str = "v0.4.1-a10";
+    const BUNDLE: &str = "o3k-0.4.1-a10";
+    const ARCHIVE_NAME: &str = "o3k-0.4.1-a10-linux-x86_64.tar.gz";
+    const REQUIRED_NAMES: [&str; 6] = [
+        "install.sh",
+        ARCHIVE_NAME,
+        "o3k-0.4.1-a10-linux-x86_64.tar.gz.sha256",
+        "o3k-0.4.1-a10/manifest.json",
+        "o3k-0.4.1-a10/SHA256SUMS",
+        "o3k-0.4.1-a10/sbom.spdx.json",
+    ];
+
+    /// The test-only Ed25519 release signer: PKCS#8 PrivateKeyInfo for the
+    /// published fixture seed. Mirrors `a10_release_key` in
+    /// `tests/pp6_c1_reanchor_realfs.rs`; never persisted.
+    fn fixture_release_key() -> PKey<openssl::pkey::Private> {
+        let mut der = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ];
+        der.extend_from_slice(&[0xA3; 32]);
+        PKey::private_key_from_der(&der).expect("fixture Ed25519 PKCS#8 key")
+    }
+
+    fn fixture_signature(message: &[u8]) -> Vec<u8> {
+        let mut signer =
+            Signer::new_without_digest(&fixture_release_key()).expect("fixture release signer");
+        signer
+            .sign_oneshot_to_vec(message)
+            .expect("fixture release signature")
+    }
+
+    fn fixture_release(artifact_digest: &str) -> BackupReleaseIdentity {
+        BackupReleaseIdentity {
+            o3k_version: TEST_VERSION.to_owned(),
+            source_sha: "a3".repeat(20),
+            release_artifact_sha256: artifact_digest.to_owned(),
+            profile_id: "o3k-small-edge-v1".to_owned(),
+            schema_version: 1,
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// Bundle manifest exactly as released: the tarball digest is added only
+    /// by `manifest_with_verified_artifact` at install time.
+    fn fixture_bundle_manifest() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "version": TEST_VERSION,
+            "profile_id": "o3k-small-edge-v1",
+            "source_commit": "a3".repeat(20),
+            "schema_version": "1",
+        }))
+        .expect("fixture bundle manifest")
+    }
+
+    /// The seven authentic signed entries, including the extra
+    /// `provenance.json` asset from `packaging/make-provenance-sigstore.sh`.
+    fn authentic_entries(
+        archive_digest: &str,
+        raw_manifest: &[u8],
+        sums: &[u8],
+    ) -> Vec<(String, String)> {
+        let mut entries = vec![
+            ("install.sh".to_owned(), sha256_hex(b"test-only installer")),
+            (ARCHIVE_NAME.to_owned(), archive_digest.to_owned()),
+            (
+                format!("{ARCHIVE_NAME}.sha256"),
+                sha256_hex(archive_digest.as_bytes()),
+            ),
+            (format!("{BUNDLE}/manifest.json"), sha256_hex(raw_manifest)),
+            (format!("{BUNDLE}/SHA256SUMS"), sha256_hex(sums)),
+            (
+                format!("{BUNDLE}/sbom.spdx.json"),
+                sha256_hex(b"test-only sbom"),
+            ),
+            ("provenance.json".to_owned(), sha256_hex(b"test provenance")),
+        ];
+        entries.sort();
+        entries
+    }
+
+    fn digest_bytes(entries: &[(String, String)]) -> Vec<u8> {
+        entries
+            .iter()
+            .map(|(name, digest)| format!("{digest}  {name}\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn candidate_archive(raw_manifest: &[u8], sums: &[u8]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut archive = tar::Builder::new(encoder);
+        for (name, bytes) in [
+            (format!("{BUNDLE}/manifest.json"), raw_manifest),
+            (format!("{BUNDLE}/SHA256SUMS"), sums),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, name, bytes)
+                .expect("append candidate archive entry");
+        }
+        archive.finish().expect("finish candidate archive");
+        archive
+            .into_inner()
+            .expect("candidate archive encoder")
+            .finish()
+            .expect("candidate archive gzip finish")
+    }
+
+    struct AuthenticFixture {
+        release: BackupReleaseIdentity,
+        artifact_digest: String,
+        raw_manifest: Vec<u8>,
+        sums: Vec<u8>,
+        archive: Vec<u8>,
+        digests: Vec<u8>,
+        signature: Vec<u8>,
+        installed_manifest: Vec<u8>,
+    }
+
+    fn authentic_fixture() -> AuthenticFixture {
+        let raw_manifest = fixture_bundle_manifest();
+        let sums = b"fixture checksum inventory\n".to_vec();
+        let archive = candidate_archive(&raw_manifest, &sums);
+        let artifact_digest = sha256_hex(&archive);
+        let release = fixture_release(&artifact_digest);
+        let digests = digest_bytes(&authentic_entries(&artifact_digest, &raw_manifest, &sums));
+        let signature = fixture_signature(&digests);
+        let installed_manifest = crate::upgrade::release_identity::manifest_with_verified_artifact(
+            &raw_manifest,
+            &artifact_digest,
+        )
+        .expect("augment installed manifest");
+        AuthenticFixture {
+            release,
+            artifact_digest,
+            raw_manifest,
+            sums,
+            archive,
+            digests,
+            signature,
+            installed_manifest,
+        }
+    }
+
+    fn verify_target(fixture: &AuthenticFixture) -> Result<Vec<u8>, MigrationError> {
+        verify_target_release_provenance_reader(
+            &fixture.archive[..],
+            &fixture.digests,
+            &fixture.signature,
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.artifact_digest,
+        )
+    }
+
+    fn verify_source(
+        fixture: &AuthenticFixture,
+    ) -> Result<SourceReleaseProvenance, MigrationError> {
+        verify_source_release_provenance_bytes(
+            fixture.raw_manifest.clone(),
+            fixture.digests.clone(),
+            fixture.signature.clone(),
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.sums,
+        )
+    }
+
+    #[test]
+    fn authentic_seven_entry_signed_manifest_is_accepted_by_both_verifiers() {
+        let fixture = authentic_fixture();
+        let verified_sums = verify_target(&fixture)
+            .expect("authentic seven-entry manifest must authenticate the candidate");
+        assert_eq!(verified_sums, fixture.sums);
+        let provenance = verify_source(&fixture)
+            .expect("authentic seven-entry manifest must authenticate source");
+        assert_eq!(provenance.manifest, fixture.raw_manifest);
+        assert_eq!(provenance.digests, fixture.digests);
+        assert_eq!(provenance.signature, fixture.signature);
+
+        // Exact retry: byte-identical re-verification of the same inputs
+        // retains the original authenticated identities.
+        let retry_sums = verify_target(&fixture).expect("exact target retry re-verifies");
+        assert_eq!(retry_sums, verified_sums);
+        let retry_provenance = verify_source(&fixture).expect("exact source retry re-verifies");
+        assert_eq!(retry_provenance.manifest, provenance.manifest);
+        assert_eq!(retry_provenance.digests, provenance.digests);
+        assert_eq!(retry_provenance.signature, provenance.signature);
+    }
+
+    #[test]
+    fn each_missing_mandatory_signed_asset_is_rejected() {
+        let fixture = authentic_fixture();
+        let entries = authentic_entries(
+            &fixture.artifact_digest,
+            &fixture.raw_manifest,
+            &fixture.sums,
+        );
+        for missing in REQUIRED_NAMES {
+            let reduced: Vec<(String, String)> = entries
+                .iter()
+                .filter(|(name, _)| name != missing)
+                .cloned()
+                .collect();
+            let digests = digest_bytes(&reduced);
+            let signature = fixture_signature(&digests);
+            let target = verify_target_release_provenance_reader(
+                &fixture.archive[..],
+                &digests,
+                &signature,
+                &fixture.release,
+                &fixture.installed_manifest,
+                &fixture.artifact_digest,
+            );
+            assert!(
+                matches!(target, Err(MigrationError::Rejected(_))),
+                "missing {missing} must reject the candidate"
+            );
+            let source = verify_source_release_provenance_bytes(
+                fixture.raw_manifest.clone(),
+                digests,
+                signature,
+                &fixture.release,
+                &fixture.installed_manifest,
+                &fixture.sums,
+            );
+            assert!(
+                matches!(source, Err(MigrationError::Rejected(_))),
+                "missing {missing} must reject the source release"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_archive_digest_mismatch_is_rejected() {
+        let fixture = authentic_fixture();
+        let other_digest = sha256_hex(b"not the candidate archive");
+        let digests = digest_bytes(&authentic_entries(
+            &other_digest,
+            &fixture.raw_manifest,
+            &fixture.sums,
+        ));
+        let signature = fixture_signature(&digests);
+        let target = verify_target_release_provenance_reader(
+            &fixture.archive[..],
+            &digests,
+            &signature,
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.artifact_digest,
+        );
+        assert!(
+            matches!(target, Err(MigrationError::Rejected(_))),
+            "signed archive digest differing from the candidate must reject"
+        );
+        let source = verify_source_release_provenance_bytes(
+            fixture.raw_manifest.clone(),
+            digests,
+            signature,
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.sums,
+        );
+        assert!(
+            matches!(source, Err(MigrationError::Rejected(_))),
+            "signed archive digest differing from the installed release must reject"
+        );
+    }
+
+    #[test]
+    fn archive_bytes_disagreeing_with_signed_digests_are_rejected() {
+        let fixture = authentic_fixture();
+        // Authentic signed manifest, but the archived SHA256SUMS bytes were
+        // substituted after signing.
+        let tampered_archive = candidate_archive(&fixture.raw_manifest, b"tampered sums\n");
+        let target = verify_target_release_provenance_reader(
+            &tampered_archive[..],
+            &fixture.digests,
+            &fixture.signature,
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.artifact_digest,
+        );
+        assert!(
+            matches!(target, Err(MigrationError::Rejected(_))),
+            "archive bytes not named by the signed digest must reject"
+        );
+    }
+
+    #[test]
+    fn installed_manifest_or_checksum_inventory_mismatch_is_rejected() {
+        let fixture = authentic_fixture();
+        let other_digest = sha256_hex(b"another artifact");
+        let different_installed =
+            crate::upgrade::release_identity::manifest_with_verified_artifact(
+                &fixture.raw_manifest,
+                &other_digest,
+            )
+            .expect("alternate installed manifest");
+        let target = verify_target_release_provenance_reader(
+            &fixture.archive[..],
+            &fixture.digests,
+            &fixture.signature,
+            &fixture.release,
+            &different_installed,
+            &fixture.artifact_digest,
+        );
+        assert!(
+            matches!(target, Err(MigrationError::Rejected(_))),
+            "installed manifest not derived from the signed bundle manifest must reject"
+        );
+        let source = verify_source_release_provenance_bytes(
+            fixture.raw_manifest.clone(),
+            fixture.digests.clone(),
+            fixture.signature.clone(),
+            &fixture.release,
+            &different_installed,
+            &fixture.sums,
+        );
+        assert!(
+            matches!(source, Err(MigrationError::Rejected(_))),
+            "installed source manifest differing from signed bytes must reject"
+        );
+        let source = verify_source_release_provenance_bytes(
+            fixture.raw_manifest.clone(),
+            fixture.digests.clone(),
+            fixture.signature.clone(),
+            &fixture.release,
+            &fixture.installed_manifest,
+            b"installed sums differ\n",
+        );
+        assert!(
+            matches!(source, Err(MigrationError::Rejected(_))),
+            "installed checksum inventory differing from signed bytes must reject"
+        );
+    }
+
+    #[test]
+    fn duplicate_malformed_or_unsafe_path_entries_are_rejected() {
+        let fixture = authentic_fixture();
+        let base = String::from_utf8(fixture.digests.clone()).expect("authentic digest text");
+        let installer_digest = sha256_hex(b"test-only installer");
+        let short = &installer_digest[..63];
+        let uppercase = installer_digest.to_uppercase();
+        let variants = [
+            // Duplicate signed name.
+            format!("{base}{installer_digest}  install.sh\n"),
+            // Digest too short.
+            base.replace(
+                &format!("{installer_digest}  install.sh"),
+                &format!("{short}  install.sh"),
+            ),
+            // Uppercase digest.
+            base.replace(
+                &format!("{installer_digest}  install.sh"),
+                &format!("{uppercase}  install.sh"),
+            ),
+            // Extra column.
+            format!(
+                "{base}{}  provenance.json trailing\n",
+                fixture.artifact_digest
+            ),
+            // Absolute path.
+            format!("{base}{}  /install.sh\n", fixture.artifact_digest),
+            // ./-prefixed path.
+            format!("{base}{}  ./install.sh\n", fixture.artifact_digest),
+            // Parent component.
+            format!(
+                "{base}{}  o3k-0.4.1-a10/../manifest.json\n",
+                fixture.artifact_digest
+            ),
+            // Empty path component.
+            format!(
+                "{base}{}  o3k-0.4.1-a10//manifest.json\n",
+                fixture.artifact_digest
+            ),
+        ];
+        for variant in variants {
+            let digests = variant.into_bytes();
+            let signature = fixture_signature(&digests);
+            let target = verify_target_release_provenance_reader(
+                &fixture.archive[..],
+                &digests,
+                &signature,
+                &fixture.release,
+                &fixture.installed_manifest,
+                &fixture.artifact_digest,
+            );
+            assert!(
+                matches!(target, Err(MigrationError::Rejected(_))),
+                "malformed signed manifest must reject the candidate: {digest_text}",
+                digest_text = String::from_utf8_lossy(&digests),
+            );
+            let source = verify_source_release_provenance_bytes(
+                fixture.raw_manifest.clone(),
+                digests,
+                signature,
+                &fixture.release,
+                &fixture.installed_manifest,
+                &fixture.sums,
+            );
+            assert!(
+                matches!(source, Err(MigrationError::Rejected(_))),
+                "malformed signed manifest must reject the source release"
+            );
+        }
+    }
+
+    #[test]
+    fn tampered_or_wrongly_signed_manifest_is_rejected() {
+        let fixture = authentic_fixture();
+        // Well-formed, authentically signed, then tampered: the signature no
+        // longer matches the exact digest bytes.
+        let mut tampered = fixture.digests.clone();
+        let last = tampered.len() - 1;
+        tampered[last] = if tampered[last] == b'\n' { b'X' } else { b'\n' };
+        let target = verify_target_release_provenance_reader(
+            &fixture.archive[..],
+            &tampered,
+            &fixture.signature,
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.artifact_digest,
+        );
+        assert!(
+            matches!(target, Err(MigrationError::Rejected(_))),
+            "tampered digest bytes must fail signature verification"
+        );
+        // Authentic bytes signed by an unpinned key must not authenticate.
+        let wrong_key = PKey::generate_ed25519().expect("unpinned signer");
+        let mut signer = Signer::new_without_digest(&wrong_key).expect("unpinned signer");
+        let wrong_signature = signer
+            .sign_oneshot_to_vec(&fixture.digests)
+            .expect("unpinned signature");
+        let source = verify_source_release_provenance_bytes(
+            fixture.raw_manifest.clone(),
+            fixture.digests.clone(),
+            wrong_signature,
+            &fixture.release,
+            &fixture.installed_manifest,
+            &fixture.sums,
+        );
+        assert!(
+            matches!(source, Err(MigrationError::Rejected(_))),
+            "signature from an unpinned key must reject"
+        );
     }
 }
