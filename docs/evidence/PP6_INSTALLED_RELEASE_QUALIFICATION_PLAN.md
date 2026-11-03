@@ -56,16 +56,21 @@ fixtures; they do not assert that a production publisher ran.
    `10f420f0874dcc6e37f125ac2fd19f3bcf845eaf` with the #975 closure guard.
    #975 and #1086 remain OPEN, as do the other PP.6 acceptance workstreams.
 2. **B1 — candidate and host:** the authenticated rc.26 candidate is PASS;
-   provision the dedicated host below. All E4/E5 lanes remain blocked until the
-   host exists.
+   provision the dedicated host below. Guest-based E4 lanes remain blocked
+   until the isolated host, authenticated images, and fixtures are ready. E5
+   additionally requires authorized physical power control; its absence does
+   not block an otherwise safe E4 claim.
 3. **B2 — custody and fencing:** provide approved offline signer custody,
-   trust/revocation distribution, independently administered D7 fencing, and
-   witnessed BMC/PDU procedures. Test keys cannot substitute for these.
+   trust/revocation distribution, and independently administered D7 fencing
+   for the recovery lanes that require them. Witnessed BMC/PDU procedures are
+   required for E5 only, not for independent E4 qualification. Test keys
+   cannot substitute for production custody.
 4. **B3 — restore implementation:** complete the accepted SQLite and
    PostgreSQL 16 restore paths, D4 source/target writer exclusion, canonical
    parity, interruption handling, and foreign-state negatives.
-5. **B4 — activation decision:** preserve original activated recovery unless
-   the owner explicitly amends #975/#1086. D3 identity/credential/lease/epoch
+5. **B4 — activation scope:** original activated recovery remains controlling;
+   an amendment would require explicit owner acceptance. D3
+   identity/credential/lease/epoch
    invalidation and D8 boot-bound handoff remain required.
    `INACTIVE_VERIFIED` does not satisfy activation.
 6. **B5 — remaining operations:** PKI lifecycle, exact-artifact
@@ -92,7 +97,7 @@ package, or file changes were made.
 | Forwarding disabled everywhere | IPv4 `ip_forward=1`; all inspected IPv4/IPv6 interface forwarding controls are `1` | **FAIL** |
 | Dedicated, unrelated-workload-free host | Running `o3k-a10-systemd-qualification` VM, other libvirt networks, Docker containers, nginx, PostgreSQL, NFS and dnsmasq | **FAIL** |
 | Trusted digest-pinned Debian 12 / Ubuntu 24.04 images | No qualification images supplied; nothing to verify | NOT_RUN |
-| Authorized physical power control | No observable BMC/PDU authority or IPMI device; guest force-restart is not a substitute | **BLOCKED** |
+| Authorized physical power control | No observable BMC/PDU authority or IPMI device; guest force-restart is not a substitute | **BLOCKED (E5 only; not an E4 gate)** |
 | Guest provision/install/recovery/power tests | Prohibited on this host and not attempted | NOT_RUN |
 
 ### Current dedicated-host readiness result (2026-11-03)
@@ -105,8 +110,8 @@ reports `degraded`. The host has a pre-existing stopped libvirt guest
 networks, and unrelated routed interfaces. Host IPv4 `ip_forward` and IPv6
 `conf/all/forwarding` are both `1`. No guest, route, firewall, forwarding,
 service, package, or disk state was changed. Q1/Q2 provisioning was not
-attempted. The BMC/PDU and image-authentication prerequisites were not
-available for verification in this session.
+attempted. The BMC/PDU prerequisite for E5 and authenticated guest-image
+prerequisite for E4 were not available for verification in this session.
 
 The exact external resource needed is the dedicated disposable qualification
 host specified below, with explicit root administrative access and exclusive
@@ -122,8 +127,9 @@ rc.26 authenticity is not installed E4 evidence.
 
 This is a provisioning request, not an observed host or a support claim:
 
-- Disposable bare-metal x86_64 host, no nested-virtualization substitute for
-  physical power tests; hardware AMD-V/Intel VT-x with EPT/NPT, KVM and libvirt.
+- Disposable dedicated x86_64 KVM/libvirt host with hardware AMD-V/Intel VT-x
+  and EPT/NPT. Bare metal is required for E5; nested virtualization is not a
+  substitute for physical power tests.
 - Minimum 8 physical cores (16 recommended), 32 GiB RAM, 256 GiB OS storage;
   512 GiB or more recommended for images, run disks, and retained evidence.
 - Debian 12 or Ubuntu 24.04 host with real systemd, persistent journald,
@@ -158,8 +164,10 @@ This is a provisioning request, not an observed host or a support claim:
   `vdb` recovery-state and 4 GiB `vdc` journal qcow2 devices, formatted ext4
   and mounted at `/var/lib/o3k/state` and `/var/lib/o3k/journal`. Do not replace
   these with bind mounts, overlayfs, tmpfs, or a shared filesystem.
-- Independently administered BMC with Redfish or an authenticated managed PDU
-  outlet, explicitly authorized for physical power cuts of only this host.
+- For E5 only: independently administered BMC with Redfish or an authenticated
+  managed PDU outlet, explicitly authorized for physical power cuts of only
+  this host. Its absence does not block E4 when the E4 host/image/safety
+  prerequisites are satisfied.
   Record device identity, source serial, operator, authorization, UTC events,
   storage cache/flush configuration, and console/evidence collector. Verify the
   host remains off until the authorized restart.
