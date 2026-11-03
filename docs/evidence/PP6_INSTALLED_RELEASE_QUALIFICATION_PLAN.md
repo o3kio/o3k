@@ -102,6 +102,12 @@ This is a provisioning request, not an observed host or a support claim:
   authenticated vendor metadata. Store as regular, non-symlink, read-only files
   under `/srv/qualification`; record vendor URL, metadata, digest, and local
   file digest.
+- A host-only APT package snapshot/repository reachable over the run bridge,
+  with signed vendor metadata and every package required by the tagged
+  installer. Also stage the pinned CirrOS 0.6.3 image with SHA-256
+  `7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b`.
+  Guests have no direct outbound access; dependencies and fixtures arrive only
+  through this host-only repository and run-scoped SSH.
 - The harness creates, per guest, a 24 GiB root overlay plus distinct 4 GiB
   `vdb` recovery-state and 4 GiB `vdc` journal qcow2 devices, formatted ext4
   and mounted at `/var/lib/o3k/state` and `/var/lib/o3k/journal`. Do not replace
@@ -142,13 +148,37 @@ O3K_PP6_QUAL_ROOT=/var/lib/o3k-pp6-qualification \
   --ubuntu-sha256 <authenticated-ubuntu-image-sha256>
 ```
 
-Install only the byte-identical tagged installer on each clean guest, then
-capture both installations separately:
+The run network has no external forwarding. On the host, stage the already
+verified assets and pinned guest fixture over run-scoped SSH. Repeat with
+`GUEST=ubuntu2404`; use the byte-identical tagged installer against the staged
+`file://` directory, not an Internet URL. This is an explicit isolated
+qualification override, not a production channel change:
 
 ```bash
-# Inside each guest, only after the release verification above:
-curl -sfL "https://github.com/o3kio/o3k/releases/download/$TAG/install.sh" | sudo sh -
+export QUAL_ROOT=/var/lib/o3k-pp6-qualification
+export GUEST=debian12
+GUEST_IP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["guests"][sys.argv[2]]["ip"])' \
+  "$QUAL_ROOT/runs/$RUN_ID/.o3k-pp6-owned.json" "$GUEST")"
+SSH_OPTS=(-i "$QUAL_ROOT/runs/$RUN_ID/private/$GUEST/id_ed25519" \
+  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=$QUAL_ROOT/runs/$RUN_ID/private/$GUEST/known_hosts")
+ssh "${SSH_OPTS[@]}" "o3kqual@$GUEST_IP" "mkdir -p /tmp/o3k-release/$TAG"
+scp "${SSH_OPTS[@]}" -r release/. "o3kqual@$GUEST_IP:/tmp/o3k-release/$TAG/"
+scp "${SSH_OPTS[@]}" /srv/qualification/cirros-0.6.3-x86_64-disk.img \
+  "o3kqual@$GUEST_IP:/tmp/"
 
+# Inside the guest, after configuring only the host-only APT snapshot:
+sudo install -d -m 0755 /var/lib/o3k/image-cache
+sudo install -m 0644 /tmp/cirros-0.6.3-x86_64-disk.img \
+  /var/lib/o3k/image-cache/cirros-0.6.3-x86_64-disk.img
+sudo env O3K_RELEASE_BASE=file:///tmp/o3k-release \
+  O3K_TESTLAB_IMAGE_CACHE_DIR=/var/lib/o3k/image-cache O3K_SKIP_ARAF=1 \
+  "/tmp/o3k-release/$TAG/install.sh"
+```
+
+Then capture both installations separately:
+
+```bash
 tests/pp6-qualification/host-env.py capture-installation \
   --run-id "$RUN_ID" --guest debian12 \
   --source-sha "$SOURCE_SHA" --version "${TAG#v}" \
