@@ -197,4 +197,13 @@ feature), `target/debug/o3kd`
 - Host power-loss evidence (guest force-restart is not host power-loss
   evidence); the shared runner has forwarding enabled, so the PR #1200
   guest harness refuses provisioning here.
-- Protected CI on the pushed head (pending this PR).
+## Protected CI
+
+PR #1207 head `a90bd939`: all checks PASS (2026-11-03) — run
+[41566837859](https://github.com/o3kio/o3k/actions/runs/41566837859)
+(`rust`, `cargo-test`, Tempest portable preflight Gate A, PostgreSQL WAL
+exhaustion and recovery, araf-p2-convergence, installer-negative,
+oci-identity-smoke, supply-chain, Mock Cinder Component Test), run
+[41566838055](https://github.com/o3kio/o3k/actions/runs/41566838055) and run
+[41566838137](https://github.com/o3kio/o3k/actions/runs/41566838137)
+(postgres-tablespace-pressure).

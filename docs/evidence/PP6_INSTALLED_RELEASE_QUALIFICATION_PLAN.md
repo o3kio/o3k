@@ -56,7 +56,9 @@ changes were made): `/proc/sys/net/ipv4/ip_forward`,
 ## Plan
 
 1. **This PR** lands the publisher provenance compatibility fix with
-   source/unit evidence only (see `PP6_PUBLISHER_PROVENANCE_COMPAT.md`).
+   source/unit evidence and the real-filesystem A10 process journey (see
+   `PP6_PUBLISHER_PROVENANCE_COMPAT.md`); it is not installed-release,
+   production, or power-loss evidence.
 2. **Owner-authorized successor candidate:** after protected merge, create
    `v0.4.0-rc.26` (or the owner-chosen successor) only through the protected
    release workflow. Never reuse or move rc.25. The Sigstore-signed bundle
