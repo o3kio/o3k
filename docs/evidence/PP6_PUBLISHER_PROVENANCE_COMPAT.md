@@ -164,6 +164,9 @@ sudo -E env O3K_A10_SOURCE_O3K=$PWD/target/a10-fixture/source-o3k \
 Result: PENDING at the time of writing; the journey now exercises the
 authentic seven-entry fixture through the real publisher. See the PR for the
 final verdict; a PASS/FAIL update is posted there when the run completes.
+Run log: `/tmp/pp6-journey-fix-after.log` (background task `bash-murjq568`,
+launched after every other gate passed; binaries pre-built as the ubuntu
+user per `PP6_RC25_STAGE1_QUALIFICATION.md` lessons).
 
 ## NOT_RUN
 

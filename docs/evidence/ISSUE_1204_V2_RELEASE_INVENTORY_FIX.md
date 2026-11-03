@@ -134,11 +134,14 @@ part of this fix, not a product change.)
 Review found that the migration publisher had two separate exact-six-asset
 checks for source and candidate releases. Both now share the signed-manifest
 parser and permit authenticated extra entries; the source/candidate realfs
-fixture includes `provenance.json` to cover that case. After this follow-up,
+fixture includes `provenance.json` to cover that case. This follow-up is PR
+#1207 (`fix/pp6-publisher-provenance-compat`); after it,
 `cargo fmt --all -- --check`, workspace Clippy, and
-`cargo test --workspace --all-features` pass. The latter does not run the
-ignored root/private-mount-namespace realfs migration test, so the fixture
-change is compiled but that host gate has not been rerun here.
+`cargo test --workspace --all-features` pass, and the ignored
+root/private-mount-namespace realfs migration test was rerun against the
+authentic seven-entry fixture — see
+[`PP6_PUBLISHER_PROVENANCE_COMPAT.md`](PP6_PUBLISHER_PROVENANCE_COMPAT.md)
+for the journey verdict.
 
 ## NOT_RUN
 
