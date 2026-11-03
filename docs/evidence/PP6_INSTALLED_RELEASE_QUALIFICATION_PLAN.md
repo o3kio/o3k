@@ -98,10 +98,18 @@ This is a provisioning request, not an observed host or a support claim:
 - Every IPv4/IPv6 forwarding control disabled. Dedicated management network;
   only the harness's run-scoped, `forward mode='none'` bridge for guest SSH.
 - Official Debian 12 genericcloud amd64 and Ubuntu 24.04 amd64 qcow2 images,
-  downloaded over TLS from vendor mirrors and pinned to SHA-256 values from
-  authenticated vendor metadata. Store as regular, non-symlink, read-only files
-  under `/srv/qualification`; record vendor URL, metadata, digest, and local
-  file digest.
+  downloaded over TLS from vendor mirrors. Assessment-time candidates are
+  Debian build `20261026-2643`
+  (`https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2`,
+  vendor SHA-512 `3622c990108a044ed411652f8741e77c5822c365114d7b940206b243f8fb617b8586792df4cdb7afba1b71d1a09289d8ed632124688f2c8352cb08190a1e9868`)
+  and Ubuntu build `20261017`
+  (`https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img`,
+  vendor SHA-256 `04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94`).
+  Authenticate the vendor metadata (`SHA512SUMS` for Debian and signed
+  `SHA256SUMS` for Ubuntu), verify the vendor digest, then compute the local
+  SHA-256 required by `host-env.py`. Store images as regular, non-symlink,
+  read-only files under `/srv/qualification`; record vendor URL, build,
+  metadata, vendor digest, and local SHA-256.
 - A host-only APT package snapshot/repository reachable over the run bridge,
   with signed vendor metadata and every package required by the tagged
   installer. Also stage the pinned CirrOS 0.6.3 image with SHA-256
