@@ -1,86 +1,330 @@
-# PP.6 installed-release qualification plan (infrastructure assessment)
+# PP.6 Stage 2 installed-release qualification matrix
 
-**Status:** plan/assessment — no qualification claim. **Date:** 2026-11-03.
-**Authority:** follow-up to PP.6 follow-up PR for #1204/#1206 (publisher
-provenance compatibility). #975 and #1086 remain open; A10.1 migration
-publication remains disabled in production; no PostgreSQL restore mutation,
-no controller activation, no PP.7/Araf work is part of this plan.
+**Status:** executable plan and read-only infrastructure assessment; PP.6 is
+**BLOCKED**. **Assessment source:** protected `main`
+`bf04c8b61c95435df973502f35197bb74df22f78` (2026-11-03).
+**Authority:** #975 and #1086 retain their original acceptance criteria. A10.1
+migration publication remains disabled in production; A10 Phase C PostgreSQL
+target mutation and controller activation are not authorized. No PP.7 or Araf
+work is included.
 
-## Why this plan exists
+Published `v0.4.0-rc.25` (`42de13cee64a37d69e900fd4272ff5e849a328b8`) lacks
+#1206/#1207 and cannot exercise the corrected signed-release provenance path.
+An authenticated successor is required. `v0.4.0-rc.26` was unused when checked;
+only the owner may authorize its immutable tag, and publication must use the
+protected release workflow and its `release` environment approval. This plan
+does not create a tag, release, or publication authorization.
 
-Installed-release and power-loss qualification must run against an immutable,
-exact-source, authenticated release candidate through the protected release
-workflow. Two facts drive the current blocker:
+## Evidence classes
 
-1. Published `v0.4.0-rc.25` (`42de13cee64a37d69e900fd4272ff5e849a328b8`)
-   does **not** contain PR #1206 (merged at protected main
-   `9512832ad79da3cc555739dfd94e5708598e2ca4`) or this follow-up. Its release
-   provenance verifiers would reject the authentic seven-entry signed
-   `release-digests.txt`, so an rc.25-based installed host cannot pass
-   A10.1 source/target provenance authentication even before this fix, and
-   would not exercise the fixed code at all.
-2. Authenticated installed-release qualification therefore needs a successor
-   candidate (rc.26) built from protected source that includes #1206 plus
-   this follow-up. That tag must be created **only** through the protected
-   release workflow (release environment approval, GitHub OIDC/Sigstore
-   provenance, supported verifier) and **only** with owner authorization.
-   No tag may be moved or reused.
+Results must never be promoted between these classes:
 
-## Harness prerequisites and what this shared runner already satisfies
+- **E1 — source/unit:** tests at an identified source revision.
+- **E2 — protected CI:** checks and merge-group runs for an exact reviewed head.
+- **E3 — qualification-only process:** source-built binaries, explicitly
+  authorized isolated fixtures, real filesystems/processes, and test-only
+  signers. This includes the debug A10 publisher journey.
+- **E4 — authenticated installed-release:** an immutable Sigstore/provenance
+  verified release installed on clean Debian 12 and Ubuntu 24.04 guests, with
+  exact release and executable identity captured.
+- **E5 — physical host power-loss:** authorized BMC/PDU interruption of suitable
+  disposable hardware. Guest force-restart and SIGKILL are not E5.
 
-PR #1200 added `tests/pp6-qualification/host-env.py`. Its provisioning
-refusal conditions and host requirements, checked read-only on this shared
-runner on 2026-11-03 (nothing was changed):
+The production release intentionally excludes `o3k recovery-migrate-v2`.
+Do not inject the debug publisher into a production bundle. E3 publisher
+execution is qualification-only and must never be reported as an installed
+production migration. Installed E4 tests exercise the production consumer,
+startup denial, policy/trust, and safety behavior using separately authorized
+fixtures; they do not assert that a production publisher ran.
 
-| Prerequisite (host-env.py / PR #1200) | This runner (read-only observation) | Verdict |
+## Critical dependencies and current verdict
+
+1. **B0 — governance:** reverse the non-acceptance closure of #975; #1086 and
+   the other PP.6 acceptance workstreams remain open.
+2. **B1 — candidate and host:** merge/review the rc.26 readiness change, obtain
+   explicit owner tag authorization, and provision the dedicated host below.
+   All E4/E5 lanes are blocked until both exist.
+3. **B2 — custody and fencing:** provide approved offline signer custody,
+   trust/revocation distribution, independently administered D7 fencing, and
+   witnessed BMC/PDU procedures. Test keys cannot substitute for these.
+4. **B3 — restore implementation:** complete the accepted SQLite and
+   PostgreSQL 16 restore paths, D4 source/target writer exclusion, canonical
+   parity, interruption handling, and foreign-state negatives.
+5. **B4 — activation decision:** preserve original activated recovery unless
+   the owner explicitly amends #975/#1086. D3 identity/credential/lease/epoch
+   invalidation and D8 boot-bound handoff remain required.
+   `INACTIVE_VERIFIED` does not satisfy activation.
+6. **B5 — remaining operations:** PKI lifecycle, exact-artifact
+   upgrade/rollback/recovery, pressure lanes, diagnostics/support bundle, and
+   evidence-backed runbooks.
+7. **B6 — acceptance:** independent security/release review with zero
+   actionable BLOCKER/HIGH/MEDIUM findings and final owner GO.
+
+## Read-only host preflight
+
+The harness is identical to protected `main`; its SHA-256 is
+`0c5332ae5e1f9cc483b73738d5dc1fdfd4d9dc9321503f2e9e0e883b5e6f844c`.
+`python3 -m unittest discover -s tests/pp6-qualification -p 'test_*.py' -v`
+passed 7/7 at the assessment source. Only help, unit, and read-only host
+commands ran. No forwarding, firewall, network, guest, route, disk, service,
+package, or file changes were made.
+
+| Requirement | Shared development runner observation | Status |
 |---|---|---|
-| Root + `virsh`, `virt-install`, `qemu-img`, `genisoimage`, `ssh`, `ssh-keygen` | All tools present; sudo available for the qualification user | Satisfiable |
-| `/dev/kvm` | Present (`crw-rw---- root:kvm`) | Satisfiable |
-| ≥ 8 CPUs | 16 CPUs | Satisfied |
-| ≥ 16 GiB available memory | ~58.8 GiB available | Satisfied |
-| ≥ 35 GiB free on the `/var/lib` filesystem | ~147 GiB free, ext4 | Satisfied |
-| **IPv4 and IPv6 forwarding disabled on every interface** | `net.ipv4.ip_forward=1`; `conf/*/forwarding=1` for all interfaces (v4 and v6) | **Refused — cannot be changed on this shared runner** |
-| No production credentials/services/routes/data; isolated qualification machine | Shared CI runner: existing libvirt networks (`default`, `f3u261006`, `p14-9c-source`) and a running third-party VM (`o3k-a10-systemd-qualification`); docker bridges | **Not satisfied — dedicated host required** |
-| Trusted, pinned official Debian 12 and Ubuntu 24.04 cloud images (caller-supplied SHA-256 verified) | None present (only an unrelated cirros test image) | Not satisfied — images must be independently pinned and supplied |
-| ext4 state/journal guests | Harness creates qcow2 files on the host filesystem; host `/` is ext4 | Satisfiable on a dedicated host |
-| Host power-loss evidence | Guest `force-restart` is explicitly *not* host power-loss evidence; requires physical power-cut/BMC control of the qualification machine | Requires external dedicated host with BMC/PDU control |
+| Harness safety tests | 7/7 pass at `bf04c8b6` | PASS (E1 only) |
+| KVM and libvirt tools | `/dev/kvm`; AMD-V; virsh 10.0.0; qemu-img 8.2.2; all required tools present | PASS, insufficient alone |
+| CPU / memory / space | 16 CPUs; about 58.5 GiB available memory; 181 GiB free on shared ext4 | PASS, shared and insufficient alone |
+| Forwarding disabled everywhere | IPv4 `ip_forward=1`; all inspected IPv4/IPv6 interface forwarding controls are `1` | **FAIL** |
+| Dedicated, unrelated-workload-free host | Running `o3k-a10-systemd-qualification` VM, other libvirt networks, Docker containers, nginx, PostgreSQL, NFS and dnsmasq | **FAIL** |
+| Trusted digest-pinned Debian 12 / Ubuntu 24.04 images | No qualification images supplied; nothing to verify | NOT_RUN |
+| Authorized physical power control | No observable BMC/PDU authority or IPMI device; guest force-restart is not a substitute | **BLOCKED** |
+| Guest provision/install/recovery/power tests | Prohibited on this host and not attempted | NOT_RUN |
 
-Read-only checks performed (no sysctl, route, guest, firewall, or disk
-changes were made): `/proc/sys/net/ipv4/ip_forward`,
-`/proc/sys/net/ipv4/conf/*/forwarding`,
-`/proc/sys/net/ipv6/conf/*/forwarding`, `/dev/kvm`, tool presence,
-`nproc`, `/proc/meminfo` MemAvailable, `df /var/lib`, `lsblk -f`,
-`virsh list --all`, `virsh net-list --all`, image search under
-`/var/lib/libvirt/images`, `/var/tmp`, `/opt`, `/srv`.
+## Exact dedicated-host provisioning specification
 
-## Plan
+This is a provisioning request, not an observed host or a support claim:
 
-1. **This PR** lands the publisher provenance compatibility fix with
-   source/unit evidence and the real-filesystem A10 process journey (see
-   `PP6_PUBLISHER_PROVENANCE_COMPAT.md`); it is not installed-release,
-   production, or power-loss evidence.
-2. **Owner-authorized successor candidate:** after protected merge, create
-   `v0.4.0-rc.26` (or the owner-chosen successor) only through the protected
-   release workflow. Never reuse or move rc.25. The Sigstore-signed bundle
-   must contain the authentic seven-entry `release-digests.txt`.
-3. **Dedicated qualification host:** obtain an isolated machine with
-   forwarding disabled, trusted pinned official guest images, ext4
-   state/journal capacity, and BMC/PDU power-cut control. This shared
-   runner must not be repurposed (its forwarding is enabled and it carries
-   unrelated workloads).
-4. **Stage 2 qualification on the dedicated host:** provision the PR #1200
-   guests from the pinned images, install the rc.26-class authenticated
-   candidate, run `capture-installation` against the verified Sigstore
-   identity, execute the A10.1 installed-release migration journey, the
-   systemd denial tests, and the bounded ext4 power-loss matrix. Keep
-   guest force-restart evidence labeled as *not* host power-loss evidence.
-5. **Evidence discipline:** keep source/unit, protected CI, real-filesystem
-   process, authenticated installed-release, and host power-loss categories
-   distinct. Never turn NOT_RUN into PASS.
+- Disposable bare-metal x86_64 host, no nested-virtualization substitute for
+  physical power tests; hardware AMD-V/Intel VT-x with EPT/NPT, KVM and libvirt.
+- Minimum 8 physical cores (16 recommended), 32 GiB RAM, 256 GiB OS storage;
+  512 GiB or more recommended for images, run disks, and retained evidence.
+- Debian 12 or Ubuntu 24.04 host with real systemd, persistent journald,
+  `qemu-kvm`, `libvirt-daemon-system`, `virtinst`, `qemu-utils`, `genisoimage`,
+  and OpenSSH. No Docker, unrelated guests, production services, or default NAT
+  network.
+- At least 8 CPUs, 16 GiB available memory, and 35 GiB free at provisioning
+  time, as enforced by `host-env.py`; retain operational headroom above these
+  minima.
+- Every IPv4/IPv6 forwarding control disabled. Dedicated management network;
+  only the harness's run-scoped, `forward mode='none'` bridge for guest SSH.
+- Official Debian 12 genericcloud amd64 and Ubuntu 24.04 amd64 qcow2 images,
+  downloaded over TLS from vendor mirrors and pinned to SHA-256 values from
+  authenticated vendor metadata. Store as regular, non-symlink, read-only files
+  under `/srv/qualification`; record vendor URL, metadata, digest, and local
+  file digest.
+- The harness creates, per guest, a 24 GiB root overlay plus distinct 4 GiB
+  `vdb` recovery-state and 4 GiB `vdc` journal qcow2 devices, formatted ext4
+  and mounted at `/var/lib/o3k/state` and `/var/lib/o3k/journal`. Do not replace
+  these with bind mounts, overlayfs, tmpfs, or a shared filesystem.
+- Independently administered BMC with Redfish or an authenticated managed PDU
+  outlet, explicitly authorized for physical power cuts of only this host.
+  Record device identity, source serial, operator, authorization, UTC events,
+  storage cache/flush configuration, and console/evidence collector. Verify the
+  host remains off until the authorized restart.
+- No production credentials, database URLs, tokens, routes, data, signing keys,
+  or unrelated workloads. Only disposable qualification identities and
+  explicitly authorized fixture material.
 
-## Explicit non-goals
+## Execution preconditions and common commands
 
-- No tag or release is created, moved, or published by this plan.
-- No enabling of A10.1 migration publication in production binaries.
-- No weakening of signed authority, D8/C1/C1.1, or anti-rollback checks.
-- No PostgreSQL restore mutation, controller activation, PP.7/Araf work.
+After B1/B2 are satisfied, choose a fresh lowercase run ID and export the exact
+values from the verified release; never copy them from an unverified manifest:
+
+```bash
+export RUN_ID=pp6-rc26-run01
+export TAG=v0.4.0-rc.26
+export SOURCE_SHA=<exact-tag-commit>
+export ARTIFACT_SHA256=<archive-digest-from-verified-sigstore-manifest>
+gh release download "$TAG" --repo o3kio/o3k --dir release
+RELEASE_SOURCE_COMMIT="$SOURCE_SHA" \
+  packaging/verify-release-sigstore.sh "$TAG" release
+```
+
+Provision only on the dedicated host after its read-only preflight passes:
+
+```bash
+O3K_PP6_QUAL_ROOT=/var/lib/o3k-pp6-qualification \
+  tests/pp6-qualification/host-env.py provision \
+  --run-id "$RUN_ID" \
+  --debian-image /srv/qualification/debian-12.qcow2 \
+  --debian-sha256 <authenticated-debian-image-sha256> \
+  --ubuntu-image /srv/qualification/ubuntu-24.04.qcow2 \
+  --ubuntu-sha256 <authenticated-ubuntu-image-sha256>
+```
+
+Install only the byte-identical tagged installer on each clean guest, then
+capture both installations separately:
+
+```bash
+# Inside each guest, only after the release verification above:
+curl -sfL "https://github.com/o3kio/o3k/releases/download/$TAG/install.sh" | sudo sh -
+
+tests/pp6-qualification/host-env.py capture-installation \
+  --run-id "$RUN_ID" --guest debian12 \
+  --source-sha "$SOURCE_SHA" --version "${TAG#v}" \
+  --artifact-sha256 "$ARTIFACT_SHA256"
+tests/pp6-qualification/host-env.py capture-installation \
+  --run-id "$RUN_ID" --guest ubuntu2404 \
+  --source-sha "$SOURCE_SHA" --version "${TAG#v}" \
+  --artifact-sha256 "$ARTIFACT_SHA256"
+```
+
+Every scenario runs on both operating systems unless explicitly marked
+host-level. Retain exact commands, exit statuses, before/after state, redacted
+logs, and negative assertions. A skipped prerequisite is BLOCKED or NOT_RUN,
+never PASS.
+
+## Installed qualification matrix
+
+### Q1 — release authenticity and exact identity
+
+- **Execute:** common verification and capture commands above; verify the
+  archive, bundle checksums, workflow/tag identity, OIDC issuer, Rekor proof,
+  and exact tag commit before installation.
+- **Require:** matching source/version/digest and hashes for installed `o3kd`,
+  `o3k`, `o3k-compute`, and `o3k-network`; production `o3k` rejects
+  `recovery-migrate-v2` and omits it from help.
+- **Current:** E4 NOT_RUN; no rc.26 artifact exists. Overall **BLOCKED**.
+
+### Q2 — clean Debian 12 and Ubuntu 24.04 installation
+
+- **Execute:** Q1 followed by the tagged installer on both newly provisioned
+  guests; run health/readiness, canonical bootstrap, and supported public
+  lifecycle smoke without adding the demo publisher.
+- **Require:** real systemd, separate ext4 mounts, expected units/accounts,
+  successful idempotent reinstall behavior where supported, and no foreign
+  resource mutation.
+- **Current:** E4 NOT_RUN; dedicated host and authenticated candidate absent.
+  Overall **BLOCKED**.
+
+### Q3 — C1/C1.1 policy, trust, revocation, and re-anchor
+
+- **Execute:** using separately authorized offline fixture procedures, install
+  signed first-install and migration policies, then exercise valid trust,
+  expired/revoked/wrong signer, rollback, re-anchor, and restart cases through
+  the installed production binaries. Keep private signing material outside the
+  guests and evidence.
+- **Require:** authentication before admission, exact policy/key/generation
+  binding, fail-closed revocation and stale-generation behavior, and preserved
+  ordinary v1 behavior when v2 is unselected.
+- **Current:** E1/E3 historical coverage is not E4; installed cases NOT_RUN and
+  approved custody fixtures BLOCKED. Overall **BLOCKED**.
+
+### Q4 — recovery-designated startup denial before admission
+
+- **Execute:** stage authorized selected-recovery fixtures, then start/restart
+  `o3kd` and execution services while capturing store-open, listener, readiness,
+  controller session, lease, reconciliation, and provider-dispatch observations.
+- **Require:** denial before store/controller admission, no provider mutation,
+  bounded secret-safe diagnostics, and terminal `INACTIVE_VERIFIED` remaining
+  inert.
+- **Current:** source denial tests exist; all 16 installed D8-A10 process lanes
+  remain NOT_RUN. Overall **BLOCKED**.
+
+### Q5 — selected-v2 signed journal consumer and fail-closed behavior
+
+- **Execute:** supply explicitly authorized, isolated, signed journal fixtures;
+  invoke only installed production consumers. Cover valid records, malformed or
+  noncanonical records, wrong scope/signer/policy/release/installation/backend,
+  broken prefix, duplicate/replayed records, and terminal records.
+- **Require:** exact-forward authentication, prior-prefix fork rejection,
+  bounded denial, and zero target/database/controller mutation.
+- **Current:** E1 journal tests and the separate E3 publisher journey do not
+  establish E4. Installed consumer cases NOT_RUN. Overall **BLOCKED**.
+
+### Q6 — real systemd lifecycle and interruption
+
+- **Execute:** `systemctl stop`, `start`, and `restart` for each installed unit;
+  interrupt at each accepted durable phase, then restart and observe before any
+  retry. Use guest `force-restart` only for the separately labelled guest lane:
+
+  ```bash
+  tests/pp6-qualification/host-env.py force-restart \
+    --run-id "$RUN_ID" --guest debian12
+  tests/pp6-qualification/host-env.py force-restart \
+    --run-id "$RUN_ID" --guest ubuntu2404
+  ```
+
+- **Require:** stable identity, no duplicate resource or stale lease/epoch,
+  deterministic recovery or bounded denial, and complete unit/socket/process
+  evidence.
+- **Current:** E4 NOT_RUN. Guest interruption is not E5. Overall **BLOCKED**.
+
+### Q7 — D8 filesystem and journal crash boundaries
+
+- **Execute:** at every write/file-fsync/rename/directory-fsync/readback boundary,
+  inject the authorized interruption and inspect only the run-owned ext4 state
+  and journal devices after restart.
+- **Require:** only complete old or new authenticated bytes are accepted;
+  partial writes, stale CAS, symlink/device/inode replacement, lock conflicts,
+  and mixed generations fail closed.
+- **Current:** E3 ext4 tests at earlier exact sources are not installed proof;
+  E4 journal-v2 and D8-A10 cases NOT_RUN. Overall **BLOCKED**.
+
+### Q8 — guest restart, separately labelled
+
+- **Execute:** Q6 `force-restart` at each selected guest boundary on both OSes;
+  preserve disks for examination and record `guest-force-poweroff-restart` in
+  `injections.jsonl`.
+- **Require:** recovery invariants without labelling the result physical host
+  power-loss.
+- **Current:** NOT_RUN; no guests exist. Overall **BLOCKED**.
+
+### Q9 — actual physical host power-loss durability
+
+- **Execute:** only after written authorization and a successful disposable-host
+  safety rehearsal, use the authorized BMC/PDU to cut power at each selected
+  persistence boundary, preserve the recovery/journal devices, restart under
+  witness, and collect the same assertions as Q7.
+- **Require:** independent power event and storage evidence, no unrelated
+  workload exposure, and no substitution of VM destroy, SIGKILL, or fsync success
+  for power-loss proof.
+- **Current:** E5 NOT_RUN; hardware and authority BLOCKED. Overall **BLOCKED**.
+
+### Q10 — replay, identity, digest, generation, and foreign-state negatives
+
+- **Execute:** repeat every supported operation; then use wrong installation or
+  principal identity, invalid archive/policy/journal digest, stale generation,
+  removed/revoked trust, conflicting content, and foreign files/databases/
+  services/guests/storage/network fixtures.
+- **Require:** idempotent same-identity retry, conflicting-content preservation,
+  rejection before mutation, no cross-tenant disclosure, zero unowned mutation,
+  and secret-safe bounded errors.
+- **Current:** E4 NOT_RUN; isolated foreign-state fixtures and custody BLOCKED.
+  Overall **BLOCKED**.
+
+### Q11 — evidence binding and final review
+
+- **Execute:** emit one redacted machine-readable envelope per scenario with OS,
+  kernel, systemd, release tag/source SHA, signed archive digest, installed
+  executable hashes/inodes, harness SHA-256, filesystem/device/cache facts,
+  backend/version, fixture/trust/generation IDs, exact commands, timestamps,
+  results, and cleanup/foreign-state checks. Scan all retained output for
+  secrets.
+- **Require:** independent evidence review, zero actionable
+  BLOCKER/HIGH/MEDIUM findings, and explicit final owner GO.
+- **Current:** evidence collection NOT_RUN; independent reviewer and final GO
+  BLOCKED. Overall **BLOCKED**.
+
+Cleanup uses only the harness's ownership-checked path after evidence is
+retained; failed or partial identity checks require manual inspection, never a
+forced shortcut:
+
+```bash
+tests/pp6-qualification/host-env.py destroy --run-id "$RUN_ID"
+```
+
+## Remaining PP.6 acceptance outside the installed matrix
+
+| Workstream | Current status at cited evidence | Required closure |
+|---|---|---|
+| SQLite backup/restore (#1084) | BLOCKED; artifact campaign at `a6b34f9aca12eec41f046157ad82dc23246dfd2e`, source-assembled host at `e76ee74104780ccb2dfeb3e19374c1d89f8f6dc8`; no authenticated restore | Authenticated exact-release restore, custody, crash/disk matrix, canonical parity |
+| PostgreSQL 16 backup/restore (#1085) | Backup PARTIAL at `b180cf5aa7b8fd27baecc4a8a392fd6c140b661c` (22 PASS / 5 NOT-COVERED); restore NOT_RUN | Accepted restore protocol, isolated PG16 target, D4 writer exclusion, restore parity and all executable lanes |
+| D7 fencing / D3 invalidation / D4 exclusion | BLOCKED | Independent source fencing, all-writer exclusion, replacement identity, stale credential/lease/epoch rejection before activation |
+| PKI (#1087) | PARTIAL at `39da026b3f4abf1540e2f0c2f57df0ebcd8c32da`; installed lifecycle NOT_RUN | Issuer/custody authority and join/renew/expire/revoke/replace/re-enroll/restore journeys without private-key export |
+| Upgrade/rollback/recovery (#1098) | Exact-artifact journey NOT_RUN | PP.6 compatibility gate and upgrade → rollback/restore → upgrade-again on both backends where claimed |
+| Pressure/operator errors (#1089) | PARTIAL; destination-full and journal-v2 failure lanes NOT_RUN | Complete per-case invariants, foreign-state checks, retries, and evidence envelopes |
+| Diagnostics/support bundle (#1088) | PARTIAL; SPEC-0051 remains proposed | Accepted bounded contract, read-only redacted bundle, authorization and success/failure secret scans |
+| Documentation (#944) | PARTIAL | Runbooks derived only from passed evidence and explicit unsupported boundaries |
+| Security/release acceptance (#975) | BLOCKED | Independent review, zero actionable B/H/M, final owner GO |
+
+## Next actionable tasks
+
+1. Immediate infrastructure/owner task: preserve #975 open, review the rc.26
+   readiness PR, authorize the immutable tag only when ready, and provision the
+   dedicated host and custody/fencing resources above.
+2. Next implementation PR after an exact-head accepted restore protocol:
+   #1085 PostgreSQL 16 fresh-empty-owned-target restore with pre-mutation
+   rejections, D4 writer exclusion, canonical parity, interruption/negative
+   coverage, and disposable target evidence. This does not authorize Phase C
+   activation.
