@@ -2,6 +2,8 @@
 """Run-owned Debian 12/Ubuntu 24.04 systemd and ext4 qualification guests."""
 import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 import glob
+import ipaddress
+import pwd
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,7 +130,7 @@ def network_identity(xml_text, name, uuid, bridge):
 def file_identities(directory):
     result = {}
     names = ("base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso",
-             "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key",
+             "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub",
              "seed/user-data", "seed/meta-data")
     for name in names:
         path = directory / name
@@ -153,7 +155,7 @@ def verify_recorded_files(private, marker):
         allowed_dirs.add(f"{guest_name}/seed")
         allowed_files.update(f"{guest_name}/{name}" for name in (
             "base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso",
-            "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key",
+            "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub",
             "seed/user-data", "seed/meta-data"))
     for guest_name, guest in marker.get("guests", {}).items():
         recorded = guest.get("files")
@@ -174,8 +176,12 @@ def verify_recorded_files(private, marker):
             entry = current / name
             relative = entry.relative_to(private).as_posix()
             info = entry.lstat()
+            qemu_owned_disk = (len(Path(relative).parts) == 2
+                               and Path(relative).name in ("base.qcow2", "root.qcow2", "state.qcow2",
+                                                          "journal.qcow2", "seed.iso")
+                               and info.st_uid == pwd.getpwnam("libvirt-qemu").pw_uid)
             if (relative not in allowed_files or entry.is_symlink() or not entry.is_file()
-                    or info.st_uid != os.geteuid()):
+                    or (info.st_uid != os.geteuid() and not qemu_owned_disk)):
                 raise RuntimeError(f"unexpected or unsafe private file; refusing cleanup: {entry}")
             if relative != "network.xml":
                 recorded = recorded_identities.get(relative)
@@ -189,7 +195,10 @@ def verify_recorded_files(private, marker):
         for name, identity in recorded.items():
             path = directory / name
             info = path.lstat()
-            if (path.is_symlink() or not path.is_file() or info.st_uid != os.geteuid()
+            qemu_owned_disk = (name in ("base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso")
+                               and info.st_uid == pwd.getpwnam("libvirt-qemu").pw_uid)
+            if (path.is_symlink() or not path.is_file()
+                    or (info.st_uid != os.geteuid() and not qemu_owned_disk)
                     or identity != [info.st_dev, info.st_ino]):
                 raise RuntimeError(f"run-owned file identity changed; refusing cleanup: {path}")
 
@@ -239,10 +248,14 @@ def ssh(ip, key, known, command):
 def lease_ip(network, mac):
     for line in call(["virsh", "net-dhcp-leases", network], check=False).splitlines():
         fields = line.split()
-        if len(fields) > 2 and fields[1].lower() == mac.lower():
-            ip = fields[2].split("/")[0]
-            if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", ip):
-                return ip
+        # Expiry Time contains a date and a time, so it occupies two fields.
+        # Locate the exact MAC/protocol pair rather than indexing the heading.
+        for index, field in enumerate(fields[:-2]):
+            if field.lower() == mac.lower() and fields[index + 1] == "ipv4":
+                try:
+                    return str(ipaddress.IPv4Interface(fields[index + 2]).ip)
+                except ValueError:
+                    continue
     return None
 
 
@@ -259,6 +272,25 @@ def wait_ssh(network, mac, key, known, host_key_public, timeout):
                 pass
         time.sleep(3)
     raise RuntimeError(f"guest SSH timeout for {mac}")
+
+
+def guest_user_data(name, host_key_private, host_key_public, user_public_key, state_label, journal_label):
+    # JSON is a YAML subset: serialize scalars and commands rather than hand
+    # quoting a cloud-config document containing keys, colons and shell syntax.
+    config = {
+        "hostname": name, "manage_etc_hosts": True,
+        "ssh_keys": {"ed25519_private": host_key_private, "ed25519_public": host_key_public},
+        "users": ["default", {
+            "name": "o3kqual", "groups": ["sudo"], "sudo": ["ALL=(ALL) NOPASSWD:ALL"],
+            "shell": "/bin/bash", "lock_passwd": True, "ssh_authorized_keys": [user_public_key],
+        }],
+        "ssh_pwauth": False, "disable_root": True,
+        "runcmd": [
+            ["systemctl", "enable", "--now", "ssh"],
+            ["bash", "-lc", f"set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /nonexistent --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"],
+        ],
+    }
+    return "#cloud-config\n" + json.dumps(config, indent=2) + "\n"
 
 
 def provision(a):
@@ -334,28 +366,8 @@ def provision(a):
             put(known, "", 0o600)
             mac = "52:54:00:" + ":".join(f"{b:02x}" for b in hashlib.sha256((a.run_id + guest).encode()).digest()[:3])
             state_label, journal_label = f"O3KSTATE{n}", f"O3KJOURNAL{n}"
-            host_key_config = "\n".join("    " + line for line in host_key.read_text().splitlines())
-            user_data = f"""#cloud-config
-hostname: {name}
-manage_etc_hosts: true
-ssh_keys:
-  ed25519_private: |
-{host_key_config}
-users:
- - default
- - name: o3kqual
-   groups: [sudo]
-   sudo: ["ALL=(ALL) NOPASSWD:ALL]
-   shell: /bin/bash
-   lock_passwd: true
-   ssh_authorized_keys:
-    - {pub.read_text().strip()}
-ssh_pwauth: false
-disable_root: true
-runcmd:
- - [systemctl, enable, --now, ssh]
- - [bash, -lc, "set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /nonexistent --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"]
-"""
+            user_data = guest_user_data(name, host_key.read_text(), host_key_public,
+                                        pub.read_text().strip(), state_label, journal_label)
             seed = d / "seed"
             seed.mkdir(mode=0o700)
             put(seed / "user-data", user_data)
@@ -369,7 +381,7 @@ runcmd:
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
             call(["virt-install", "--connect", "qemu:///system", "--name", name, "--memory", "4096",
                   "--vcpus", "2", "--import", "--osinfo", "detect=on,require=off", "--noautoconsole",
-                  "--graphics", "none", "--disk", f"path={root},format=qcow2,bus=virtio",
+                  "--graphics", "none", "--disk", f"path={root},format=qcow2,bus=virtio,target=vda",
                   "--disk", f"path={state},format=qcow2,bus=virtio,target=vdb",
                   "--disk", f"path={journal},format=qcow2,bus=virtio,target=vdc",
                   "--disk", f"path={iso},device=cdrom", "--network", f"network={network},model=virtio,mac={mac}"])
@@ -377,11 +389,12 @@ runcmd:
                 call(["virsh", "dumpxml", name]), guest, marker["guests"][guest], private)
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
             ip = wait_ssh(network, mac, key, known, host_key_public, a.timeout)
+            ssh(ip, key, known, "sudo -n cloud-init status --wait")
             expected_id, expected_version = (("debian", "12") if guest == "debian12"
                                              else ("ubuntu", "24.04"))
             os_check = (". /etc/os-release; test \"$ID\" = " + expected_id
                         + "; test \"$VERSION_ID\" = " + expected_version + "; ")
-            observed = ssh(ip, key, known, "set -eu; " + os_check + "test -x /usr/lib/systemd/systemd; "
+            observed = ssh(ip, key, known, "sudo -n sh -c " + shlex.quote("set -eu; " + os_check + "test -x /usr/lib/systemd/systemd; "
                 "test \"$(findmnt -n -o FSTYPE /var/lib/o3k/state)\" = ext4; "
                 "test \"$(findmnt -n -o FSTYPE /var/lib/o3k/journal)\" = ext4; "
                 f"test \"$(blkid -s LABEL -o value \"$(findmnt -n -o SOURCE /var/lib/o3k/state)\")\" = {state_label}; "
@@ -395,7 +408,7 @@ runcmd:
                 "systemctl --version | head -1; cat /etc/os-release; uname -a; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/state; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/journal; "
-                "stat -Lc '%n %d:%i %u:%g %a' /var/lib/o3k/state /var/lib/o3k/journal")
+                "stat -Lc '%n %d:%i %u:%g %a' /var/lib/o3k/state /var/lib/o3k/journal"))
             (evidence / f"{guest}.identity.txt").write_text(observed + "\n", encoding="utf-8")
             marker["guests"][guest].update({"ip": ip, "identity_sha256": hashlib.sha256(observed.encode()).hexdigest()})
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
