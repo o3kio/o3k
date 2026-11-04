@@ -80,14 +80,14 @@ baseline check (host glibc 2.39 exceeds Debian 12's 2.36 ceiling); the
 protected Debian 12 build remains mandatory.
 
 The PR #1215 run `41897296059` failed its required PostgreSQL outage/reconnect
-step twice: cleanup accepted Docker's `No such object:` wording only, while
-the current runner returned a different explicit not-found form. This test is
-unchanged from protected `main`; that main snapshot's CI had passed earlier the
-same day. The candidate now recognizes both explicit Docker absence forms and
-continues to reject daemon, permission, and unclassified errors. Its focused
-unit test passes locally; exact-head protected CI and human review remain
-required. The merged PR evidence and local packaging regression do not
-authorize release publication.
+step twice, and run `41902153244` failed after an initial string-matching
+cleanup fix. The unchanged test on protected `main` had passed earlier the
+same day. The candidate now verifies absence with a successful full-ID Docker
+container listing after inspect fails; daemon/listing errors and any nonempty
+listing remain failures. The focused unit test passes locally, while the
+ignored Docker lane awaits another protected run. Exact-head protected CI and
+human review remain required. Merged PR evidence and local packaging
+regressions do not authorize release publication.
 
 ## Candidate Q1/Q2 status by operating system
 
@@ -105,8 +105,8 @@ not identified in the retained evidence cited here.
 
 | Tier / lane | Result |
 |---|---|
-| E1 source/unit | **PASS** at proposed source commit `29c580af2a0e0e730f011734894d7517416ffe7e`: format, Clippy, workspace tests, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. The follow-up Docker not-found matcher unit test also passes locally. |
-| E2 protected CI | **PASS** for the protected merges and current main snapshot. Candidate PR #1215's previous heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. At head `29c580a`, all checks except the Rust job passed; the Rust job failed twice in the PostgreSQL outage-test cleanup wording. A narrow test-only matcher fix is now in the unreviewed worktree; its protected check has not run yet. |
+| E1 source/unit | **PASS** at proposed source commit `29c580af2a0e0e730f011734894d7517416ffe7e`: format, Clippy, workspace tests, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. The focused Docker-listing cleanup unit test also passes locally. |
+| E2 protected CI | **PASS** for the protected merges and current main snapshot. Candidate PR #1215's earlier heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. At `29c580a`, all checks except Rust passed; the PostgreSQL outage-test cleanup failed twice. At `24671ac`, CI also failed that test despite string-matcher follow-up. The new empty full-ID Docker-listing cleanup check is pending protected CI on the current head. |
 | E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214's source-built extracted-bundle regression. Both are non-installed evidence. The current local rc.27 packaging regression is E1 package verification only, not an E3 guest process. |
 | E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
 | E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |

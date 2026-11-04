@@ -242,9 +242,25 @@ impl DisposablePostgres {
         if inspect.status.success() {
             return Err(format!("docker container {id} still exists after removal").into());
         }
-        let inspect_error = String::from_utf8_lossy(&inspect.stderr);
-        if !inspect_confirms_absent(&inspect_error) {
-            return Err("docker inspect failed while verifying container absence".into());
+        // Docker CLI/Engine versions differ in their not-found wording. Verify
+        // absence from a successful daemon query instead of parsing that text.
+        let filter = format!("id={id}");
+        let listed = Command::new("docker")
+            .args([
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--filter",
+                &filter,
+                "--format",
+                "{{.ID}}",
+            ])
+            .output()?;
+        if !listed.status.success() {
+            return Err("docker ps failed while verifying container absence".into());
+        }
+        if !container_listing_confirms_absent(&String::from_utf8_lossy(&listed.stdout)) {
+            return Err("docker container remains after removal".into());
         }
         Ok(())
     }
@@ -268,21 +284,18 @@ impl DisposablePostgres {
     }
 }
 
-fn inspect_confirms_absent(stderr: &str) -> bool {
-    stderr.contains("No such object:") || stderr.contains("No such container:")
+fn container_listing_confirms_absent(stdout: &str) -> bool {
+    stdout.trim().is_empty()
 }
 
 #[test]
-fn container_cleanup_requires_explicit_docker_not_found_result() {
-    assert!(inspect_confirms_absent("Error: No such object: deadbeef"));
-    assert!(inspect_confirms_absent(
-        "Error response from daemon: No such container: deadbeef"
+fn container_cleanup_requires_successful_empty_docker_listing() {
+    assert!(container_listing_confirms_absent(""));
+    assert!(container_listing_confirms_absent("\n"));
+    assert!(!container_listing_confirms_absent(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
     ));
-    assert!(!inspect_confirms_absent(
-        "Cannot connect to the Docker daemon"
-    ));
-    assert!(!inspect_confirms_absent("permission denied"));
-    assert!(!inspect_confirms_absent(""));
+    assert!(!container_listing_confirms_absent("unexpected output\n"));
 }
 
 fn is_transient_connect_error(error: &o3k_store::StoreError) -> bool {
