@@ -269,12 +269,15 @@ impl DisposablePostgres {
 }
 
 fn inspect_confirms_absent(stderr: &str) -> bool {
-    stderr.contains("No such object:")
+    stderr.contains("No such object:") || stderr.contains("No such container:")
 }
 
 #[test]
 fn container_cleanup_requires_explicit_docker_not_found_result() {
     assert!(inspect_confirms_absent("Error: No such object: deadbeef"));
+    assert!(inspect_confirms_absent(
+        "Error response from daemon: No such container: deadbeef"
+    ));
     assert!(!inspect_confirms_absent(
         "Cannot connect to the Docker daemon"
     ));
