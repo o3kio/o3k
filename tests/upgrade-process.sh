@@ -50,6 +50,20 @@ SKIP=0
 cleanup() {
   local pid
   for pid in "${SERVER_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  if ((FAIL > 0)); then
+    # Keep the failure cause in CI logs before the private sandbox is removed.
+    # The assertions intentionally report the affected case, while these
+    # bounded fixture-only files expose the engine's underlying diagnostic.
+    local name file
+    for name in case1b case12 case15-up case18-up case18-re; do
+      for file in "$OUT_DIR/$name.out" "$OUT_DIR/$name.err"; do
+        if [[ -s "$file" ]]; then
+          printf '\n--- upgrade-process diagnostic: %s ---\n' "$(basename "$file")" >&2
+          sed "s/${SENTINEL:-SENTINEL_PW_7x9z}/[REDACTED]/g" "$file" >&2
+        fi
+      done
+    done
+  fi
   if [[ "${O3K_UPGRADE_TEST_KEEP:-0}" != 1 ]]; then
     rm -rf -- "$WORK_DIR"
   else
