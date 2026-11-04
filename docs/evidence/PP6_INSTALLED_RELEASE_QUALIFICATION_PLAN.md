@@ -1,32 +1,38 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
-**Status:** executable plan and read-only infrastructure assessment; PP.6 is
-**BLOCKED**. **Current status snapshot:** protected `main`
-`10f420f0874dcc6e37f125ac2fd19f3bcf845eaf` (2026-11-03), including PR #1210
-and its #975 closure guard. **Release source:** immutable `v0.4.0-rc.26`
-source `901af47b306aa779aed72ef61ef25184fabf24eb`; tag object
-`b295a9a031ae2969497b6311ea87ee1ff421f676`. **Earlier host-preflight
-source:** `bf04c8b61c95435df973502f35197bb74df22f78`; the qualification harness
-is unchanged at current protected main.
+**Status:** executable plan; PP.6 remains **BLOCKED**. **Status snapshot:**
+protected `main` at `3dc280a563bbd3d1f63e2180ad7deba6f78461c2` (2026-11-04).
+PRs #1212, #1213, and #1214 are merged; their exact reviewed heads and
+protected merge identities are recorded below. The proposed successor is
+`v0.4.0-rc.27`; no tag or GitHub Release exists, so its authenticated release
+identity and installed qualification are NOT_RUN. **Previously authenticated
+release:** immutable `v0.4.0-rc.26`, source
+`901af47b306aa779aed72ef61ef25184fabf24eb`, tag object
+`b295a9a031ae2969497b6311ea87ee1ff421f676`.
+
 **Authority:** #975 and #1086 retain their original acceptance criteria and
 remain open. Exact-head owner decisions on PRs #1192 and #1193 ACCEPT bounded
-A10.1 contract implementation and testing under SPEC-0050 §7.4; PR #1210
-integrates the #975 closure guard. These decisions do not authorize production
-publisher enablement, PostgreSQL restore-target mutation, controller
-activation, independent security acceptance, or PP.6 final GO. No PP.7 or
-Araf work is included.
+A10.1 contract implementation and testing under SPEC-0050 §7.4. They do not
+authorize production publisher enablement, PostgreSQL restore-target mutation,
+controller activation, independent security acceptance, or PP.6 final GO.
+No PP.7 or Araf work is included.
 
-Published `v0.4.0-rc.25` (`42de13cee64a37d69e900fd4272ff5e849a328b8`) lacks
-#1206/#1207 and cannot exercise the corrected signed-release provenance path.
-The authenticated successor `v0.4.0-rc.26` now exists: tag object
-`b295a9a031ae2969497b6311ea87ee1ff421f676` points to protected merge commit
-`901af47b306aa779aed72ef61ef25184fabf24eb`; release workflow run 41642704256
-passed after `release` environment approval and published the prerelease at
-2026-11-03T13:37:42Z. Independent exact-tag verification passed the protected
-workflow/OIDC identity, Sigstore/Rekor proof, seven-entry signed digest
-manifest, archive and bundle integrity, source/version/upgrade-floor binding,
-glibc floor, and production A10 publisher exclusion. This is release evidence
-only; installed-release qualification remains blocked on the dedicated host.
+The rc.26 release assets authenticated successfully: protected workflow/OIDC
+identity, Sigstore/Rekor proof, signed digest manifest, archive and bundle
+integrity, source/version/upgrade-floor binding, Debian 12 glibc floor,
+and production A10 publisher exclusion all passed. Separately, the rc.26
+packaged verifier failed during guest verification with exit status 2 because
+the archive did not contain
+`bins/o3k/tests/fixtures/a10-release-verify.pub`; **no installed-release Q1 or
+Q2 pass is inferred from the successful asset authentication**. PR #1214
+fixes this package self-containment defect and adds extracted-archive negative
+coverage. rc.26 remains immutable and is not to be retagged or repaired.
+
+The proposed rc.27 source includes protected merges #1212–#1214, aligned
+version pins, and candidate notes. It must pass source and protected checks,
+exact-head human review, the accepted protected merge process, and release
+bundle regressions before its source identity can be frozen. Tag creation and
+publication remain stopped pending explicit owner release authorization.
 
 ## Evidence classes
 
@@ -50,16 +56,86 @@ production migration. Installed E4 tests exercise the production consumer,
 startup denial, policy/trust, and safety behavior using separately authorized
 fixtures; they do not assert that a production publisher ran.
 
+## Merged rc.27 preparation evidence
+
+| PR | Reviewed head → protected merge | Change and evidence classification |
+|---|---|---|
+| #1212 | `dd959349157b5b181b4ac589526476fcc6302e93` → `c984175d4bd45437236fa8267c9a5b562f02e621` | Signed journal restart tests. Source tests and protected PR checks passed; no installed-release or power-loss claim. |
+| #1213 | `b4315c7fe8f296893fd6a86c3c69ed177d26396b` → `3dc280a563bbd3d1f63e2180ad7deba6f78461c2` | Harness pins the guest root device to virtio `vda`; serializes cloud-init as JSON/YAML; waits for cloud-init completion; parses actual DHCP lease timestamp/MAC/protocol layout; checks ext4 devices as guest root; permits cleanup only for run-owned disks owned by `libvirt-qemu`; records the generated SSH host public key in the ownership marker. Tests cover serialization, DHCP parsing, and root-device selection. A local run with harness SHA-256 `f1a64595d6eafe74d55bd972cfad2102298151e98fd2a5c04fbf2f80168cc76d` successfully provisioned Debian 12 and Ubuntu 24.04 guests, captured guest/disk identities and distinct ext4 state/journal mounts with host forwarding disabled, then removed run-owned guests/network while retaining evidence at `/var/tmp/pp6-local-20261104/evidence`. It recorded `NOT_INSTALLED`: E3 infrastructure evidence only, not Q1/Q2 or E4. |
+| #1214 | `cb6dba632276830e022038ea399c7a43164e3bff` → `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b` | Makes packaged A10 verification self-contained and runs it against an extracted archive in a clean environment. Negative cases cover malformed checksums, changed content, A10 fault marker, embedded public test key, linked publisher symbol, missing `nm`, failing `strings`; optimized and stripped binaries pass, and release `o3k` rejects the excluded `recovery-migrate-v2` command. PR checks passed. rc.26 fail-before returned exit 2 because `bins/o3k/tests/fixtures/a10-release-verify.pub` was absent, even though its release assets authenticated; local fix-after bundle regression is source-built E1 evidence, not a new authenticated release. |
+
+The current protected-main snapshot reports 19 completed checks, all passing.
+Candidate source commit `3e9e53f867fd8b23bb629fd545e36443565ec4bd` passes
+`cargo fmt --all -- --check`, workspace Clippy with warnings denied, and
+`cargo test --workspace --all-features`. The PP.6 harness tests pass 9/9;
+release-gate, bundle-integrity, worker-asset-sync, actionlint/workflow, and
+release publisher-exclusion regressions pass. Installer negatives pass 27/27
+with the root-only full-wrapper case skipped because this runner is not root.
+The extracted rc.27 packaging regression archive passes all 11 A10 positive
+and negative cases outside the checkout. That local archive used the
+authenticated rc.26 binaries solely to exercise rc.27 packaging/verifier
+source; it is not an rc.27 build, release artifact, or source-to-binary
+identity claim. A direct local optimized build was rejected by the glibc
+baseline check (host glibc 2.39 exceeds Debian 12's 2.36 ceiling); the
+protected Debian 12 build remains mandatory.
+
+The PR #1215 run `41897296059` failed its required PostgreSQL outage/reconnect
+step twice, and run `41902153244` failed after an initial string-matching
+cleanup fix. The unchanged test on protected `main` had passed earlier the
+same day. The candidate now verifies absence with a successful full-ID Docker
+container listing after inspect fails; daemon/listing errors and any nonempty
+listing remain failures. The focused unit test passes locally. Protected CI
+run `41904761285` passed the formerly failing ignored Docker outage lane and
+all other required checks on exact head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`;
+human review approved that same head. Earlier failed attempts are retained as
+diagnostic history. Merged PR evidence and local packaging regressions do not
+authorize release publication.
+
+## Candidate Q1/Q2 status by operating system
+
+These are the proposed rc.27 installed-release lanes. No host preflight or guest
+installation has been performed for this candidate in this preparation. The
+prior rc.26 verifier failure is recorded separately above; its guest OS was
+not identified in the retained evidence cited here.
+
+| Operating system | Q1 authenticity and installed executable identity | Q2 clean install, service health, bootstrap, idempotence, foreign-state preservation |
+|---|---|---|
+| Debian 12 | **NOT_RUN / BLOCKED** — rc.27 has no authenticated release assets or installed identity | **NOT_RUN / BLOCKED** — no rc.27 installation |
+| Ubuntu 24.04 | **NOT_RUN / BLOCKED** — rc.27 has no authenticated release assets or installed identity | **NOT_RUN / BLOCKED** — no rc.27 installation |
+
+## Current evidence classification
+
+| Tier / lane | Result |
+|---|---|
+| E1 source/unit | **PASS** at proposed source commit `3e9e53f867fd8b23bb629fd545e36443565ec4bd`: format, workspace Clippy with warnings denied, all-feature workspace tests, focused Docker-listing cleanup test, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. |
+| E2 protected CI | **PASS** on exact reviewed head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`: all 10 PR checks passed in run `41904761285`, including PostgreSQL outage/reconnect, release safety, and workspace tests. Earlier heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. Head `29c580a` also exposed a PostgreSQL Docker cleanup wording failure; `24671ac`'s string matcher did not resolve it. |
+| E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214's source-built extracted-bundle regression. Both are non-installed evidence. The current local rc.27 packaging regression is E1 package verification only, not an E3 guest process. |
+| E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
+| E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |
+
 ## Critical dependencies and current verdict
 
-1. **B0 — governance:** PASS; PR #1210 merged at
-   `10f420f0874dcc6e37f125ac2fd19f3bcf845eaf` with the #975 closure guard.
-   #975 and #1086 remain OPEN, as do the other PP.6 acceptance workstreams.
-2. **B1 — candidate and host:** the authenticated rc.26 candidate is PASS;
-   provision the dedicated host below. Guest-based E4 lanes remain blocked
-   until the isolated host, authenticated images, and fixtures are ready. E5
-   additionally requires authorized physical power control; its absence does
-   not block an otherwise safe E4 claim.
+1. **B0 — governance:** PASS for protected merges #1212–#1214 and the current
+   protected-main CI snapshot. PR #1212 reviewed head
+   `dd959349157b5b181b4ac589526476fcc6302e93`, merge
+   `c984175d4bd45437236fa8267c9a5b562f02e621`; PR #1213 reviewed head
+   `b4315c7fe8f296893fd6a86c3c69ed177d26396b`, merge
+   `3dc280a563bbd3d1f63e2180ad7deba6f78461c2`; PR #1214 reviewed head
+   `cb6dba632276830e022038ea399c7a43164e3bff`, merge
+   `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b`. #975 and #1086 remain OPEN,
+   as do the other PP.6 acceptance workstreams.
+2. **B1 — candidate and host:** rc.27 is only a proposed source candidate;
+   there is no tag/release or authenticated artifact yet. rc.26 assets are
+   authenticated, but its guest verifier failed before installation. PR #1213
+   also records successful E3 local provisioning and ownership-checked cleanup
+   using harness SHA-256 `f1a64595d6eafe74d55bd972cfad2102298151e98fd2a5c04fbf2f80168cc76d`:
+   both guest identities, root/state/journal disk inodes, disabled host
+   forwarding, separate ext4 state/journal mounts, and cleanup of run-owned
+   guests/network were captured; evidence was retained at
+   `/var/tmp/pp6-local-20261104/evidence`. The run was `NOT_INSTALLED`; this is
+   not E4. For E4, first authenticate rc.27, then repeat read-only preflight on
+   the explicitly authorized dedicated host with authenticated images and
+   fixtures. E5 additionally requires authorized physical power control.
 3. **B2 — custody and fencing:** provide approved offline signer custody,
    trust/revocation distribution, and independently administered D7 fencing
    for the recovery lanes that require them. Witnessed BMC/PDU procedures are
@@ -81,13 +157,17 @@ fixtures; they do not assert that a production publisher ran.
 
 ## Read-only host preflight
 
-The harness is identical to protected `main`; its SHA-256 is
-`0c5332ae5e1f9cc483b73738d5dc1fdfd4d9dc9321503f2e9e0e883b5e6f844c`.
-`python3 -m unittest discover -s tests/pp6-qualification -p 'test_*.py' -v`
-passed 7/7 at `bf04c8b61c95435df973502f35197bb74df22f78`; the harness is
-unchanged at this document source. Only help, unit, and read-only host
-commands ran. No forwarding, firewall, network, guest, route, disk, service,
-package, or file changes were made.
+The proposed rc.27 qualification must begin with a fresh read-only preflight on
+the explicitly authorized dedicated disposable host, after rc.27 is
+authenticated. PR #1213 records a separate successful local E3 harness run
+with SHA-256
+`f1a64595d6eafe74d55bd972cfad2102298151e98fd2a5c04fbf2f80168cc76d`; it
+validated provisioning and cleanup ownership, but does not replace a fresh
+preflight or prove installed-release behavior. Its evidence records both guest
+identities, root/state/journal disk inodes, host forwarding disabled, separate
+ext4 state/journal mounts, and cleanup of run-owned VMs/network while retaining
+evidence under `/var/tmp/pp6-local-20261104/evidence`. The harness reported
+`NOT_INSTALLED`; classify this as E3 only.
 
 | Requirement | Shared development runner observation | Status |
 |---|---|---|
@@ -100,12 +180,14 @@ package, or file changes were made.
 | Authorized physical power control | No observable BMC/PDU authority or IPMI device; guest force-restart is not a substitute | **BLOCKED (E5 only; not an E4 gate)** |
 | Guest provision/install/recovery/power tests | Prohibited on this host and not attempted | NOT_RUN |
 
-### Current dedicated-host readiness result (2026-11-03)
+### Historical shared-development-host assessment (2026-11-03)
 
-The currently available execution host is **NOT READY** for qualification and
-is not authorized for provisioning. This session is `ubuntu` (UID 1000), not
-root. `systemd-detect-virt` reports KVM and `systemctl is-system-running`
-reports `degraded`. The host has a pre-existing stopped libvirt guest
+The shared development runner inspected on 2026-11-03 was **NOT READY** and
+was not authorized for provisioning. That historical observation is not a
+current assessment of the dedicated host used for PR #1213's E3 local run and
+does not authorize reuse of the shared host. The inspected session was
+`ubuntu` (UID 1000), not root. `systemd-detect-virt` reported KVM and
+`systemctl is-system-running` reported `degraded`. The host had a pre-existing stopped libvirt guest
 `o3k-a10-systemd-qualification`, multiple unrelated libvirt/container
 networks, and unrelated routed interfaces. Host IPv4 `ip_forward` and IPv6
 `conf/all/forwarding` are both `1`. No guest, route, firewall, forwarding,
@@ -113,15 +195,14 @@ service, package, or disk state was changed. Q1/Q2 provisioning was not
 attempted. The BMC/PDU prerequisite for E5 and authenticated guest-image
 prerequisite for E4 were not available for verification in this session.
 
-The exact external resource needed is the dedicated disposable qualification
-host specified below, with explicit root administrative access and exclusive
-authorization for the qualification run. Disable every IPv4/IPv6 forwarding
-control on that host before the read-only harness preflight; do not reuse this
-shared development runner. Supply authenticated official Debian 12 and Ubuntu
-24.04 cloud images with their vendor metadata/digests, and retain the host-only
-package/image fixtures and run evidence as specified. Until that resource and
-authorization are supplied, Q1/Q2 remain BLOCKED/NOT_RUN; the already verified
-rc.26 authenticity is not installed E4 evidence.
+No current host preflight has been run in this preparation. For rc.27 E4,
+use only the dedicated disposable qualification host specified below, with
+explicit root administrative access and authorization for this run. Perform
+the read-only host preflight before provisioning, and do not reuse the shared
+development runner. Supply authenticated official Debian 12 and Ubuntu 24.04
+cloud images with vendor metadata/digests, plus host-isolated package/image
+fixtures. The earlier rc.26 asset authenticity and PR #1213 E3 provisioning
+evidence are not installed E4 evidence.
 
 ## Exact dedicated-host provisioning specification
 
@@ -181,8 +262,8 @@ After B1/B2 are satisfied, choose a fresh lowercase run ID and export the exact
 values from the verified release; never copy them from an unverified manifest:
 
 ```bash
-export RUN_ID=pp6-rc26-run01
-export TAG=v0.4.0-rc.26
+export RUN_ID=pp6-rc27-run01
+export TAG=v0.4.0-rc.27
 export SOURCE_SHA=<exact-tag-commit>
 export ARTIFACT_SHA256=<archive-digest-from-verified-sigstore-manifest>
 gh release download "$TAG" --repo o3kio/o3k --dir release
@@ -258,19 +339,20 @@ never PASS.
 - **Require:** matching source/version/digest and hashes for installed `o3kd`,
   `o3k`, `o3k-compute`, and `o3k-network`; production `o3k` rejects
   `recovery-migrate-v2` and omits it from help.
-- **Current:** authenticated release identity **PASS** at `v0.4.0-rc.26` /
-  `901af47b306aa779aed72ef61ef25184fabf24eb` (Sigstore/Rekor, seven-entry
-  digest manifest, bundle, glibc floor, publisher exclusion, independent
-  Debian rebuild parity). Re-downloaded the immutable release assets and
-  independently reran `packaging/verify-release-sigstore.sh` for
-  `v0.4.0-rc.26` on 2026-11-03 with
-  `RELEASE_SOURCE_COMMIT=901af47b306aa779aed72ef61ef25184fabf24eb`;
-  Sigstore provenance
-  policy and digest checks passed. The archive SHA-256 is
+- **rc.26 assets:** authentication **PASS** at tag object
+  `b295a9a031ae2969497b6311ea87ee1ff421f676`, source
+  `901af47b306aa779aed72ef61ef25184fabf24eb`, archive SHA-256
   `6d7d034aa2f5fdc8ad78dd237ec64605a8623d8042bf23ac420a678051a76685`.
-  Installed manifest/executable capture is NOT_RUN because no dedicated host
-  is available. Q1 authenticity is PASS; Q1 installed identity is NOT_RUN and
-  overall installed Q1 remains BLOCKED.
+  The Sigstore/provenance and digest checks passed. **rc.26 guest verifier:**
+  FAIL (exit 2; required fixture missing at
+  `bins/o3k/tests/fixtures/a10-release-verify.pub`); installation did not
+  complete. These are separate outcomes: asset authentication PASS does not
+  establish guest verifier, installed identity, or Q1/Q2 PASS.
+- **rc.27:** authentication and installed identity NOT_RUN because no tag,
+  release, or artifact exists yet. After explicit owner authorization and
+  protected release workflow completion, repeat verification on the exact
+  downloaded assets. Q1 remains BLOCKED until the installed binaries and
+  manifest are captured on the qualified guests.
 
 ### Q2 — clean Debian 12 and Ubuntu 24.04 installation
 
@@ -280,8 +362,11 @@ never PASS.
 - **Require:** real systemd, separate ext4 mounts, expected units/accounts,
   successful idempotent reinstall behavior where supported, and no foreign
   resource mutation.
-- **Current:** E4 NOT_RUN; authenticated candidate exists, but the dedicated
-  host and clean guests are absent. Overall **BLOCKED**.
+- **Current:** E4 NOT_RUN. rc.26 guest verification failed before install;
+  rc.27 is untagged and unpublished. PR #1213's successful isolated guest
+  provisioning/cleanup is E3 infrastructure evidence only. Perform Q2 on both
+  OSes only after rc.27 is authenticated and dedicated-host preflight passes.
+  Overall **BLOCKED**.
 
 ### Q3 — C1/C1.1 policy, trust, revocation, and re-anchor
 
@@ -419,7 +504,7 @@ tests/pp6-qualification/host-env.py destroy --run-id "$RUN_ID"
 1. Immediate infrastructure task: provision the dedicated qualification host,
    authenticated guest images, approved custody/trust/revocation material, and
    independent D7 fencing required by each recovery lane. Then execute the
-   applicable E4 checks against authenticated rc.26. Run Q9/E5 separately only
+   applicable E4 checks against authenticated rc.27. Run Q9/E5 separately only
    after written authorization, a suitable bare-metal host, and authorized
    BMC/PDU control are available; their absence does not block E4 evidence.
    Record each OS and evidence tier independently, and do not mark a lane PASS

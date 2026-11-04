@@ -83,6 +83,26 @@ fn upgrade_overrides_allowed(effective_uid: u32) -> bool {
     effective_uid != 0
 }
 
+/// Resolves the host identity file with the same non-root-only sandbox
+/// boundary as upgrade paths. Privileged upgrades inspect the real host file.
+fn os_release_path_for(effective_uid: u32, override_path: Option<PathBuf>) -> PathBuf {
+    if upgrade_overrides_allowed(effective_uid) {
+        override_path.unwrap_or_else(|| PathBuf::from("/etc/os-release"))
+    } else {
+        PathBuf::from("/etc/os-release")
+    }
+}
+
+fn os_release_path() -> PathBuf {
+    let effective_uid = current_euid();
+    let override_path = if upgrade_overrides_allowed(effective_uid) {
+        env_path("O3K_UPGRADE_OS_RELEASE_FILE")
+    } else {
+        None
+    };
+    os_release_path_for(effective_uid, override_path)
+}
+
 impl SystemUpgradeIo {
     /// Resolves the sandboxable paths from the process environment.
     #[must_use]
@@ -847,7 +867,8 @@ impl SystemUpgradeIo {
 
     /// Asserts supported distro and architecture (plan §5).
     fn check_platform(&self) -> Result<(), String> {
-        let contents = std::fs::read_to_string("/etc/os-release")
+        let os_release_path = os_release_path();
+        let contents = std::fs::read_to_string(&os_release_path)
             .map_err(|error| format!("cannot read /etc/os-release: {error}"))?;
         let mut id = None;
         let mut version_id = None;
@@ -1941,6 +1962,22 @@ mod tests {
         assert!(!upgrade_overrides_allowed(0));
         assert!(upgrade_overrides_allowed(1000));
         assert!(upgrade_overrides_allowed(u32::MAX));
+    }
+
+    #[test]
+    fn root_cannot_redirect_host_platform_identity() {
+        assert_eq!(
+            os_release_path_for(0, Some(PathBuf::from("/tmp/test-os-release"))),
+            PathBuf::from("/etc/os-release")
+        );
+        assert_eq!(
+            os_release_path_for(1000, Some(PathBuf::from("/tmp/test-os-release"))),
+            PathBuf::from("/tmp/test-os-release")
+        );
+        assert_eq!(
+            os_release_path_for(1000, None),
+            PathBuf::from("/etc/os-release")
+        );
     }
 
     /// Entry-name validation mirrors `safe_extract` exactly.

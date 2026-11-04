@@ -42,7 +42,7 @@ RHEL/Fedora, other releases, and other profiles are not supported.
 2. creates a private `mktemp -d` temp dir with trap cleanup — nothing is
    executed from unverified content;
 3. resolves the version from the pin baked into the installer
-   (`O3K_INSTALLER_VERSION=v0.4.0-rc.26` in the current source); precedence is the `O3K_VERSION`
+   (`O3K_INSTALLER_VERSION=v0.4.0-rc.27` in the current source); precedence is the `O3K_VERSION`
    env override (dev/test only) > an optional endpoint-injected
    `O3K_PINNED_VERSION` first line > the baked pin. The installer never
    consults a channel service and never falls back to `main`/`latest`;
@@ -100,9 +100,11 @@ public-API resources.
 
 Every published installer is pinned to its own release version (the baked
 `O3K_INSTALLER_VERSION` constant in `packaging/get-o3k.sh`). The current source
-is pinned to `v0.4.0-rc.26`, a PP.6 Stage 2 qualification candidate that is not
-PP.6-certified or production-ready. The installer never asks any endpoint which
-version to install.
+is pinned to `v0.4.0-rc.27`, the proposed PP.6 Stage 2 qualification candidate.
+This source pin is not a published release yet; until the protected release
+workflow publishes it after explicit owner authorization, the release assets
+will not resolve. It is not PP.6-certified or production-ready. The installer
+never asks any endpoint which version to install.
 
 Version resolution precedence:
 
@@ -110,7 +112,7 @@ Version resolution precedence:
    precedence):
 
    ```sh
-   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.26 sh -
+   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.27 sh -
    ```
 
 2. an optional `O3K_PINNED_VERSION="<version>"` first line, kept for the
