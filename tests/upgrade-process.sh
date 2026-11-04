@@ -20,6 +20,9 @@
 #     (the same SystemExec seam the doctor uses). If the engine later adopts
 #     an internal HTTP client for downloads, it must honor an equivalent
 #     override so this test stays offline.
+#   - the supported-platform preflight reads a private Debian 12 os-release
+#     fixture through the non-root-only `O3K_UPGRADE_OS_RELEASE_FILE` seam, so
+#     this process contract stays independent of the CI runner's distro.
 #   - the concurrent-invocation lock is `<state-file>.lock` (O_EXCL with
 #     dead-pid reclaim — the engine's unsafe-free equivalent of the plan §2
 #     flock; the test pre-creates it with a live pid).
@@ -42,6 +45,11 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-upgrade-process.XXXXXX")"
 chmod 0755 "$WORK_DIR" # unprivileged engine runs must be able to traverse it
 OUT_DIR="$WORK_DIR/outputs"
 mkdir -p "$OUT_DIR"
+SUPPORTED_OS_RELEASE="$WORK_DIR/os-release"
+cat >"$SUPPORTED_OS_RELEASE" <<'EOF'
+ID=debian
+VERSION_ID="12"
+EOF
 SERVER_PIDS=()
 PASS=0
 FAIL=0
@@ -907,6 +915,7 @@ run_engine() {
   O3K_UPGRADE_BACKUP_DIR="$case_dir/backups" \
   O3K_UPGRADE_DOWNLOAD_DIR="$case_dir/download" \
   O3K_UPGRADE_RELEASES_URL="http://127.0.0.1:$ENDPOINT_PORT/api/" \
+  O3K_UPGRADE_OS_RELEASE_FILE="$SUPPORTED_OS_RELEASE" \
   O3K_UPGRADE_ASSUME_ROOT=1 \
   O3K_UPGRADE_DOCTOR_RETRY_ATTEMPTS=2 \
   O3K_UPGRADE_DOCTOR_RETRY_DELAY_MS=50 \

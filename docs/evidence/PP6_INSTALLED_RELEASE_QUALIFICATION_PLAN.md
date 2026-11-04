@@ -100,7 +100,7 @@ not identified in the retained evidence cited here.
 | Tier / lane | Result |
 |---|---|
 | E1 source/unit | **PASS** at proposed source commit `a3c3da404f302c74d7bf38af490e156f9c58a266`: format, Clippy, workspace tests, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. |
-| E2 protected CI | **PASS** for the protected merges and current main snapshot. Candidate PR #1215 is incomplete: the Rust check failed twice in the upgrade process matrix; other reported PR checks pass. |
+| E2 protected CI | **PASS** for the protected merges and current main snapshot. Candidate PR #1215 is incomplete: its previous head failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. The corrected exact head's checks are pending. |
 | E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214's source-built extracted-bundle regression. Both are non-installed evidence. The current local rc.27 packaging regression is E1 package verification only, not an E3 guest process. |
 | E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
 | E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |
