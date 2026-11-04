@@ -1,11 +1,14 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
 **Status:** executable plan; PP.6 remains **BLOCKED**. **Status snapshot:**
-protected `main` at `3dc280a563bbd3d1f63e2180ad7deba6f78461c2` (2026-11-04).
-PRs #1212, #1213, and #1214 are merged; their exact reviewed heads and
-protected merge identities are recorded below. The proposed successor is
-`v0.4.0-rc.27`; no tag or GitHub Release exists, so its authenticated release
-identity and installed qualification are NOT_RUN. **Previously authenticated
+protected `main` at `c454134e584288b49637b11592bb0b59351d022a` (2026-11-04),
+the merge-queue commit for PR #1215. PR #1215 reviewed head was
+`2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`; its source implementation head
+was `3e9e53f867fd8b23bb629fd545e36443565ec4bd`. PRs #1212–#1215 are merged;
+their exact reviewed heads and protected merge identities are recorded below.
+The proposed successor is `v0.4.0-rc.27`; no tag or GitHub Release exists,
+so its authenticated release identity and installed qualification are NOT_RUN.
+**Previously authenticated
 release:** immutable `v0.4.0-rc.26`, source
 `901af47b306aa779aed72ef61ef25184fabf24eb`, tag object
 `b295a9a031ae2969497b6311ea87ee1ff421f676`.
@@ -28,11 +31,16 @@ Q2 pass is inferred from the successful asset authentication**. PR #1214
 fixes this package self-containment defect and adds extracted-archive negative
 coverage. rc.26 remains immutable and is not to be retagged or repaired.
 
-The proposed rc.27 source includes protected merges #1212–#1214, aligned
-version pins, and candidate notes. It must pass source and protected checks,
-exact-head human review, the accepted protected merge process, and release
-bundle regressions before its source identity can be frozen. Tag creation and
-publication remain stopped pending explicit owner release authorization.
+The rc.27 source includes protected merges #1212–#1214 and PR #1215, with
+aligned version pins and candidate notes. PR #1215 was approved by
+`senolcolak` at exact head `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`.
+Its exact-head protected checks passed in run `41909388446`; merge-queue CI
+`41914575991`, Mock Cinder `41914576072`, and PostgreSQL tablespace
+`41914576122` all passed on synthetic merge candidate
+`c454134e584288b49637b11592bb0b59351d022a`. The queue merged PR #1215 to
+protected `main` at that commit. This freezes the source candidate only; it
+does not build or authenticate release assets. Tag creation and publication
+remain stopped pending explicit owner release authorization.
 
 ## Evidence classes
 
@@ -63,9 +71,10 @@ fixtures; they do not assert that a production publisher ran.
 | #1212 | `dd959349157b5b181b4ac589526476fcc6302e93` → `c984175d4bd45437236fa8267c9a5b562f02e621` | Signed journal restart tests. Source tests and protected PR checks passed; no installed-release or power-loss claim. |
 | #1213 | `b4315c7fe8f296893fd6a86c3c69ed177d26396b` → `3dc280a563bbd3d1f63e2180ad7deba6f78461c2` | Harness pins the guest root device to virtio `vda`; serializes cloud-init as JSON/YAML; waits for cloud-init completion; parses actual DHCP lease timestamp/MAC/protocol layout; checks ext4 devices as guest root; permits cleanup only for run-owned disks owned by `libvirt-qemu`; records the generated SSH host public key in the ownership marker. Tests cover serialization, DHCP parsing, and root-device selection. A local run with harness SHA-256 `f1a64595d6eafe74d55bd972cfad2102298151e98fd2a5c04fbf2f80168cc76d` successfully provisioned Debian 12 and Ubuntu 24.04 guests, captured guest/disk identities and distinct ext4 state/journal mounts with host forwarding disabled, then removed run-owned guests/network while retaining evidence at `/var/tmp/pp6-local-20261104/evidence`. It recorded `NOT_INSTALLED`: E3 infrastructure evidence only, not Q1/Q2 or E4. |
 | #1214 | `cb6dba632276830e022038ea399c7a43164e3bff` → `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b` | Makes packaged A10 verification self-contained and runs it against an extracted archive in a clean environment. Negative cases cover malformed checksums, changed content, A10 fault marker, embedded public test key, linked publisher symbol, missing `nm`, failing `strings`; optimized and stripped binaries pass, and release `o3k` rejects the excluded `recovery-migrate-v2` command. PR checks passed. rc.26 fail-before returned exit 2 because `bins/o3k/tests/fixtures/a10-release-verify.pub` was absent, even though its release assets authenticated; local fix-after bundle regression is source-built E1 evidence, not a new authenticated release. |
+| #1215 | `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e` → `c454134e584288b49637b11592bb0b59351d022a` | Aligns Cargo/installer/worker/Helm/Docker version references and candidate release notes; preserves Debian 12 baseline and extracted self-contained A10 verifier coverage. Repairs the non-root-only Debian 12 platform fixture for the upgrade-process test and makes PostgreSQL Docker cleanup fail closed by requiring a successful empty full-ID container listing after failed inspect. Reviewer `senolcolak` approved the exact head; PR checks passed in `41909388446`; merge-queue CI `41914575991`, Mock Cinder `41914576072`, and PostgreSQL tablespace `41914576122` passed. This prepares source only and does not create a release. |
 
-The current protected-main snapshot reports 19 completed checks, all passing.
-Candidate source commit `3e9e53f867fd8b23bb629fd545e36443565ec4bd` passes
+Candidate source implementation head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`
+passes
 `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and
 `cargo test --workspace --all-features`. The PP.6 harness tests pass 9/9;
 release-gate, bundle-integrity, worker-asset-sync, actionlint/workflow, and
@@ -79,17 +88,17 @@ identity claim. A direct local optimized build was rejected by the glibc
 baseline check (host glibc 2.39 exceeds Debian 12's 2.36 ceiling); the
 protected Debian 12 build remains mandatory.
 
-The PR #1215 run `41897296059` failed its required PostgreSQL outage/reconnect
-step twice, and run `41902153244` failed after an initial string-matching
-cleanup fix. The unchanged test on protected `main` had passed earlier the
-same day. The candidate now verifies absence with a successful full-ID Docker
-container listing after inspect fails; daemon/listing errors and any nonempty
-listing remain failures. The focused unit test passes locally. Protected CI
-run `41904761285` passed the formerly failing ignored Docker outage lane and
-all other required checks on exact head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`;
-human review approved that same head. Earlier failed attempts are retained as
-diagnostic history. Merged PR evidence and local packaging regressions do not
-authorize release publication.
+The PR #1215 runs `41897296059` and `41902153244` failed the PostgreSQL
+outage/reconnect step during investigation. The final full-ID listing fix
+passed that Docker outage lane and all other branch checks on code head
+`3e9e53f867fd8b23bb629fd545e36443565ec4bd`; final reviewed head
+`2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e` passed all PR checks in
+`41909388446`. Reviewer `senolcolak` approved that exact final head. The merge
+queue then passed CI `41914575991`, Mock Cinder `41914576072`, and PostgreSQL
+tablespace `41914576122` before merging to
+`c454134e584288b49637b11592bb0b59351d022a`. Earlier failed attempts are
+retained as diagnostic history. Passing checks and source-built regressions do
+not authorize release publication.
 
 ## Candidate Q1/Q2 status by operating system
 
@@ -108,7 +117,7 @@ not identified in the retained evidence cited here.
 | Tier / lane | Result |
 |---|---|
 | E1 source/unit | **PASS** at proposed source commit `3e9e53f867fd8b23bb629fd545e36443565ec4bd`: format, workspace Clippy with warnings denied, all-feature workspace tests, focused Docker-listing cleanup test, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. |
-| E2 protected CI | **PASS** on exact reviewed head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`: all 10 PR checks passed in run `41904761285`, including PostgreSQL outage/reconnect, release safety, and workspace tests. Earlier heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. Head `29c580a` also exposed a PostgreSQL Docker cleanup wording failure; `24671ac`'s string matcher did not resolve it. |
+| E2 protected CI | **PASS** on exact reviewed PR head `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`: all PR checks passed in run `41909388446`. The protected merge queue then passed CI `41914575991`, Mock Cinder `41914576072`, and PostgreSQL tablespace `41914576122` on merge candidate and final protected source `c454134e584288b49637b11592bb0b59351d022a`. Earlier heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. Head `29c580a` also exposed a PostgreSQL Docker cleanup wording failure; `24671ac`'s string matcher did not resolve it. |
 | E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214's source-built extracted-bundle regression. Both are non-installed evidence. The current local rc.27 packaging regression is E1 package verification only, not an E3 guest process. |
 | E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
 | E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |
@@ -116,13 +125,16 @@ not identified in the retained evidence cited here.
 ## Critical dependencies and current verdict
 
 1. **B0 — governance:** PASS for protected merges #1212–#1214 and the current
-   protected-main CI snapshot. PR #1212 reviewed head
+   protected-main merge queue. PR #1212 reviewed head
    `dd959349157b5b181b4ac589526476fcc6302e93`, merge
    `c984175d4bd45437236fa8267c9a5b562f02e621`; PR #1213 reviewed head
    `b4315c7fe8f296893fd6a86c3c69ed177d26396b`, merge
    `3dc280a563bbd3d1f63e2180ad7deba6f78461c2`; PR #1214 reviewed head
    `cb6dba632276830e022038ea399c7a43164e3bff`, merge
-   `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b`. #975 and #1086 remain OPEN,
+   `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b`. PR #1215 reviewed head
+   `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`, protected merge
+   `c454134e584288b49637b11592bb0b59351d022a`; exact-head review, PR checks,
+   and merge-queue checks passed. #975 and #1086 remain OPEN,
    as do the other PP.6 acceptance workstreams.
 2. **B1 — candidate and host:** rc.27 is only a proposed source candidate;
    there is no tag/release or authenticated artifact yet. rc.26 assets are
