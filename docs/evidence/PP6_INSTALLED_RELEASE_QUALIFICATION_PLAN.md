@@ -65,9 +65,23 @@ fixtures; they do not assert that a production publisher ran.
 | #1214 | `cb6dba632276830e022038ea399c7a43164e3bff` → `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b` | Makes packaged A10 verification self-contained and runs it against an extracted archive in a clean environment. Negative cases cover malformed checksums, changed content, A10 fault marker, embedded public test key, linked publisher symbol, missing `nm`, failing `strings`; optimized and stripped binaries pass, and release `o3k` rejects the excluded `recovery-migrate-v2` command. PR checks passed. rc.26 fail-before returned exit 2 because `bins/o3k/tests/fixtures/a10-release-verify.pub` was absent, even though its release assets authenticated; local fix-after bundle regression is source-built E1 evidence, not a new authenticated release. |
 
 The current protected-main snapshot reports 19 completed checks, all passing.
-The rc.27 preparation PR still requires exact-head human review and its own
-protected CI. The merged PR evidence above does not authorize release
-publication.
+Candidate source commit `a3c3da404f302c74d7bf38af490e156f9c58a266` passes
+`cargo fmt --all -- --check`, workspace Clippy with warnings denied, and
+`cargo test --workspace --all-features`. The PP.6 harness tests pass 9/9;
+release-gate, bundle-integrity, worker-asset-sync, actionlint/workflow, and
+release publisher-exclusion regressions pass. Installer negatives pass 27/27
+with the root-only full-wrapper case skipped because this runner is not root.
+The extracted rc.27 packaging regression archive passes all 11 A10 positive
+and negative cases outside the checkout. That local archive used the
+authenticated rc.26 binaries solely to exercise rc.27 packaging/verifier
+source; it is not an rc.27 build, release artifact, or source-to-binary
+identity claim. A direct local optimized build was rejected by the glibc
+baseline check (host glibc 2.39 exceeds Debian 12's 2.36 ceiling); the
+protected Debian 12 build remains mandatory.
+
+The candidate PR still requires exact-head human review and its own protected
+CI. The merged PR evidence and local packaging regression do not authorize
+release publication.
 
 ## Candidate Q1/Q2 status by operating system
 
@@ -85,9 +99,9 @@ not identified in the retained evidence cited here.
 
 | Tier / lane | Result |
 |---|---|
-| E1 source/unit | **PASS** for merged #1212–#1214 evidence; proposed rc.27 candidate-specific and packaging checks are pending in this branch. |
+| E1 source/unit | **PASS** at proposed source commit `a3c3da404f302c74d7bf38af490e156f9c58a266`: format, Clippy, workspace tests, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. |
 | E2 protected CI | **PASS** for the protected merges and current main snapshot; candidate PR checks are not yet run. |
-| E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214 source-built extracted-bundle regression. Both are non-installed evidence. |
+| E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214's source-built extracted-bundle regression. Both are non-installed evidence. The current local rc.27 packaging regression is E1 package verification only, not an E3 guest process. |
 | E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
 | E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |
 
