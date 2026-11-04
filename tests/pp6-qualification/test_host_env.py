@@ -3,6 +3,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("host-env.py")
@@ -12,6 +13,34 @@ SPEC.loader.exec_module(HOST_ENV)
 
 
 class HostEnvironmentSafetyTests(unittest.TestCase):
+    def test_cloud_config_is_parseable_and_preserves_pinned_identities(self):
+        import json
+        private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n"
+        raw = HOST_ENV.guest_user_data("guest", private_key, "ssh-ed25519 host-key", "ssh-ed25519 user-key",
+                                     "O3KSTATE0", "O3KJOURNAL0")
+        self.assertTrue(raw.startswith("#cloud-config\n"))
+        config = json.loads(raw.split("\n", 1)[1])
+        self.assertEqual(config["ssh_keys"]["ed25519_private"], private_key)
+        self.assertEqual(config["ssh_keys"]["ed25519_public"], "ssh-ed25519 host-key")
+        self.assertEqual(config["users"][1]["ssh_authorized_keys"], ["ssh-ed25519 user-key"])
+        self.assertEqual(config["users"][1]["sudo"], ["ALL=(ALL) NOPASSWD:ALL"])
+        self.assertIs(config["ssh_pwauth"], False)
+
+    def test_lease_ip_parses_real_virsh_timestamp_and_matches_mac_and_protocol(self):
+        leases = ''' Expiry Time           MAC address         Protocol   IP address          Hostname   Client ID
+---------------------------------------------------------------------------------------
+ 2026-11-04 12:24:01   52:54:00:00:00:02   ipv4       192.168.187.47/24   foreign    -
+ 2026-11-04 12:24:01   52:54:00:00:00:01   ipv6       2001:db8::1/64     guest      -
+ 2026-11-04 12:24:01   52:54:00:00:00:01   ipv4       192.168.187.48/24   guest      -
+'''
+        with patch.object(HOST_ENV, "call", return_value=leases):
+            self.assertEqual(HOST_ENV.lease_ip("qualification", "52:54:00:00:00:01"), "192.168.187.48")
+            self.assertIsNone(HOST_ENV.lease_ip("qualification", "52:54:00:00:00:03"))
+        for invalid in ("999.168.187.48/24", "192.168.187.48/99", "not-an-ip"):
+            with self.subTest(invalid=invalid), patch.object(
+                    HOST_ENV, "call", return_value=f"2026-11-04 12:24:01 52:54:00:00:00:01 ipv4 {invalid}"):
+                self.assertIsNone(HOST_ENV.lease_ip("qualification", "52:54:00:00:00:01"))
+
     def test_run_id_is_bounded_and_canonical(self):
         self.assertEqual(HOST_ENV.run_path("pp6-20261101-run01").name, "pp6-20261101-run01")
         for value in ("../outside", "Bad-ID", "short", "x" * 41):
@@ -68,6 +97,9 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
                    '<interface><mac address="52:54:00:00:00:01"/>'
                    '<source network="o3k-pp6-run123"/></interface></devices></domain>')
             self.assertEqual(HOST_ENV.domain_identity(xml, "debian12", guest, private), "guest-uuid")
+            wrong_root_target = xml.replace('dev="vda"', 'dev="vdd"')
+            with self.assertRaises(RuntimeError):
+                HOST_ENV.domain_identity(wrong_root_target, "debian12", guest, private)
             foreign = xml.replace(str(guest_dir / "state.qcow2"), "/var/lib/foreign.qcow2")
             with self.assertRaises(RuntimeError):
                 HOST_ENV.domain_identity(foreign, "debian12", guest, private)
