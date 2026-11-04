@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "o3k"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "base64",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-api"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "axum",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-cellhv"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "o3k-provider",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-cinder"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "axum",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-compute"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-compute-agent"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "base64",
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-compute-bin"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "axum",
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-config"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "serde",
  "thiserror",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-config-drive"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-console"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "thiserror",
  "uuid",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-controller-protocol"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "o3k-kernel",
  "prost",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-database-example"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-dhcp"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-domain"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -2063,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-identity"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "axum",
  "base64",
@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-image"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "o3k-kernel",
  "o3k-store",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-kernel"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-libvirt"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "o3k-provider",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-migration"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2141,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-native-api"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "axum",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-network"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "fabric-conformance",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-network-bin"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "o3k-domain",
  "o3k-network",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-network-protocol"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "prost",
  "rustls",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-placement"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "o3k-store",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-provider"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "o3k-domain",
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-provider-contract"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "o3k-provider",
  "prost",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-reconciler"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-scheduler"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "o3k-placement",
  "o3k-store",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-service-sdk"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-storage"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "o3k-domain",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-store"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "base64",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "o3kd"
-version = "0.4.0-rc.26"
+version = "0.4.0-rc.27"
 dependencies = [
  "async-trait",
  "axum",

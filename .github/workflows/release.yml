@@ -111,8 +111,10 @@ jobs:
           production-ready and not PP.6-certified. No PP.7 or Araf
           certification is claimed.
 
-          This candidate carries the PP.6 recovery-source milestones merged
-          since rc.24 (#1198-#1203 and #1205-#1207). Its explicit limits:
+          This candidate carries the PP.6 source and qualification fixes merged
+          after rc.26 (#1212-#1214), including signed journal restart tests,
+          reliable isolated guest provisioning/cleanup, and a self-contained
+          extracted-archive A10 verifier. Its explicit limits:
 
           - the production bundle intentionally excludes the
             o3k recovery-migrate-v2 command; publisher process evidence is

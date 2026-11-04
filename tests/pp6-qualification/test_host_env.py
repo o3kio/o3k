@@ -124,7 +124,7 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         record = {
             "release_manifest": {
                 "source_commit": "a" * 40,
-                "version": "0.4.0-rc.25",
+                "version": "0.4.0-rc.27",
                 "profile": "libvirt",
                 "release_artifact_sha256": "b" * 64,
             },
@@ -136,13 +136,13 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
                 for name in ("o3kd", "o3k", "o3k-compute", "o3k-network")
             },
         }
-        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.25", "b" * 64)
+        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.27", "b" * 64)
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.25", "b" * 64)
+            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.27", "b" * 64)
         altered = {**record, "executables": dict(record["executables"])}
         altered["executables"].pop("o3k-network")
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.25", "b" * 64)
+            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.27", "b" * 64)
 
     def test_destroy_identity_check_rejects_unknown_and_replaced_files(self):
         with tempfile.TemporaryDirectory() as directory:
