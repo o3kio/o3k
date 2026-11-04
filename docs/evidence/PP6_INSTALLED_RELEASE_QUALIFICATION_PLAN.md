@@ -65,7 +65,7 @@ fixtures; they do not assert that a production publisher ran.
 | #1214 | `cb6dba632276830e022038ea399c7a43164e3bff` → `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b` | Makes packaged A10 verification self-contained and runs it against an extracted archive in a clean environment. Negative cases cover malformed checksums, changed content, A10 fault marker, embedded public test key, linked publisher symbol, missing `nm`, failing `strings`; optimized and stripped binaries pass, and release `o3k` rejects the excluded `recovery-migrate-v2` command. PR checks passed. rc.26 fail-before returned exit 2 because `bins/o3k/tests/fixtures/a10-release-verify.pub` was absent, even though its release assets authenticated; local fix-after bundle regression is source-built E1 evidence, not a new authenticated release. |
 
 The current protected-main snapshot reports 19 completed checks, all passing.
-Candidate source commit `29c580af2a0e0e730f011734894d7517416ffe7e` passes
+Candidate source commit `3e9e53f867fd8b23bb629fd545e36443565ec4bd` passes
 `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and
 `cargo test --workspace --all-features`. The PP.6 harness tests pass 9/9;
 release-gate, bundle-integrity, worker-asset-sync, actionlint/workflow, and
@@ -84,10 +84,12 @@ step twice, and run `41902153244` failed after an initial string-matching
 cleanup fix. The unchanged test on protected `main` had passed earlier the
 same day. The candidate now verifies absence with a successful full-ID Docker
 container listing after inspect fails; daemon/listing errors and any nonempty
-listing remain failures. The focused unit test passes locally, while the
-ignored Docker lane awaits another protected run. Exact-head protected CI and
-human review remain required. Merged PR evidence and local packaging
-regressions do not authorize release publication.
+listing remain failures. The focused unit test passes locally. Protected CI
+run `41904761285` passed the formerly failing ignored Docker outage lane and
+all other required checks on exact head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`;
+human review approved that same head. Earlier failed attempts are retained as
+diagnostic history. Merged PR evidence and local packaging regressions do not
+authorize release publication.
 
 ## Candidate Q1/Q2 status by operating system
 
@@ -105,8 +107,8 @@ not identified in the retained evidence cited here.
 
 | Tier / lane | Result |
 |---|---|
-| E1 source/unit | **PASS** at proposed source commit `29c580af2a0e0e730f011734894d7517416ffe7e`: format, Clippy, workspace tests, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. The focused Docker-listing cleanup unit test also passes locally. |
-| E2 protected CI | **PASS** for the protected merges and current main snapshot. Candidate PR #1215's earlier heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. At `29c580a`, all checks except Rust passed; the PostgreSQL outage-test cleanup failed twice. At `24671ac`, CI also failed that test despite string-matcher follow-up. The new empty full-ID Docker-listing cleanup check is pending protected CI on the current head. |
+| E1 source/unit | **PASS** at proposed source commit `3e9e53f867fd8b23bb629fd545e36443565ec4bd`: format, workspace Clippy with warnings denied, all-feature workspace tests, focused Docker-listing cleanup test, harness unit tests, workflow validation, release gate, bundle integrity, installer negatives (27 pass; root-only wrapper skipped), publisher exclusion, and extracted packaging regression. The local archive reused authenticated rc.26 binaries and is not candidate release identity evidence. |
+| E2 protected CI | **PASS** on exact reviewed head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`: all 10 PR checks passed in run `41904761285`, including PostgreSQL outage/reconnect, release safety, and workspace tests. Earlier heads failed the upgrade process matrix because the Ubuntu 26.04 CI host is outside the supported platform allowlist. Head `29c580a` also exposed a PostgreSQL Docker cleanup wording failure; `24671ac`'s string matcher did not resolve it. |
 | E3 qualification-only process | **PASS** for #1213 local provisioning and ownership-checked cleanup; **PASS** for #1214's source-built extracted-bundle regression. Both are non-installed evidence. The current local rc.27 packaging regression is E1 package verification only, not an E3 guest process. |
 | E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
 | E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |
