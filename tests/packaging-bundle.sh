@@ -17,21 +17,25 @@ for file in \
 done
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passwords.sh"
 
-printf '#!/usr/bin/env bash\nprintf bundled-o3kd\n' >"$BUNDLE_DIR/bin/o3kd"
-chmod 0755 "$BUNDLE_DIR/bin/o3kd"
-cat >"$BUNDLE_DIR/bin/o3k" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${1-}" == "recovery-migrate-v2" ]]; then
-  printf "error: unrecognized subcommand 'recovery-migrate-v2'\n" >&2
-  exit 2
-fi
-printf bundled-o3k
+# The release verifier inspects executable artifacts with nm and strings, so
+# use a native dispatcher fixture rather than shell scripts/plain text here.
+# The production optimized O3K binary is checked by the A10 release guard.
+cat >"$WORK_DIR/bundle-dispatch-fixture.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+  if (argc > 1 && strcmp(argv[1], "recovery-migrate-v2") == 0) {
+    fputs("error: unrecognized subcommand 'recovery-migrate-v2'\n", stderr);
+    return 2;
+  }
+  puts("bundle test executable");
+  return 0;
+}
 EOF
-chmod 0755 "$BUNDLE_DIR/bin/o3k"
-printf '#!/usr/bin/env bash\nprintf bundled-o3k-compute\n' >"$BUNDLE_DIR/bin/o3k-compute"
-chmod 0755 "$BUNDLE_DIR/bin/o3k-compute"
-printf '#!/usr/bin/env bash\nprintf bundled-o3k-network\n' >"$BUNDLE_DIR/bin/o3k-network"
-chmod 0755 "$BUNDLE_DIR/bin/o3k-network"
+"${CC:-cc}" -O2 -o "$BUNDLE_DIR/bin/o3k" "$WORK_DIR/bundle-dispatch-fixture.c"
+for executable in o3kd o3k-compute o3k-network; do
+  cp "$BUNDLE_DIR/bin/o3k" "$BUNDLE_DIR/bin/$executable"
+done
 # Bundle-root provenance fixtures (issue #617): install.sh installs them as
 # share/o3k/release-manifest.json and share/o3k/SHA256SUMS exactly like the
 # real bundle produced by make-release.sh.
@@ -245,8 +249,8 @@ if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   # The declared schema_version must equal the max migration prefix under
   # crates/o3k-store/migrations/ (computed independently so a future
   # migration does not silently break this assertion).
-  EXPECTED_SCHEMA_VERSION="$(ls "$ROOT_DIR/crates/o3k-store/migrations/"*.sql \
-    | sed 's|.*/||' | sed -n 's/^\([0-9][0-9]*\)_.*\.sql$/\1/p' \
+  EXPECTED_SCHEMA_VERSION="$(find "$ROOT_DIR/crates/o3k-store/migrations" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' \
+    | sed -n 's/^\([0-9][0-9]*\)_.*\.sql$/\1/p' \
     | sort -n | tail -n1 | sed 's/^0*//')"
   [[ -n "$EXPECTED_SCHEMA_VERSION" ]] || { echo "no migrations found" >&2; exit 1; }
   python3 - "$ASSET_DIST/o3k-$ASSET_VERSION/manifest.json" \

@@ -171,6 +171,28 @@ if [[ "$status" -eq 0 ]] || ! grep -Fq 'nm (binutils) is required' "$WORK_DIR/no
 fi
 record "missing symbol inspection tool" "FAIL as expected (exit $status; nm required)"
 
+BAD_NM="$WORK_DIR/bad-nm"
+clone_bundle "$BAD_NM"
+BAD_NM_PATH="$WORK_DIR/path-with-bad-nm"
+mkdir -p "$BAD_NM_PATH"
+cat >"$BAD_NM_PATH/nm" <<'EOF'
+#!/usr/bin/env bash
+exit 43
+EOF
+chmod 0755 "$BAD_NM_PATH/nm"
+if env -i HOME="$WORK_DIR/home" PATH="$BAD_NM_PATH:$PATH" /bin/bash \
+  "$BAD_NM/packaging/verify-release-bundle.sh" "$BAD_NM" >"$WORK_DIR/bad-nm.log" 2>&1; then
+  status=0
+else
+  status=$?
+fi
+if [[ "$status" -ne 2 ]] || ! grep -Fq 'could not inspect release executable symbols' "$WORK_DIR/bad-nm.log"; then
+  cat "$WORK_DIR/bad-nm.log" >&2
+  echo "nonfunctional nm tool was not rejected explicitly (exit $status)" >&2
+  exit 1
+fi
+record "nonfunctional symbol inspection tool" "FAIL as expected (exit $status; explicit inspection error)"
+
 BAD_STRINGS="$WORK_DIR/bad-strings"
 clone_bundle "$BAD_STRINGS"
 BAD_STRINGS_PATH="$WORK_DIR/path-with-bad-strings"

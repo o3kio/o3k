@@ -35,6 +35,22 @@ for tool in nm strings; do
   }
 done
 
+reject_if_present() {
+  local marker="$1" description="$2" artifact="$3" inspected_file="$4" status=0
+  grep -Fq -- "$marker" "$inspected_file" || status=$?
+  case "$status" in
+    0)
+      echo "$description: $artifact" >&2
+      exit 1
+      ;;
+    1) ;;
+    *)
+      echo "could not search inspected release executable output: $artifact" >&2
+      exit 2
+      ;;
+  esac
+}
+
 for artifact in "${artifacts[@]}"; do
   [[ -f "$artifact" && -x "$artifact" ]] || {
     echo "release executable artifact is missing or not executable: $artifact" >&2
@@ -44,25 +60,19 @@ for artifact in "${artifacts[@]}"; do
     echo "could not inspect release executable symbols: $artifact" >&2
     exit 2
   fi
-  if grep -Fq 'recovery_migration_publisher' "$inspection_dir/symbols"; then
-    echo "release executable contains linked A10.1 publisher symbols: $artifact" >&2
-    exit 1
-  fi
+  reject_if_present 'recovery_migration_publisher' \
+    'release executable contains linked A10.1 publisher symbols' "$artifact" "$inspection_dir/symbols"
 
   if ! strings "$artifact" >"$inspection_dir/strings"; then
     echo "could not inspect release executable strings: $artifact" >&2
     exit 2
   fi
   for marker in O3K_A10_MIGRATION_CRASH_AT O3K_A10_MIGRATION_PAUSE_AT; do
-    if grep -Fq "$marker" "$inspection_dir/strings"; then
-      echo "release executable contains A10 test fault-injection marker $marker: $artifact" >&2
-      exit 1
-    fi
+    reject_if_present "$marker" \
+      "release executable contains A10 test fault-injection marker $marker" "$artifact" "$inspection_dir/strings"
   done
-  if grep -Fq -- "$TEST_VERIFICATION_KEY_MARKER" "$inspection_dir/strings"; then
-    echo "release executable contains the A10 fixture verification key: $artifact" >&2
-    exit 1
-  fi
+  reject_if_present "$TEST_VERIFICATION_KEY_MARKER" \
+    'release executable contains the A10 fixture verification key' "$artifact" "$inspection_dir/strings"
 done
 
 echo "A10.1 migration publisher is absent from release binary: $binary"
