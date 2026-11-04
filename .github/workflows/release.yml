@@ -66,6 +66,7 @@ jobs:
           packaging/make-release.sh "$version" libvirt
           packaging/make-release-archive.sh "$version"
           packaging/verify-release-bundle.sh "dist/o3k-$version"
+          tests/release-extracted-bundle.sh "dist/o3k-$version-linux-x86_64.tar.gz"
 
       - name: Generate v2 provenance and digest manifest
         env:

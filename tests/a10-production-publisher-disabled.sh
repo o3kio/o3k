@@ -7,7 +7,12 @@ trap 'rm -rf -- "$WORK_DIR"' EXIT
 
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release -p o3k --bin o3k
 RELEASE_BIN="$ROOT_DIR/target/release/o3k"
+bash "$ROOT_DIR/tests/a10-publisher-key-drift.sh"
 bash "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$RELEASE_BIN"
+STRIPPED_BIN="$WORK_DIR/o3k-stripped"
+cp "$RELEASE_BIN" "$STRIPPED_BIN"
+strip --strip-unneeded "$STRIPPED_BIN"
+bash "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$STRIPPED_BIN"
 
 for debug_assertions in false true; do
   if CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS="$debug_assertions" \
@@ -39,13 +44,26 @@ fi
 
 PACKAGE="$WORK_DIR/package"
 mkdir -p "$PACKAGE/bin"
-cat >"$PACKAGE/bin/o3k" <<EOF
-#!/bin/sh
-exec "$RELEASE_BIN" "\$@"
+# Use a tiny native dispatcher fixture here because this test runs on Ubuntu
+# 24.04 while the release bundle's glibc ceiling is Debian 12's 2.36. The
+# actual optimized O3K binary is checked directly above and in the protected
+# Debian-baseline release workflow.
+cat >"$WORK_DIR/o3k-dispatch-fixture.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+  if (argc > 1 && strcmp(argv[1], "recovery-migrate-v2") == 0) {
+    fputs("error: unrecognized subcommand 'recovery-migrate-v2'\n", stderr);
+    return 2;
+  }
+  return 0;
+}
 EOF
-chmod 0755 "$PACKAGE/bin/o3k"
+cc -O2 -o "$PACKAGE/bin/o3k" "$WORK_DIR/o3k-dispatch-fixture.c"
 printf 'placeholder\n' >"$PACKAGE/bin/o3kd"
-(cd "$PACKAGE" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+(cd "$PACKAGE" && find . -type f ! -name SHA256SUMS -print0 | sort -z \
+  | xargs -0 sha256sum >"$WORK_DIR/SHA256SUMS.generated")
+mv "$WORK_DIR/SHA256SUMS.generated" "$PACKAGE/SHA256SUMS"
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$PACKAGE"
 
 # A debug qualification executable must not sneak into an otherwise valid
@@ -56,7 +74,9 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p o3k --bin o3k \
 mkdir -p "$PACKAGE/bin"
 cp "$ROOT_DIR/target/debug/o3k" "$PACKAGE/bin/o3k-migration-qualification"
 chmod 0755 "$PACKAGE/bin/o3k-migration-qualification"
-(cd "$PACKAGE" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+(cd "$PACKAGE" && find . -type f ! -name SHA256SUMS -print0 | sort -z \
+  | xargs -0 sha256sum >"$WORK_DIR/SHA256SUMS.generated")
+mv "$WORK_DIR/SHA256SUMS.generated" "$PACKAGE/SHA256SUMS"
 if bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$PACKAGE" \
   >"$WORK_DIR/debug-artifact-rejected.log" 2>&1; then
   echo "release bundle verifier accepted an A10 qualification executable" >&2
