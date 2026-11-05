@@ -151,7 +151,7 @@ use crate::{
     backup_reservation::{
         FORMAT_OVERHEAD_BOUND, MIN_RESERVATION, Reservation, ReservationError, StagingReservation,
         compute_reservation, preflight_reservation, preflight_reservation_bytes,
-        staging_tree_bytes,
+        preflight_reservation_with_categories, staging_tree_bytes,
     },
     output::now_utc_rfc3339,
 };
@@ -949,22 +949,25 @@ fn preflight_before_handoff(
 
     let db_path = data_dir.join(SNAPSHOT_FILE_NAME);
     let wal_path = data_dir.join(format!("{SNAPSHOT_FILE_NAME}-wal"));
-    let metadata_paths = [config.release_manifest_path(), config.trust_config_path()];
+    let metadata_paths = [
+        (config.release_manifest_path(), "release-manifest"),
+        (config.trust_config_path(), "trust-config"),
+    ];
     ensure_member_bound(&db_path, &wal_path, &metadata_paths).map_err(ArtifactFailure::rejected)?;
 
-    let mut source_paths: Vec<&Path> = vec![db_path.as_path()];
-    match fs::symlink_metadata(&wal_path) {
+    let mut source_paths: Vec<(&Path, &'static str)> = vec![(db_path.as_path(), "database")];
+    match source_symlink_metadata(&wal_path, "wal") {
         Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {
-            source_paths.push(wal_path.as_path());
+            source_paths.push((wal_path.as_path(), "wal"));
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(ArtifactFailure::rejected("source-unavailable")),
     }
-    source_paths.push(metadata_paths[0]);
-    source_paths.push(metadata_paths[1]);
-    let reservation =
-        preflight_reservation(&source_paths, destination_dir).map_err(reservation_failure)?;
+    source_paths.push((metadata_paths[0].0, metadata_paths[0].1));
+    source_paths.push((metadata_paths[1].0, metadata_paths[1].1));
+    let reservation = preflight_reservation_with_categories(&source_paths, destination_dir)
+        .map_err(reservation_failure)?;
     reservation_with_metadata_bound(reservation).map_err(reservation_failure)?;
     Ok(())
 }
@@ -988,16 +991,17 @@ fn reservation_failure(error: ReservationError) -> ArtifactFailure {
 fn ensure_member_bound(
     database_path: &Path,
     wal_path: &Path,
-    metadata_paths: &[&Path],
+    metadata_paths: &[(&Path, &'static str)],
 ) -> Result<(), &'static str> {
-    let database = fs::symlink_metadata(database_path).map_err(|_| "source-unavailable")?;
+    let database =
+        source_symlink_metadata(database_path, "database").map_err(|_| "source-unavailable")?;
     if database.file_type().is_symlink() {
         return Err("source-symlink");
     }
     if !database.file_type().is_file() {
         return Err("source-not-regular-file");
     }
-    let wal_bytes = match fs::symlink_metadata(wal_path) {
+    let wal_bytes = match source_symlink_metadata(wal_path, "wal") {
         Ok(metadata) if metadata.file_type().is_symlink() => return Err("source-symlink"),
         Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
         Ok(_) => 0,
@@ -1007,8 +1011,8 @@ fn ensure_member_bound(
     if database.len().saturating_add(wal_bytes) > MAX_MEMBER_BYTES {
         return Err("member-bound-exceeded");
     }
-    for path in metadata_paths {
-        let metadata = fs::symlink_metadata(path).map_err(|_| "source-unavailable")?;
+    for (path, category) in metadata_paths {
+        let metadata = source_symlink_metadata(path, category).map_err(|_| "source-unavailable")?;
         if metadata.file_type().is_symlink() {
             return Err("source-symlink");
         }
@@ -1020,6 +1024,15 @@ fn ensure_member_bound(
         }
     }
     Ok(())
+}
+
+fn source_symlink_metadata(path: &Path, _category: &'static str) -> io::Result<fs::Metadata> {
+    fs::symlink_metadata(path).inspect_err(|_error| {
+        #[cfg(test)]
+        if !(_category == "wal" && _error.kind() == io::ErrorKind::NotFound) {
+            crate::backup_reservation::record_source_lookup_failure(_category, _error);
+        }
+    })
 }
 
 /// Executes one capture: handoff, configuration and D9 preflight, snapshot,
@@ -1259,7 +1272,10 @@ fn execute_inner(
     // snapshot member is the checkpointed database plus any remaining WAL, so
     // the check is repeated against the post-checkpoint source exactly before
     // `backup_to_file`.
-    let metadata_paths = [config.release_manifest_path(), config.trust_config_path()];
+    let metadata_paths = [
+        (config.release_manifest_path(), "release-manifest"),
+        (config.trust_config_path(), "trust-config"),
+    ];
     if let Err(reason) = ensure_member_bound(&db_path, &wal_path, &metadata_paths) {
         abort_before_capture(&data_dir, &marker_path, &journal);
         return BackupCreateOutcome::rejected(operation_id, reason);
@@ -2073,6 +2089,7 @@ mod tests {
     };
     use crate::backup_reservation::{
         MIN_RESERVATION, RESERVATION_CAP, SOURCE_PLAINTEXT_BOUND, STAGING_HOLD_FILE,
+        SourceLookupFailure,
     };
     use crate::backup_trust::{BackupTrustConfig, site_and_installation_ids};
     use crate::upgrade::release_identity::BackupReleaseIdentity;
@@ -2596,11 +2613,23 @@ mod tests {
 
     #[test]
     fn impostor_executor_is_rejected_by_listener() -> io::Result<()> {
+        let _ = crate::backup_reservation::take_source_lookup_failures();
         let root = TempRoot::new("impostor")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
         create_migrated_store(&data_dir)?;
         let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        let environment = fixture.environment();
+        let fixture_preflight = preflight_before_handoff(&data_dir, &dest, &environment);
+        let fixture_diagnostics = crate::backup_reservation::take_source_lookup_failures();
+        assert!(
+            fixture_preflight.is_ok(),
+            "impostor fixture must pass preflight before authentication; result={fixture_preflight:?}, source_lookup_failures={fixture_diagnostics:?}"
+        );
+        assert!(
+            fixture_diagnostics.is_empty(),
+            "successful fixture preflight recorded source lookup errors: {fixture_diagnostics:?}"
+        );
         let (installation, site) = identity_tokens(&data_dir)?;
         let impostor = [PathBuf::from("/bin/false"), PathBuf::from("/usr/bin/false")]
             .into_iter()
@@ -2614,7 +2643,7 @@ mod tests {
         };
         let listener = o3k_store::BackupControlListener::bind(&data_dir)?;
         let server = thread::spawn(move || {
-            let _ = listener.accept_authenticated(&expected, Duration::from_secs(10));
+            listener.accept_authenticated(&expected, Duration::from_secs(10))
         });
         let outcome = execute_inner(
             &args_for(dest.clone()),
@@ -2622,14 +2651,32 @@ mod tests {
             destination_fd(&dest)?,
             data_dir.clone(),
             now_utc_rfc3339(),
-            &fixture.environment(),
+            &environment,
             &ExecutorControls::default(),
         );
-        server
+        let source_lookup_failures = crate::backup_reservation::take_source_lookup_failures();
+        let server_result = server
             .join()
             .map_err(|_| io::Error::other("listener thread panicked"))?;
+        assert!(
+            matches!(
+                server_result,
+                Err(BackupControlError::Rejected(
+                    HandoffRejectReason::UnauthorizedPeer
+                ))
+            ),
+            "listener must reject at the unauthorized-peer authentication boundary; result={server_result:?}"
+        );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
-        assert_eq!(outcome_reason(&outcome), "unauthorized-peer");
+        assert_eq!(
+            outcome_reason(&outcome),
+            "unauthorized-peer",
+            "source lookup failures before authentication: {source_lookup_failures:?}"
+        );
+        assert!(
+            source_lookup_failures.is_empty(),
+            "authentication test encountered a source lookup error: {source_lookup_failures:?}"
+        );
         Ok(())
     }
 
@@ -2833,20 +2880,80 @@ mod tests {
         let trust_path = root.0.join("backup-trust.json");
         fs::File::create(&db_path)?.set_len(MAX_MEMBER_BYTES)?;
         fs::File::create(&trust_path)?.set_len(2)?;
+        let metadata_paths = [(trust_path.as_path(), "trust-config")];
         assert_eq!(
-            ensure_member_bound(&db_path, &wal_path, &[trust_path.as_path()]),
+            ensure_member_bound(&db_path, &wal_path, &metadata_paths),
             Ok(())
         );
         fs::File::create(&wal_path)?.set_len(1)?;
         assert_eq!(
-            ensure_member_bound(&db_path, &wal_path, &[trust_path.as_path()]),
+            ensure_member_bound(&db_path, &wal_path, &metadata_paths),
             Err("member-bound-exceeded")
         );
         fs::remove_file(&wal_path)?;
         fs::File::create(&trust_path)?.set_len(MAX_MEMBER_BYTES + 1)?;
         assert_eq!(
-            ensure_member_bound(&db_path, &wal_path, &[trust_path.as_path()]),
+            ensure_member_bound(&db_path, &wal_path, &metadata_paths),
             Err("member-bound-exceeded")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_database_and_metadata_keep_source_unavailable_classification() -> io::Result<()>
+    {
+        fn assert_lookup_failure(category: &'static str, failures: Vec<SourceLookupFailure>) {
+            assert_eq!(failures.len(), 1, "diagnostic count: {failures:?}");
+            assert_eq!(failures[0].category, category);
+            assert_eq!(failures[0].kind, io::ErrorKind::NotFound);
+            assert!(
+                failures[0].raw_os_error.is_some(),
+                "underlying OS error must be retained: {failures:?}"
+            );
+        }
+
+        let root = TempRoot::new("unavailable-source-member")?;
+        let database_path = root.0.join(SNAPSHOT_FILE_NAME);
+        let wal_path = root.0.join(format!("{SNAPSHOT_FILE_NAME}-wal"));
+        let manifest_path = root.0.join("release-manifest.json");
+        let trust_path = root.0.join("backup-trust.json");
+        fs::File::create(&manifest_path)?;
+        fs::File::create(&trust_path)?;
+        let metadata_paths = [
+            (manifest_path.as_path(), "release-manifest"),
+            (trust_path.as_path(), "trust-config"),
+        ];
+
+        let _ = crate::backup_reservation::take_source_lookup_failures();
+        assert_eq!(
+            ensure_member_bound(&database_path, &wal_path, &metadata_paths),
+            Err("source-unavailable")
+        );
+        assert_lookup_failure(
+            "database",
+            crate::backup_reservation::take_source_lookup_failures(),
+        );
+
+        fs::File::create(&database_path)?;
+        fs::remove_file(&manifest_path)?;
+        assert_eq!(
+            ensure_member_bound(&database_path, &wal_path, &metadata_paths),
+            Err("source-unavailable")
+        );
+        assert_lookup_failure(
+            "release-manifest",
+            crate::backup_reservation::take_source_lookup_failures(),
+        );
+
+        fs::File::create(&manifest_path)?;
+        fs::remove_file(&trust_path)?;
+        assert_eq!(
+            ensure_member_bound(&database_path, &wal_path, &metadata_paths),
+            Err("source-unavailable")
+        );
+        assert_lookup_failure(
+            "trust-config",
+            crate::backup_reservation::take_source_lookup_failures(),
         );
         Ok(())
     }

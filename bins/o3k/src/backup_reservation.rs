@@ -25,6 +25,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+use std::io;
+
 use rustix::{
     fs::{FallocateFlags, FileType, Mode, OFlags, fallocate, fstat, ftruncate, open, statvfs},
     process::geteuid,
@@ -56,6 +59,37 @@ const REASON_SOURCE_UNAVAILABLE: &str = "source-unavailable";
 const REASON_SOURCE_SIZE_OVERFLOW: &str = "source-size-overflow";
 const REASON_DESTINATION_UNAVAILABLE: &str = "destination-unavailable";
 const REASON_FILESYSTEM_STATISTICS_OVERFLOW: &str = "filesystem-statistics-overflow";
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceLookupFailure {
+    pub(crate) category: &'static str,
+    pub(crate) kind: io::ErrorKind,
+    pub(crate) raw_os_error: Option<i32>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_LOOKUP_FAILURES: std::cell::RefCell<Vec<SourceLookupFailure>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn record_source_lookup_failure(category: &'static str, error: &io::Error) {
+    SOURCE_LOOKUP_FAILURES.with_borrow_mut(|failures| {
+        failures.push(SourceLookupFailure {
+            category,
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+        });
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn take_source_lookup_failures() -> Vec<SourceLookupFailure> {
+    SOURCE_LOOKUP_FAILURES.with_borrow_mut(std::mem::take)
+}
 
 /// Typed reservation failure. [`Self::reason`] is the stable string callers
 /// may log or emit; no path is ever included.
@@ -201,10 +235,19 @@ pub fn compute_reservation(source_bytes: u64) -> Result<u64, ReservationError> {
 pub fn measure_source_bytes<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
 ) -> Result<u64, ReservationError> {
+    measure_source_bytes_with_categories(paths.into_iter().map(|path| (path, "source")))
+}
+
+fn measure_source_bytes_with_categories<'a>(
+    paths: impl IntoIterator<Item = (&'a Path, &'static str)>,
+) -> Result<u64, ReservationError> {
     let mut total = 0_u64;
-    for path in paths {
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|_| ReservationError::Measurement(REASON_SOURCE_UNAVAILABLE.to_owned()))?;
+    for (path, _category) in paths {
+        let metadata = std::fs::symlink_metadata(path).map_err(|_error| {
+            #[cfg(test)]
+            record_source_lookup_failure(_category, &_error);
+            ReservationError::Measurement(REASON_SOURCE_UNAVAILABLE.to_owned())
+        })?;
         if metadata.file_type().is_symlink() {
             return Err(ReservationError::Measurement(
                 REASON_SOURCE_SYMLINK.to_owned(),
@@ -555,7 +598,24 @@ pub fn preflight_reservation(
     source_paths: &[&Path],
     destination: &Path,
 ) -> Result<Reservation, ReservationError> {
-    let source_bytes = measure_source_bytes(source_paths.iter().copied())?;
+    preflight_reservation_iter(
+        source_paths.iter().copied().map(|path| (path, "source")),
+        destination,
+    )
+}
+
+pub(crate) fn preflight_reservation_with_categories(
+    source_paths: &[(&Path, &'static str)],
+    destination: &Path,
+) -> Result<Reservation, ReservationError> {
+    preflight_reservation_iter(source_paths.iter().copied(), destination)
+}
+
+fn preflight_reservation_iter<'a>(
+    source_paths: impl IntoIterator<Item = (&'a Path, &'static str)>,
+    destination: &Path,
+) -> Result<Reservation, ReservationError> {
+    let source_bytes = measure_source_bytes_with_categories(source_paths)?;
     let available_bytes = available_bytes(destination)?;
     reserve_with_available(source_bytes, available_bytes)
 }
@@ -907,6 +967,27 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn categorized_reservation_measurement_reports_only_category_and_os_error() {
+        let root = fixture_dir();
+        let absent = root.join("absent-release-manifest.json");
+        let _ = take_source_lookup_failures();
+        let result =
+            preflight_reservation_with_categories(&[(absent.as_path(), "release-manifest")], &root);
+        assert_eq!(
+            result,
+            Err(ReservationError::Measurement(
+                REASON_SOURCE_UNAVAILABLE.to_owned()
+            ))
+        );
+        let failures = take_source_lookup_failures();
+        assert_eq!(failures.len(), 1, "diagnostic count: {failures:?}");
+        assert_eq!(failures[0].category, "release-manifest");
+        assert_eq!(failures[0].kind, io::ErrorKind::NotFound);
+        assert!(failures[0].raw_os_error.is_some());
+        fs::remove_dir_all(root).expect("remove reservation fixture");
     }
 
     #[test]
