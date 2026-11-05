@@ -1,7 +1,9 @@
 # PP.6 qualification guests
 
 `host-env.py` provisions two run-scoped KVM/libvirt VMs from caller-supplied,
-SHA-256-pinned Debian 12 and Ubuntu 24.04 cloud images. Each guest boots
+SHA-256-pinned Debian 13 and Ubuntu 24.04 cloud images. Debian 12 is not used
+for new PP.6 qualification runs; its guest identity remains recognized only
+for ownership-checked cleanup of existing runs. Each guest boots
 systemd and receives separate local state and journal qcow2 disks formatted as
 ext4. The run-specific libvirt network has forwarding disabled; it provides
 host-to-guest SSH for setup and evidence collection only. It does not install
@@ -15,7 +17,7 @@ services, routes, or data are available to the guest:
 O3K_PP6_QUAL_ROOT=/var/lib/o3k-pp6-qualification \
   tests/pp6-qualification/host-env.py provision \
   --run-id pp6-20261101-run01 \
-  --debian-image /srv/qualification/debian-12.qcow2 \
+  --debian-image /srv/qualification/debian-13.qcow2 \
   --debian-sha256 <official-image-sha256> \
   --ubuntu-image /srv/qualification/ubuntu-24.04.qcow2 \
   --ubuntu-sha256 <official-image-sha256>
@@ -37,7 +39,7 @@ installed, capture its identity on each guest:
 
 ```sh
 tests/pp6-qualification/host-env.py capture-installation \
-  --run-id pp6-20261101-run01 --guest debian12 \
+  --run-id pp6-20261101-run01 --guest debian13 \
   --source-sha <exact-tag-commit> --version <release-version-without-v> \
   --artifact-sha256 <archive-digest-from-verified-sigstore-manifest>
 ```
@@ -56,7 +58,7 @@ harness does not trust `ssh-keyscan` output.
 
 ```sh
 tests/pp6-qualification/host-env.py force-restart \
-  --run-id pp6-20261101-run01 --guest debian12
+  --run-id pp6-20261101-run01 --guest debian13
 tests/pp6-qualification/host-env.py destroy --run-id pp6-20261101-run01
 ```
 

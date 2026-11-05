@@ -33,7 +33,7 @@ test-only and are not production evidence.
 2. **Provision clean guests.** Use the existing online `runner-2404`
    (`self-hosted`, `Linux`, `X64`, `kvm`, `libvirt`, `docker`, `o3k-testlab`)
    only as a disposable VM host. Create two clean, isolated guests from
-   authenticated Debian 12 and Ubuntu 24.04 cloud images. Each guest needs a
+   authenticated Debian 13 and Ubuntu 24.04 cloud images. Each guest needs a
    local ext4 filesystem reserved for `/var/lib/o3k-recovery-state` and
    `/var/lib/o3k-recovery`, with the exact C1/D8 owners, groups, modes and
    device/inode recorded in the signed installation policy. No host bind mount
@@ -73,7 +73,7 @@ test-only and are not production evidence.
   not themselves provide clean installed qualification guests or offline
   custody.
 - **Not demonstrated available:** two disposable clean guest allocations with
-  authenticated Debian 12 and Ubuntu 24.04 images, isolated networks, local
+  authenticated Debian 13 and Ubuntu 24.04 images, isolated networks, local
   ext4 journal/state volumes, console/serial capture and reliable destruction.
   The current online runner is one VM host; reserve capacity for two guests or
   obtain a second isolated host if concurrent independent OS evidence is
@@ -198,7 +198,7 @@ sequence and witnesses, never private key bytes.
 
 ### Shortest host path and resources
 
-Use one clean Debian 12 guest and one clean Ubuntu 24.04 guest, sequentially on
+Use one clean Debian 13 guest and one clean Ubuntu 24.04 guest, sequentially on
 the disposable KVM/libvirt runner if capacity permits. Each needs real systemd
 as PID 1, root access for installation and denial assertions, isolated
 networking, console capture, reliable guest destruction, and dedicated local
@@ -220,7 +220,7 @@ Preserve ordinary v1 behavior when A10 is absent or unselected.
 ### Remaining D8-A10-01 through -16 process gaps
 
 All 16 remain **NOT_RUN as exact-release installed process qualification** on
-clean Debian 12 and Ubuntu 24.04. PR #1198 source-built process evidence does
+clean Debian 13 and Ubuntu 24.04. PR #1198 source-built process evidence does
 not close these release-specific lanes. Required cases remain: (01) malformed
 selector staging; (02) staged policy without selector; (03) policy without a
 valid migration selector; (04) selector durable before policy/high-water; (05)

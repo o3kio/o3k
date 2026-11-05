@@ -79,7 +79,7 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
     def test_domain_identity_accepts_only_run_owned_disks_and_network(self):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory) / "private"
-            guest_dir = private / "debian12"
+            guest_dir = private / "debian13"
             guest_dir.mkdir(parents=True)
             identities = {}
             for filename in ("base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso"):
@@ -87,7 +87,7 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
                 disk_path.write_bytes(filename.encode())
                 info = disk_path.lstat()
                 identities[filename] = [info.st_dev, info.st_ino]
-            guest = {"domain": "o3k-pp6-run123-debian12", "uuid": "guest-uuid",
+            guest = {"domain": "o3k-pp6-run123-debian13", "uuid": "guest-uuid",
                      "network": "o3k-pp6-run123", "mac": "52:54:00:00:00:01", "files": identities}
             disks = (''.join(f'<disk><target dev="{dev}"/><source file="{guest_dir / disk}"/></disk>'
                              for dev, disk in (("vda", "root.qcow2"), ("vdb", "state.qcow2"),
@@ -96,22 +96,22 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
             xml = (f'<domain><name>{guest["domain"]}</name><uuid>guest-uuid</uuid><devices>{disks}'
                    '<interface><mac address="52:54:00:00:00:01"/>'
                    '<source network="o3k-pp6-run123"/></interface></devices></domain>')
-            self.assertEqual(HOST_ENV.domain_identity(xml, "debian12", guest, private), "guest-uuid")
+            self.assertEqual(HOST_ENV.domain_identity(xml, "debian13", guest, private), "guest-uuid")
             wrong_root_target = xml.replace('dev="vda"', 'dev="vdd"')
             with self.assertRaises(RuntimeError):
-                HOST_ENV.domain_identity(wrong_root_target, "debian12", guest, private)
+                HOST_ENV.domain_identity(wrong_root_target, "debian13", guest, private)
             foreign = xml.replace(str(guest_dir / "state.qcow2"), "/var/lib/foreign.qcow2")
             with self.assertRaises(RuntimeError):
-                HOST_ENV.domain_identity(foreign, "debian12", guest, private)
+                HOST_ENV.domain_identity(foreign, "debian13", guest, private)
             old_state = guest_dir / "state.qcow2"
             replacement = guest_dir / "replacement.tmp"
             replacement.write_bytes(b"substituted inode")
             replacement.replace(old_state)
             with self.assertRaises(RuntimeError):
-                HOST_ENV.domain_identity(xml, "debian12", guest, private)
+                HOST_ENV.domain_identity(xml, "debian13", guest, private)
             wrong_network = xml.replace("o3k-pp6-run123", "default")
             with self.assertRaises(RuntimeError):
-                HOST_ENV.domain_identity(wrong_network, "debian12", guest, private)
+                HOST_ENV.domain_identity(wrong_network, "debian13", guest, private)
 
     def test_network_identity_rejects_forwarding_or_identity_change(self):
         xml = ("<network><name>o3k-pp6-run123</name><uuid>net-uuid</uuid>"
@@ -147,6 +147,7 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
     def test_destroy_identity_check_rejects_unknown_and_replaced_files(self):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory) / "private"
+            # Legacy Debian 12 runs are cleanup-only and must remain safe to destroy.
             guest_dir = private / "debian12"
             (guest_dir / "seed").mkdir(parents=True)
             guest_dir.chmod(0o711)
