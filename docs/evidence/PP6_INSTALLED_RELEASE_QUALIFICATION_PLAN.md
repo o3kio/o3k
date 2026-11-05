@@ -73,6 +73,28 @@ fixtures; they do not assert that a production publisher ran.
 | #1214 | `cb6dba632276830e022038ea399c7a43164e3bff` → `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b` | Makes packaged A10 verification self-contained and runs it against an extracted archive in a clean environment. Negative cases cover malformed checksums, changed content, A10 fault marker, embedded public test key, linked publisher symbol, missing `nm`, failing `strings`; optimized and stripped binaries pass, and release `o3k` rejects the excluded `recovery-migrate-v2` command. PR checks passed. rc.26 fail-before returned exit 2 because `bins/o3k/tests/fixtures/a10-release-verify.pub` was absent, even though its release assets authenticated; local fix-after bundle regression is source-built E1 evidence, not a new authenticated release. |
 | #1215 | `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e` → `c454134e584288b49637b11592bb0b59351d022a` | Aligns Cargo/installer/worker/Helm/Docker version references and candidate release notes; preserves Debian 12 baseline and extracted self-contained A10 verifier coverage. Repairs the non-root-only Debian 12 platform fixture for the upgrade-process test and makes PostgreSQL Docker cleanup fail closed by requiring a successful empty full-ID container listing after failed inspect. Reviewer `senolcolak` approved the exact head; PR checks passed in `41909388446`; merge-queue CI `41914575991`, Mock Cinder `41914576072`, and PostgreSQL tablespace `41914576122` passed. This prepares source only and does not create a release. |
 
+### Post-merge cargo-test failure disposition
+
+Protected-main run `41919177633` failed the `cargo-test` job. Its exact log
+records `backup_create::tests::impostor_executor_is_rejected_by_listener`
+returning `source-unavailable` instead of `unauthorized-peer`. This outcome
+comes from `execute_inner()` preflight before it connects to the Unix listener;
+the listener was bound before its accept thread started. The failure therefore
+does not demonstrate that peer authentication was bypassed or misclassified.
+The run log does not identify which preflight filesystem metadata lookup
+failed, so the underlying transient source of this one-off result is not
+established and is not labeled a proven race.
+
+On protected source `c454134e584288b49637b11592bb0b59351d022a`, the focused
+all-feature library test passed 50 consecutive invocations and the complete
+`o3k` library suite passed 475 tests with 6 ignored. PR #1216's protected CI
+also passed on its current documentation head. These results demonstrate
+non-reproduction, not the missing path's identity. Retain run
+`41919177633` as **FAIL (unresolved source-preflight fixture/runner anomaly)**;
+do not hide or weaken the assertion. Release readiness remains BLOCKED until
+the failed run is accepted through the required independent release decision
+or a reproducible cause is fixed and protected checks pass.
+
 Candidate source implementation head `3e9e53f867fd8b23bb629fd545e36443565ec4bd`
 passes
 `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and
