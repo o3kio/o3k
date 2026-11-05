@@ -1,6 +1,6 @@
 # PP.6 completion matrix
 
-**Snapshot:** protected `main` at `c454134e584288b49637b11592bb0b59351d022a` (2026-11-04), the merge-queue commit for PR #1215. PR #1215 reviewed head `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`; its source implementation head was `3e9e53f867fd8b23bb629fd545e36443565ec4bd`. PRs #1212–#1215 are merged; #1212 merged at `c984175d4bd45437236fa8267c9a5b562f02e621`, #1214 at `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b`, and #1215 at this snapshot. The immutable `v0.4.0-rc.26` release remains authenticated at tag object `b295a9a031ae2969497b6311ea87ee1ff421f676`, source `901af47b306aa779aed72ef61ef25184fabf24eb`, archive SHA-256 `6d7d034aa2f5fdc8ad78dd237ec64605a8623d8042bf23ac420a678051a76685`. Asset authentication passed, but the rc.26 packaged verifier failed during guest verification (exit 2: missing `bins/o3k/tests/fixtures/a10-release-verify.pub`) before installation. Do not conflate asset authenticity with guest verifier success or installed E4 evidence. PR #1214 fixes the self-containment defect. Proposed `v0.4.0-rc.27` has no tag or release; this matrix does not authorize publication. PR #1210's closure guard remains protected. This is a status/evidence projection for #975, not a new architecture, support, or release authority. #640 remains rollback/restore authority and #944 operator-documentation authority. Historical Stage 1 evidence remains in [`PP6_RC25_STAGE1_QUALIFICATION.md`](PP6_RC25_STAGE1_QUALIFICATION.md).
+**Historical snapshot:** protected `main` at `c454134e584288b49637b11592bb0b59351d022a` (2026-11-04), the merge-queue commit for PR #1215. PR #1215 reviewed head `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`; its source implementation head was `3e9e53f867fd8b23bb629fd545e36443565ec4bd`. PRs #1212–#1215 are merged; #1212 merged at `c984175d4bd45437236fa8267c9a5b562f02e621`, #1214 at `ee54bacd9e8185089412c7cb1ffa3be5870b6c9b`, and #1215 at this snapshot. The immutable `v0.4.0-rc.26` release remains authenticated at tag object `b295a9a031ae2969497b6311ea87ee1ff421f676`, source `901af47b306aa779aed72ef61ef25184fabf24eb`, archive SHA-256 `6d7d034aa2f5fdc8ad78dd237ec64605a8623d8042bf23ac420a678051a76685`. Asset authentication passed, but the rc.26 packaged verifier failed during guest verification (exit 2: missing `bins/o3k/tests/fixtures/a10-release-verify.pub`) before installation. Do not conflate asset authenticity with guest verifier success or installed E4 evidence. PR #1214 fixes the self-containment defect. The statements in this dated snapshot that rc.27 was unpublished and Debian 12/Ubuntu 24.04 were the proposed targets are historical and superseded by the current status below. PR #1210's closure guard remains protected. This is a status/evidence projection for #975, not a new architecture, support, or release authority. #640 remains rollback/restore authority and #944 operator-documentation authority. Historical Stage 1 evidence remains in [`PP6_RC25_STAGE1_QUALIFICATION.md`](PP6_RC25_STAGE1_QUALIFICATION.md).
 
 **Verdict:** PP.6 is **BLOCKED**. No full-profile GO or release acceptance is recorded. Every row marked PARTIAL, BLOCKED, or NOT_RUN below blocks the complete #975 GO verdict. The release-level zero actionable BLOCKER/HIGH/MEDIUM review and final owner decision have not occurred.
 
@@ -9,6 +9,50 @@ qualification uses Debian 13 and Ubuntu 24.04. Do not provision Debian 12 for
 new tests. Historical Debian 12 runs and dated snapshot evidence below are
 preserved as recorded; they are not Debian 13 evidence. This does not claim
 Debian 13 installed-platform support.
+
+## Current rc.27 E4 status (2026-11-05)
+
+- **Published release:** `v0.4.0-rc.27`, annotated tag object
+  `80cdab1568ef0972602214d0c4656ad70858c07e`, source
+  `9427e7668afa76bf1f043c9adabe1d616cf5924a`, release workflow run
+  `42044020384` PASS, archive SHA-256
+  `dea259144d16eb2cfa59169b5cf73e0e5df528663209e6b8bc34ea3d7da74f05`.
+  Independent Sigstore/OIDC/transparency/provenance, signed manifest, asset,
+  and extracted-archive authentication passed; production
+  `recovery-migrate-v2` is absent. This does not establish installed evidence.
+- **Qualification harness:** protected main
+  `ec088e6dc2c3307a3129bc24e545bed12b54ea3f`, including merged PR #1218,
+  selected Debian 13 and Ubuntu 24.04. Keep this SHA separate from the release
+  source SHA. The Debian 12 release-build baseline and historical guest runs
+  remain unchanged and are not reused as Debian 13 evidence.
+- **Dedicated-host preflight:** FAIL on `o3k-rust`: current process lacks
+  administrative/root identity; IPv4 and IPv6 forwarding are enabled; unrelated
+  VMs, active networks, PostgreSQL 16 and the apt fixture are present. The host
+  is rejected. No host configuration, workload or resource was changed or
+  cleaned. The fresh probe transcript is
+  `/tmp/o3k-pp6-rc27-e4-host-preflight-20261105.log`, SHA-256
+  `c77bd0933ca32e656b7662fe2da1849e67e2094376f1c2db90760aa60028ca34`. A
+  fresh passing preflight on another explicitly authorized disposable host is
+  required.
+- **E4:** BLOCKED_HOST_REQUIRED. Debian 13 Q1/Q2 and Ubuntu 24.04 Q1/Q2 are
+  BLOCKED pending an acceptable host; guest-image authentication, provisioning,
+  and all installed assertions are NOT_RUN. No install failure or new product
+  defect was observed. E5 remains separately NOT_RUN. No Debian 13 support
+  claim is made.
+- **Per-OS Q1/Q2:** Debian 13 Q1 = BLOCKED_HOST_REQUIRED / assertions NOT_RUN;
+  Debian 13 Q2 = BLOCKED_HOST_REQUIRED / assertions NOT_RUN; Ubuntu 24.04 Q1 =
+  BLOCKED_HOST_REQUIRED / assertions NOT_RUN; Ubuntu 24.04 Q2 =
+  BLOCKED_HOST_REQUIRED / assertions NOT_RUN.
+- **Historical CI failures:** runs `41919177633` (backup preflight) and
+  `42022349408` (P12.6 SQLite recovery) remain recorded as FAIL with unresolved
+  causes. The owner accepted residual diagnostic uncertainty for release
+  candidate qualification only; this is not a PASS, root-cause finding,
+  production acceptance, independent security approval, or PP.6 GO.
+
+The rc.27/harness identity and current host/E4 status supersede the dated
+readiness statements below where they say rc.27 is unpublished, Debian 12 is a
+future guest target, or no fresh host assessment has occurred. Historical run
+records below are otherwise retained without reinterpretation.
 
 ## rc.27 preparation and qualification evidence
 
