@@ -10,6 +10,15 @@ The strategy follows an evidence ladder. Expensive privileged tests verify
 already specified contracts; they are not the primary mechanism for discovering
 missing endpoint requirements.
 
+## Linux guest targets for future qualification
+
+New and future Linux guest qualification uses Debian 13 and Ubuntu 24.04.
+Do not provision Debian 12 for new test runs. Preserve existing Debian 12
+results as historical evidence without relabeling them or treating them as
+Debian 13 evidence. This test-target decision does not itself establish or
+remove an installed-platform support claim; those claims remain tied to their
+accepted product profile and profile-specific evidence.
+
 ## Evidence ladder
 
 ```text

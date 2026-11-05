@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run-owned Debian 12/Ubuntu 24.04 systemd and ext4 qualification guests."""
+"""Run-owned Debian 13/Ubuntu 24.04 systemd and ext4 qualification guests."""
 import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 import glob
 import ipaddress
@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(os.environ.get("O3K_PP6_QUAL_ROOT", "/var/lib/o3k-pp6-qualification"))
-GUESTS = ("debian12", "ubuntu2404")
+GUESTS = ("debian13", "ubuntu2404")
+# Existing Debian 12 runs remain eligible for ownership-checked cleanup only.
+CLEANUP_GUESTS = (*GUESTS, "debian12")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{5,39}$")
 
 
@@ -150,7 +152,7 @@ def verify_recorded_files(private, marker):
     allowed_files = {"network.xml"}
     allowed_dirs = set()
     recorded_identities = {}
-    for guest_name in GUESTS:
+    for guest_name in CLEANUP_GUESTS:
         allowed_dirs.add(guest_name)
         allowed_dirs.add(f"{guest_name}/seed")
         allowed_files.update(f"{guest_name}/{name}" for name in (
@@ -298,7 +300,7 @@ def provision(a):
     path = run_path(a.run_id)
     if path.exists() or path.is_symlink():
         raise RuntimeError(f"run already exists: {path}")
-    images = [verified_image(a.debian_image, a.debian_sha256, "Debian 12"),
+    images = [verified_image(a.debian_image, a.debian_sha256, "Debian 13"),
               verified_image(a.ubuntu_image, a.ubuntu_sha256, "Ubuntu 24.04")]
     free = shutil.disk_usage(ROOT.parent if ROOT.exists() else Path("/var/lib")).free
     if free < 35 * 1024**3 or (os.cpu_count() or 0) < 8:
@@ -390,7 +392,7 @@ def provision(a):
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
             ip = wait_ssh(network, mac, key, known, host_key_public, a.timeout)
             ssh(ip, key, known, "sudo -n cloud-init status --wait")
-            expected_id, expected_version = (("debian", "12") if guest == "debian12"
+            expected_id, expected_version = (("debian", "13") if guest == "debian13"
                                              else ("ubuntu", "24.04"))
             os_check = (". /etc/os-release; test \"$ID\" = " + expected_id
                         + "; test \"$VERSION_ID\" = " + expected_version + "; ")
@@ -468,7 +470,7 @@ def load_marker(run_id):
         guest_data = marker["guests"][guest]
         expected_mac = "52:54:00:" + ":".join(
             f"{byte:02x}" for byte in hashlib.sha256((run_id + guest).encode()).digest()[:3])
-        if (guest not in GUESTS or guest_data.get("domain") != f"o3k-pp6-{run_id[:12]}-{guest}"
+        if (guest not in CLEANUP_GUESTS or guest_data.get("domain") != f"o3k-pp6-{run_id[:12]}-{guest}"
                 or guest_data.get("network") != marker["network"]
                 or guest_data.get("mac", "").lower() != expected_mac):
             raise RuntimeError("domain identity does not match run identity")
