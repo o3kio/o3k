@@ -29,13 +29,20 @@ Debian 13 installed-platform support.
   administrative/root identity; IPv4 and IPv6 forwarding are enabled; unrelated
   VMs, active networks, PostgreSQL 16 and the apt fixture are present. The host
   is rejected. No host configuration, workload or resource was changed or
-  cleaned. A fresh passing preflight on another explicitly authorized
-  disposable host is required.
+  cleaned. The fresh probe transcript is
+  `/tmp/o3k-pp6-rc27-e4-host-preflight-20261105.log`, SHA-256
+  `c77bd0933ca32e656b7662fe2da1849e67e2094376f1c2db90760aa60028ca34`. A
+  fresh passing preflight on another explicitly authorized disposable host is
+  required.
 - **E4:** BLOCKED_HOST_REQUIRED. Debian 13 Q1/Q2 and Ubuntu 24.04 Q1/Q2 are
   BLOCKED pending an acceptable host; guest-image authentication, provisioning,
   and all installed assertions are NOT_RUN. No install failure or new product
   defect was observed. E5 remains separately NOT_RUN. No Debian 13 support
   claim is made.
+- **Per-OS Q1/Q2:** Debian 13 Q1 = BLOCKED_HOST_REQUIRED / assertions NOT_RUN;
+  Debian 13 Q2 = BLOCKED_HOST_REQUIRED / assertions NOT_RUN; Ubuntu 24.04 Q1 =
+  BLOCKED_HOST_REQUIRED / assertions NOT_RUN; Ubuntu 24.04 Q2 =
+  BLOCKED_HOST_REQUIRED / assertions NOT_RUN.
 - **Historical CI failures:** runs `41919177633` (backup preflight) and
   `42022349408` (P12.6 SQLite recovery) remain recorded as FAIL with unresolved
   causes. The owner accepted residual diagnostic uncertainty for release

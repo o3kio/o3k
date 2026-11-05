@@ -32,7 +32,9 @@ target is superseded by this section.
   enabled, unrelated VMs and active networks exist, and unrelated services
   include PostgreSQL 16 and the apt fixture. The host does not meet dedicated,
   ownership, or forwarding requirements. No network setting, workload, VM,
-  disk, or other host resource was changed or cleaned.
+  disk, or other host resource was changed or cleaned. Probe transcript:
+  `/tmp/o3k-pp6-rc27-e4-host-preflight-20261105.log`, SHA-256
+  `c77bd0933ca32e656b7662fe2da1849e67e2094376f1c2db90760aa60028ca34`.
 - **Q1:** BLOCKED_HOST_REQUIRED for Debian 13 and Ubuntu 24.04. Guest image
   metadata authentication, guest provisioning, installed identity, and Q1
   assertions are NOT_RUN.
@@ -40,6 +42,9 @@ target is superseded by this section.
   systemd/health/bootstrap/lifecycle/idempotence/foreign-state assertions are
   NOT_RUN. No installation failure was observed because installation was not
   attempted.
+- **Per-OS verdicts:** Debian 13 Q1/Q2 = BLOCKED_HOST_REQUIRED (all guest and
+  installed assertions NOT_RUN); Ubuntu 24.04 Q1/Q2 = BLOCKED_HOST_REQUIRED
+  (all guest and installed assertions NOT_RUN).
 - **E4 verdict:** BLOCKED_HOST_REQUIRED. No installed qualification or
   Debian 13 product-support claim is established. E5 physical power-loss
   evidence remains separate and NOT_RUN. No new O3K product defect was
