@@ -1,8 +1,60 @@
 # #1086 A10 Phase B and C1 installed qualification plan
 
-Status: executable qualification plan and infrastructure inventory. No C1
-installed qualification was run by this work. Synthetic journal signatures are
-test-only and are not production evidence.
+Status: active qualification plan with current rc.27 E4 status recorded below.
+No installed qualification was run by the earlier Phase B work. Synthetic
+journal signatures are test-only and are not production evidence.
+
+## Current rc.27 installed qualification status (2026-11-05)
+
+This section is the current status for PP.6 E4 Q1/Q2. The Phase B history and
+the dated readiness statements below are preserved as historical records; any
+older statement that rc.27 is unpublished or that Debian 12 is a future guest
+target is superseded by this section.
+
+- **Release identity:** `v0.4.0-rc.27`; annotated tag object
+  `80cdab1568ef0972602214d0c4656ad70858c07e`; resolved source
+  `9427e7668afa76bf1f043c9adabe1d616cf5924a`; release workflow run
+  `42044020384` passed; archive SHA-256
+  `dea259144d16eb2cfa59169b5cf73e0e5df528663209e6b8bc34ea3d7da74f05`.
+- **Release authentication:** PASS for the published Sigstore identity,
+  GitHub OIDC issuer, transparency proof, signed digest manifest, provenance,
+  asset digests, extracted archive verification, bundled executable hashes,
+  and production `recovery-migrate-v2` exclusion. This is release-asset
+  authentication, not installed-release evidence.
+- **Qualification harness identity:** protected main
+  `ec088e6dc2c3307a3129bc24e545bed12b54ea3f`, including merged PR #1218.
+  The approved E4 guest targets are Debian 13 and Ubuntu 24.04. This harness
+  SHA is distinct from the release source SHA above. Debian 12 remains only the
+  historical release-build baseline; no Debian 12 guest result is reused or
+  relabeled as Debian 13 evidence.
+- **Host preflight:** FAIL / host rejected. A fresh read-only inspection of
+  `o3k-rust` found the current process is unprivileged, IPv4/IPv6 forwarding is
+  enabled, unrelated VMs and active networks exist, and unrelated services
+  include PostgreSQL 16 and the apt fixture. The host does not meet dedicated,
+  ownership, or forwarding requirements. No network setting, workload, VM,
+  disk, or other host resource was changed or cleaned.
+- **Q1:** BLOCKED_HOST_REQUIRED for Debian 13 and Ubuntu 24.04. Guest image
+  metadata authentication, guest provisioning, installed identity, and Q1
+  assertions are NOT_RUN.
+- **Q2:** BLOCKED_HOST_REQUIRED for Debian 13 and Ubuntu 24.04. Installation,
+  systemd/health/bootstrap/lifecycle/idempotence/foreign-state assertions are
+  NOT_RUN. No installation failure was observed because installation was not
+  attempted.
+- **E4 verdict:** BLOCKED_HOST_REQUIRED. No installed qualification or
+  Debian 13 product-support claim is established. E5 physical power-loss
+  evidence remains separate and NOT_RUN. No new O3K product defect was
+  established in this preflight.
+
+Do not proceed to guest provisioning until an explicitly authorized disposable
+x86_64 KVM/libvirt host passes a fresh read-only preflight for root/KVM access,
+dedicated capacity, no unrelated workloads, disabled forwarding, isolated
+non-forwarding networking, separate ext4 volumes, authenticated images,
+host-only fixtures, and run-scoped ownership. If any predicate fails, stop
+without changing host state. After Q1/Q2 pass, the next eligible installed
+work is C1/C1.1, D8/A10 startup denial, signed-journal interruption and restart
+coverage under the accepted plan. Keep production recovery publication,
+PostgreSQL restore-target mutation, recovered-controller activation, and E5
+power-loss work behind their separate acceptance/authorization gates.
 
 ## Scope and authority
 
@@ -22,18 +74,17 @@ test-only and are not production evidence.
 
 ## Qualification sequence
 
-1. **Select an immutable candidate.** Merge the exact-head reviewed bounded
-   implementation. Use the existing protected release tag/release environment
-   workflow in `.github/workflows/release.yml`; verify the signed GitHub
-   OIDC/Sigstore release bundle, provenance, tag commit, source tree, archive,
-   installed manifest, and binary digests. Do not assemble a local replacement
-   release or alter the immutable tag. Candidate must include the A10 code and
-   the later separately accepted C1 policy-selection contract before runtime
-   use.
-2. **Provision clean guests.** Use the existing online `runner-2404`
-   (`self-hosted`, `Linux`, `X64`, `kvm`, `libvirt`, `docker`, `o3k-testlab`)
-   only as a disposable VM host. Create two clean, isolated guests from
-   authenticated Debian 13 and Ubuntu 24.04 cloud images. Each guest needs a
+1. **Authenticate the immutable candidate.** This prerequisite is complete for
+   rc.27 as recorded above. The protected release workflow, tag, source,
+   provenance, archive, manifest and executable digests are authenticated.
+   Do not assemble a local replacement release or alter the immutable tag.
+   Confirm the exact installed candidate includes the required A10 code and
+   separately accepted C1 policy-selection contract before running those
+   installed scenarios.
+2. **Provision clean guests.** Use only an explicitly authorized disposable
+   KVM/libvirt host that has passed a fresh read-only preflight. Do not use a
+   shared Actions runner or a rejected host configuration. Create clean,
+   isolated guests from authenticated Debian 13 and Ubuntu 24.04 images. Each guest needs a
    local ext4 filesystem reserved for `/var/lib/o3k-recovery-state` and
    `/var/lib/o3k-recovery`, with the exact C1/D8 owners, groups, modes and
    device/inode recorded in the signed installation policy. No host bind mount
