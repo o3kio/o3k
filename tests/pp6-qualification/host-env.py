@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run-owned Debian 13/Ubuntu 24.04 systemd and ext4 qualification guests."""
-import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import argparse, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, time
 import glob
 import ipaddress
 import pwd
@@ -40,7 +40,7 @@ def run_path(run_id):
 
 
 def require_host(*, provisioning=False):
-    needed = ("virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "ssh-keygen")
+    needed = ("virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "ssh-keygen", "script")
     if not provisioning:
         needed = ("virsh",)
     missing = [x for x in needed if shutil.which(x) is None]
@@ -412,24 +412,37 @@ def start_serial_capture(domain, evidence, guest_name):
     errors = evidence / f"{guest_name}.serial.stderr"
     stream = output.open("wb")
     error_stream = errors.open("wb")
-    process = subprocess.Popen(["virsh", "console", "--force", domain], stdin=subprocess.DEVNULL,
-                               stdout=stream, stderr=error_stream, start_new_session=True)
-    return process, stream, error_stream, output, errors
+    stream.close()
+    error_stream.close()
+    # `script` gives virsh the controlling TTY required by its interactive
+    # console client while writing the bounded transcript to the run evidence.
+    argv = ["script", "--quiet", "--flush", "--output-limit", "262144", "--command",
+            f"virsh console --force {shlex.quote(domain)}", str(output)]
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, start_new_session=True)
+    return process, output, errors
 
 
 def stop_serial_capture(capture):
     if not capture:
         return
-    process, stream, error_stream, output, errors = capture
+    process, output, errors = capture
     if process.poll() is None:
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait(timeout=3)
-    stream.close()
-    error_stream.close()
+    if process.stderr:
+        errors.write_bytes(process.stderr.read()[-16000:])
+        process.stderr.close()
     for path in (output, errors):
         if path.exists():
             content = path.read_bytes()
