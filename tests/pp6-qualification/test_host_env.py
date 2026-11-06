@@ -13,6 +13,51 @@ SPEC.loader.exec_module(HOST_ENV)
 
 
 class HostEnvironmentSafetyTests(unittest.TestCase):
+    def test_bounded_diagnostics_timeout_and_retain_limited_partial_output(self):
+        error = HOST_ENV.subprocess.TimeoutExpired(["ip", "route"], 10, output="diagnostic" * 4)
+        with patch.object(HOST_ENV.subprocess, "run", side_effect=error) as run:
+            result = HOST_ENV.bounded_call(["ip", "route"], limit=12)
+        run.assert_called_once_with(["ip", "route"], text=True, stdout=HOST_ENV.subprocess.PIPE,
+                                    stderr=HOST_ENV.subprocess.STDOUT, timeout=10)
+        self.assertEqual(result, {"command": ["ip", "route"], "exit_code": None,
+                                  "timed_out": True, "output": ("diagnostic" * 4)[-12:]})
+
+    def test_guest_selection_defaults_to_both_and_supports_each_guest(self):
+        self.assertEqual(HOST_ENV.selected_guests(None), ("debian13", "ubuntu2404"))
+        self.assertEqual(HOST_ENV.selected_guests([]), ("debian13", "ubuntu2404"))
+        self.assertEqual(HOST_ENV.selected_guests(["debian13"]), ("debian13",))
+        self.assertEqual(HOST_ENV.selected_guests(["ubuntu2404"]), ("ubuntu2404",))
+        self.assertEqual(HOST_ENV.selected_guests(["ubuntu2404", "debian13"]),
+                         ("debian13", "ubuntu2404"))
+
+    def test_guest_selection_rejects_duplicates_unknowns_and_malformed_values(self):
+        for selection in (["debian13", "debian13"], ["debian12"], "ubuntu2404", [None]):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                HOST_ENV.selected_guests(selection)
+
+    def test_single_guest_requires_only_its_authenticated_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "ubuntu.qcow2"
+            image.write_bytes(b"authenticated fixture")
+            digest = hashlib.sha256(image.read_bytes()).hexdigest()
+            selected, images = HOST_ENV.validate_provision_selection(
+                ["ubuntu2404"], {"ubuntu_image": str(image), "ubuntu_sha256": digest})
+            self.assertEqual(selected, ("ubuntu2404",))
+            self.assertEqual(set(images), {"ubuntu2404"})
+            with self.assertRaises(ValueError):
+                HOST_ENV.validate_provision_selection(
+                    ["debian13"], {"debian_image": str(image), "debian_sha256": "bad"})
+
+    def test_completed_run_record_must_match_selected_guest_set(self):
+        record = {"selected_guests": ["ubuntu2404"], "provisioning_status": "complete",
+                  "guests": {"ubuntu2404": {"ip": "192.168.140.21"}}}
+        HOST_ENV.validate_environment_record(record)
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_environment_record({**record, "guests": {}})
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_environment_record(
+                {**record, "guests": {"debian13": {}, "ubuntu2404": {}}})
+
     def test_cloud_config_is_parseable_and_preserves_pinned_identities(self):
         import json
         private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n"

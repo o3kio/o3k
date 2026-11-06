@@ -1,7 +1,8 @@
 # PP.6 qualification guests
 
-`host-env.py` provisions two run-scoped KVM/libvirt VMs from caller-supplied,
-SHA-256-pinned Debian 13 and Ubuntu 24.04 cloud images. Debian 12 is not used
+`host-env.py` provisions run-scoped KVM/libvirt VMs from caller-supplied,
+SHA-256-pinned Debian 13 and Ubuntu 24.04 cloud images. By default it provisions
+both guests; repeated `--guest` options select either one independently. Debian 12 is not used
 for new PP.6 qualification runs; its guest identity remains recognized only
 for ownership-checked cleanup of existing runs. Each guest boots
 systemd and receives separate local state and journal qcow2 disks formatted as
@@ -30,6 +31,7 @@ services, routes, or data are available to the guest:
 O3K_PP6_QUAL_ROOT=/var/lib/o3k-pp6-qualification \
   tests/pp6-qualification/host-env.py provision \
   --run-id pp6-20261101-run01 \
+  --guest debian13 --guest ubuntu2404 \
   --debian-image /srv/qualification/debian-13.qcow2 \
   --debian-sha256 <official-image-sha256> \
   --ubuntu-image /srv/qualification/ubuntu-24.04.qcow2 \
@@ -68,6 +70,25 @@ otherwise the checked-out Git HEAD is recorded. The private directory
 contains run-only SSH user and host keys, disks and cloud-init seeds. The guest
 host key is pinned into `known_hosts` from the host-generated public key; the
 harness does not trust `ssh-keyscan` output.
+
+For an independent single-guest attempt, select only that guest and supply only
+its image and digest, for example:
+
+```sh
+O3K_PP6_QUAL_ROOT=/var/lib/o3k-pp6-qualification \
+  tests/pp6-qualification/host-env.py provision \
+  --run-id pp6-20261101-ubuntu1 --guest ubuntu2404 \
+  --ubuntu-image /srv/qualification/ubuntu-24.04.qcow2 \
+  --ubuntu-sha256 <official-image-sha256>
+```
+
+Each complete evidence record includes the exact selected guest set and refuses
+to validate a record whose guest identities differ from that set. On failure,
+the harness retains bounded serial output, domain/network XML, bridge/interface,
+route, neighbor and libvirt observations, and SSH/cloud-init diagnostics when
+host-key-pinned SSH is available. Failed resources remain run-owned for
+diagnosis and require the ownership-checked `destroy` command after evidence
+review.
 
 ```sh
 tests/pp6-qualification/host-env.py force-restart \

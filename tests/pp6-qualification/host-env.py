@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run-owned Debian 13/Ubuntu 24.04 systemd and ext4 qualification guests."""
-import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import argparse, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, time
 import glob
 import ipaddress
 import pwd
@@ -40,7 +40,7 @@ def run_path(run_id):
 
 
 def require_host(*, provisioning=False):
-    needed = ("virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "ssh-keygen")
+    needed = ("virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "ssh-keygen", "script")
     if not provisioning:
         needed = ("virsh",)
     missing = [x for x in needed if shutil.which(x) is None]
@@ -65,6 +65,41 @@ def verified_image(path, expected, label):
     if not re.fullmatch("[0-9a-f]{64}", expected) or actual != expected:
         raise ValueError(f"{label} image digest mismatch: {actual}")
     return p.resolve(), actual
+
+
+def selected_guests(requested):
+    """Return the canonical selected guest set; omission retains both guests."""
+    if requested is None or requested == []:
+        return GUESTS
+    if not isinstance(requested, list) or any(name not in GUESTS for name in requested):
+        raise ValueError("guest selection must contain debian13 and/or ubuntu2404")
+    if len(set(requested)) != len(requested):
+        raise ValueError("guest selection contains duplicates")
+    return tuple(name for name in GUESTS if name in requested)
+
+
+def validate_provision_selection(requested, image_args):
+    selected = selected_guests(requested)
+    specs = {"debian13": ("debian_image", "debian_sha256", "Debian 13"),
+             "ubuntu2404": ("ubuntu_image", "ubuntu_sha256", "Ubuntu 24.04")}
+    images = {}
+    for guest in selected:
+        path_name, digest_name, label = specs[guest]
+        path, digest = image_args.get(path_name), image_args.get(digest_name)
+        if not path or not digest:
+            raise ValueError(f"{label} image and SHA-256 are required when selected")
+        images[guest] = verified_image(path, digest, label)
+    return selected, images
+
+
+def validate_environment_record(record):
+    selected = record.get("selected_guests")
+    canonical = selected_guests(selected)
+    guests = record.get("guests")
+    if not isinstance(guests, dict) or set(guests) != set(canonical):
+        raise RuntimeError("completed run guest identities do not match selected guest set")
+    if record.get("provisioning_status") != "complete":
+        raise RuntimeError("run record does not represent completed selected-guest provisioning")
 
 
 def domain_identity(xml_text, guest_name, guest, private):
@@ -245,9 +280,19 @@ def put(path, text, mode=0o600):
 
 
 def ssh(ip, key, known, command):
-    return call(["ssh", "-i", str(key), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-                 "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known}",
-                 "-o", "ConnectTimeout=3", f"o3kqual@{ip}", command])
+    argv = ["ssh", "-i", str(key), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known}",
+            "-o", "ConnectTimeout=3", f"o3kqual@{ip}", command]
+    result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        message = (result.stderr or result.stdout).strip().replace("\n", " ")[:512]
+        lowered = message.lower()
+        category = ("host-key" if "host key" in lowered or "hostkey" in lowered else
+                    "authentication" if "permission denied" in lowered else
+                    "transport" if any(x in lowered for x in ("timed out", "refused", "no route")) else
+                    "ssh-error")
+        raise RuntimeError(f"SSH {category} failure: {message or 'no diagnostic output'}")
+    return result.stdout.strip()
 
 
 def guest_static_ip(subnet_octet, ordinal):
@@ -275,14 +320,15 @@ def guest_network_config(mac, ip):
 def wait_ssh(ip, key, known, host_key_public, timeout):
     deadline = time.monotonic() + timeout
     put(known, f"{ip} {host_key_public}\n")
+    last_error = "no SSH attempt made"
     while time.monotonic() < deadline:
         try:
             ssh(ip, key, known, "systemctl --version | head -1")
             return ip
-        except (RuntimeError, subprocess.CalledProcessError):
-            pass
+        except (RuntimeError, subprocess.CalledProcessError) as error:
+            last_error = str(error)[:600]
         time.sleep(3)
-    raise RuntimeError(f"guest SSH timeout for static address {ip}")
+    raise RuntimeError(f"guest SSH timeout for static address {ip}; last_error={last_error}")
 
 
 def guest_user_data(name, host_key_private, host_key_public, user_public_key, state_label, journal_label):
@@ -304,13 +350,121 @@ def guest_user_data(name, host_key_private, host_key_public, user_public_key, st
     return "#cloud-config\n" + json.dumps(config, indent=2) + "\n"
 
 
+def bounded_call(argv, limit=16000, timeout=10):
+    try:
+        result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=timeout)
+        output = (result.stdout or "")[-limit:]
+        return {"command": argv, "exit_code": result.returncode, "timed_out": False, "output": output}
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        output = output[-limit:]
+        return {"command": argv, "exit_code": None, "timed_out": True, "output": output}
+
+
+def capture_guest_diagnostics(guest_name, guest, private, evidence, key=None, known=None):
+    """Capture bounded host/guest observations before run-owned resources are cleaned."""
+    prefix = evidence / f"diagnostics-{guest_name}"
+    domain = guest.get("domain")
+    records = {"guest": guest_name, "domain": domain,
+               "captured_at": datetime.now(timezone.utc).isoformat(), "observations": []}
+    if domain and subprocess.run(["virsh", "dominfo", domain], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL).returncode == 0:
+        xml = call(["virsh", "dumpxml", domain], check=False)
+        (Path(str(prefix) + ".domain.xml")).write_text(xml + "\n", encoding="utf-8")
+        interface = None
+        try:
+            interface_node = ET.fromstring(xml).find("./devices/interface/target")
+            interface = interface_node.get("dev") if interface_node is not None else None
+        except ET.ParseError:
+            pass
+        commands = [["virsh", "domstate", domain], ["virsh", "domiflist", domain]]
+        if interface:
+            commands.append(["virsh", "domifstat", domain, interface])
+        for argv in commands:
+            records["observations"].append(bounded_call(argv))
+    bridge = None
+    if guest.get("network"):
+        netxml = call(["virsh", "net-dumpxml", guest["network"]], check=False)
+        if netxml:
+            (Path(str(prefix) + ".network.xml")).write_text(netxml + "\n", encoding="utf-8")
+            try:
+                bridge_node = ET.fromstring(netxml).find("bridge")
+                bridge = bridge_node.get("name") if bridge_node is not None else None
+            except ET.ParseError:
+                pass
+    commands = [["ip", "-details", "link", "show"], ["ip", "-4", "address", "show"],
+                ["ip", "-4", "route", "show"], ["ip", "neigh", "show"]]
+    if bridge:
+        commands += [["ip", "-details", "link", "show", bridge], ["ip", "-4", "address", "show", "dev", bridge]]
+    records["observations"].extend(bounded_call(argv) for argv in commands)
+    if key and known and guest.get("ip"):
+        for command in ("cloud-init status --long", "journalctl -b --no-pager -u cloud-init-local -u cloud-init -u cloud-config -u cloud-final -n 100"):
+            try:
+                output = ssh(guest["ip"], key, known,
+                             "sudo -n sh -c " + shlex.quote(command))
+                (Path(str(prefix) + f".{command.split()[0]}.txt")).write_text(output[-16000:] + "\n", encoding="utf-8")
+                records["observations"].append({"command": command, "exit_code": 0, "output": output[-16000:]})
+            except Exception as error:
+                records["observations"].append({"command": command, "error": str(error)[:600]})
+    else:
+        records["guest_diagnostics"] = "unavailable: host-key-pinned SSH did not become available"
+    target = Path(str(prefix) + ".json")
+    put(target, json.dumps(records, sort_keys=True, indent=2) + "\n", 0o600)
+
+
+def start_serial_capture(domain, evidence, guest_name):
+    output = evidence / f"{guest_name}.serial.log"
+    errors = evidence / f"{guest_name}.serial.stderr"
+    stream = output.open("wb")
+    error_stream = errors.open("wb")
+    stream.close()
+    error_stream.close()
+    # `script` gives virsh the controlling TTY required by its interactive
+    # console client while writing the bounded transcript to the run evidence.
+    argv = ["script", "--quiet", "--flush", "--output-limit", "262144", "--command",
+            f"virsh console --force {shlex.quote(domain)}", str(output)]
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, start_new_session=True)
+    return process, output, errors
+
+
+def stop_serial_capture(capture):
+    if not capture:
+        return
+    process, output, errors = capture
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=3)
+    if process.stderr:
+        errors.write_bytes(process.stderr.read()[-16000:])
+        process.stderr.close()
+    for path in (output, errors):
+        if path.exists():
+            content = path.read_bytes()
+            if len(content) > 256 * 1024:
+                path.write_bytes(content[-256 * 1024:])
+            path.chmod(0o600)
+
+
 def provision(a):
     require_host(provisioning=True)
+    selected, images = validate_provision_selection(a.guest, vars(a))
     path = run_path(a.run_id)
     if path.exists() or path.is_symlink():
         raise RuntimeError(f"run already exists: {path}")
-    images = [verified_image(a.debian_image, a.debian_sha256, "Debian 13"),
-              verified_image(a.ubuntu_image, a.ubuntu_sha256, "Ubuntu 24.04")]
     free = shutil.disk_usage(ROOT.parent if ROOT.exists() else Path("/var/lib")).free
     if free < 35 * 1024**3 or (os.cpu_count() or 0) < 8:
         raise RuntimeError("need >=35 GiB free and >=8 host CPUs; created no resources")
@@ -327,11 +481,14 @@ def provision(a):
     evidence.mkdir(mode=0o700)
     marker_path = path / ".o3k-pp6-owned.json"
     marker = {"format": "o3k-pp6-run-v1", "run_id": a.run_id, "network": network,
-              "bridge": bridge, "network_uuid": None, "private": str(private), "guests": {},
+              "bridge": bridge, "network_uuid": None, "private": str(private), "selected_guests": list(selected), "guests": {},
               "run_inode": [path.lstat().st_dev, path.lstat().st_ino],
               "private_inode": [private.lstat().st_dev, private.lstat().st_ino],
               "evidence_inode": [evidence.lstat().st_dev, evidence.lstat().st_ino]}
     put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
+    active_capture = None
+    active_guest = None
+    active_key = active_known = None
     try:
         if subprocess.run(["virsh", "net-info", network], stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL).returncode == 0:
@@ -346,7 +503,10 @@ def provision(a):
         marker["network_uuid"] = call(["virsh", "net-info", network]).split("UUID:", 1)[1].splitlines()[0].strip()
         put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
         call(["virsh", "net-start", network])
-        for n, (guest, (base, base_sha)) in enumerate(zip(GUESTS, images)):
+        for guest in selected:
+            n = GUESTS.index(guest)
+            active_guest = guest
+            base, base_sha = images[guest]
             name = f"o3k-pp6-{a.run_id[:12]}-{guest}"
             if subprocess.run(["virsh", "dominfo", name], stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL).returncode == 0:
@@ -402,6 +562,8 @@ def provision(a):
             marker["guests"][guest]["uuid"] = domain_identity(
                 call(["virsh", "dumpxml", name]), guest, marker["guests"][guest], private)
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
+            capture = start_serial_capture(name, evidence, guest)
+            active_capture, active_key, active_known = capture, key, known
             ip = wait_ssh(static_ip, key, known, host_key_public, a.timeout)
             ssh(ip, key, known, "sudo -n cloud-init status --wait")
             expected_id, expected_version = (("debian", "13") if guest == "debian13"
@@ -425,6 +587,9 @@ def provision(a):
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/state; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/journal; "
                 "stat -Lc '%n %d:%i %u:%g %a' /var/lib/o3k/state /var/lib/o3k/journal"))
+            stop_serial_capture(capture)
+            active_capture = None
+            active_key = active_known = None
             (evidence / f"{guest}.identity.txt").write_text(observed + "\n", encoding="utf-8")
             marker["guests"][guest].update({"ip": ip, "identity_sha256": hashlib.sha256(observed.encode()).hexdigest()})
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
@@ -442,12 +607,19 @@ def provision(a):
                   "source_sha": source_sha or "NOT_RECORDED", "source_tree_sha": source_tree or "NOT_RECORDED",
                   "harness_sha256": sha(Path(__file__)), "network_forwarding": "disabled",
                   "network_addressing": "static-no-dhcp",
+                  "selected_guests": list(selected), "provisioning_status": "complete",
                   "release_artifact": "NOT_PROVIDED", "installed_executable_digests": "NOT_INSTALLED",
                   "host": host, "guests": marker["guests"],
                   "created_at": datetime.now(timezone.utc).isoformat()}
+        validate_environment_record(result)
         put(evidence / "environment.json", json.dumps(result, sort_keys=True, indent=2) + "\n", 0o644)
         print(json.dumps(result, sort_keys=True, indent=2))
     except Exception:
+        if active_capture:
+            stop_serial_capture(active_capture)
+            if active_guest in marker["guests"]:
+                capture_guest_diagnostics(active_guest, marker["guests"][active_guest],
+                                          private, evidence, active_key, active_known)
         print(f"provision failed; run-owned resources retained for diagnosis: {path}", file=sys.stderr)
         raise
 
@@ -462,6 +634,9 @@ def load_marker(run_id):
     marker = json.loads(marker_file.read_text(encoding="utf-8"))
     if marker.get("format") != "o3k-pp6-run-v1" or marker.get("run_id") != run_id:
         raise RuntimeError("ownership identity mismatch")
+    selected = selected_guests(marker.get("selected_guests"))
+    if not set(marker.get("guests", {})).issubset(set(selected)):
+        raise RuntimeError("ownership marker contains a guest outside the selected guest set")
     if marker.get("private") != str((path / "private").resolve()):
         raise RuntimeError("private path identity mismatch")
     if path.lstat().st_uid != 0 or path.lstat().st_mode & 0o022:
@@ -613,10 +788,12 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     q = sub.add_parser("provision")
     q.add_argument("--run-id", required=True)
-    q.add_argument("--debian-image", required=True)
-    q.add_argument("--debian-sha256", required=True)
-    q.add_argument("--ubuntu-image", required=True)
-    q.add_argument("--ubuntu-sha256", required=True)
+    q.add_argument("--guest", choices=GUESTS, action="append",
+                    help="guest to provision; repeat for both (default: both)")
+    q.add_argument("--debian-image")
+    q.add_argument("--debian-sha256")
+    q.add_argument("--ubuntu-image")
+    q.add_argument("--ubuntu-sha256")
     q.add_argument("--timeout", type=int, default=300)
     q.set_defaults(func=provision)
     q = sub.add_parser("destroy")
