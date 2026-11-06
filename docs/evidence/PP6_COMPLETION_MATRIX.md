@@ -10,7 +10,7 @@ new tests. Historical Debian 12 runs and dated snapshot evidence below are
 preserved as recorded; they are not Debian 13 evidence. This does not claim
 Debian 13 installed-platform support.
 
-## Current rc.27 E4 status (2026-11-05)
+## Current rc.27 E4 status (2026-11-06)
 
 - **Published release:** `v0.4.0-rc.27`, annotated tag object
   `80cdab1568ef0972602214d0c4656ad70858c07e`, source
@@ -20,29 +20,43 @@ Debian 13 installed-platform support.
   Independent Sigstore/OIDC/transparency/provenance, signed manifest, asset,
   and extracted-archive authentication passed; production
   `recovery-migrate-v2` is absent. This does not establish installed evidence.
-- **Qualification harness:** protected main
-  `ec088e6dc2c3307a3129bc24e545bed12b54ea3f`, including merged PR #1218,
-  selected Debian 13 and Ubuntu 24.04. Keep this SHA separate from the release
-  source SHA. The Debian 12 release-build baseline and historical guest runs
-  remain unchanged and are not reused as Debian 13 evidence.
-- **Dedicated-host preflight:** FAIL on `o3k-rust`: current process lacks
-  administrative/root identity; IPv4 and IPv6 forwarding are enabled; unrelated
-  VMs, active networks, PostgreSQL 16 and the apt fixture are present. The host
-  is rejected. No host configuration, workload or resource was changed or
-  cleaned. The fresh probe transcript is
-  `/tmp/o3k-pp6-rc27-e4-host-preflight-20261105.log`, SHA-256
-  `c77bd0933ca32e656b7662fe2da1849e67e2094376f1c2db90760aa60028ca34`. A
-  fresh passing preflight on another explicitly authorized disposable host is
-  required.
-- **E4:** BLOCKED_HOST_REQUIRED. Debian 13 Q1/Q2 and Ubuntu 24.04 Q1/Q2 are
-  BLOCKED pending an acceptable host; guest-image authentication, provisioning,
-  and all installed assertions are NOT_RUN. No install failure or new product
-  defect was observed. E5 remains separately NOT_RUN. No Debian 13 support
-  claim is made.
-- **Per-OS Q1/Q2:** Debian 13 Q1 = BLOCKED_HOST_REQUIRED / assertions NOT_RUN;
-  Debian 13 Q2 = BLOCKED_HOST_REQUIRED / assertions NOT_RUN; Ubuntu 24.04 Q1 =
-  BLOCKED_HOST_REQUIRED / assertions NOT_RUN; Ubuntu 24.04 Q2 =
-  BLOCKED_HOST_REQUIRED / assertions NOT_RUN.
+- **Qualification harness used by run 0193:** protected main
+  `c7f7bfb7e33608e36c0c29c83382f2793903af6d`, including merged PRs #1218 and
+  #1219; script SHA-256
+  `b49b90b67c67c2073465e8e578d9135e908f4319dd232f5b0ed60c54c7d86f39`.
+  It selected Debian 13 and Ubuntu 24.04 but still waited for DHCP. The static-IP
+  adaptation in this change addresses the qualification-node use case; it does
+  not alter the release source SHA or release artifact.
+- **Dedicated-host preflight:** PASS on authorized disposable nested-KVM host
+  `o3k-pp6-local-runner`: x86_64, root access, 8 CPUs, 32 GiB available memory,
+  241 GiB free storage, `/dev/kvm`, forwarding disabled, no default route, no
+  unrelated VMs, and no active test network before provisioning. Initial
+  transcript SHA-256 `e7ce0a861c04d40ddce32d88402cdfff9bacd1fdcc7fc67ebe90f8b04b502039`.
+  The Trixie package fixture was started only after its isolated bridge existed
+  and stopped after the failed run was cleaned. The earlier rejected `o3k-rust`
+  preflight remains recorded as FAIL in the dated evidence below.
+- **Provisioning run:** `pp6-e4-20261106-0193` failed while waiting for the
+  Debian 13 guest at its DHCP-pinned SSH address: no DHCP lease appeared and the
+  guest NIC recorded zero transmitted packets. The protected harness reported
+  `guest SSH timeout for 52:54:00:64:62:e5`. The VM and isolated network were
+  removed by ownership-checked cleanup; logs and result record remain at
+  `/var/lib/o3k-pp6-qualification/runs/pp6-e4-20261106-0193/evidence/`.
+  The result JSON SHA-256 is
+  `b51078979f79b7cc934e8985e893b9618c774635af0d4d2d444fac3dcb1253c7`; the
+  provisioning log SHA-256 is
+  `c60d97258a51242b4083728e1169d69b50407315e63b3396b41a80dbcdc5b25e`.
+- **E4:** FAIL at Debian 13 provisioning. Debian 13 Q1 = FAIL because required
+  guest provisioning failed; Q2 = NOT_RUN. Ubuntu 24.04 Q1/Q2 = NOT_RUN because
+  provisioning stopped before that guest. No installed-release assertion ran,
+  and no new product defect is established. E5 remains separately NOT_RUN. No
+  Debian 13 support claim is made.
+- **Next run:** use the static-IP harness path: Debian `.20`, Ubuntu `.21`,
+  cloud-init NoCloud network config matched by MAC, no libvirt DHCP range, and
+  no guest default route. Require the address, route, host-key-pinned SSH, and
+  separate ext4 identity checks to pass before installation. Keep run 0193 as
+  FAIL; it is not reclassified by the harness change.
+- **Per-OS Q1/Q2:** Debian 13 Q1 = FAIL / Q2 = NOT_RUN; Ubuntu 24.04 Q1 =
+  NOT_RUN / Q2 = NOT_RUN.
 - **Historical CI failures:** runs `41919177633` (backup preflight) and
   `42022349408` (P12.6 SQLite recovery) remain recorded as FAIL with unresolved
   causes. The owner accepted residual diagnostic uncertainty for release

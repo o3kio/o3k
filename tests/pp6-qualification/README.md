@@ -6,8 +6,21 @@ for new PP.6 qualification runs; its guest identity remains recognized only
 for ownership-checked cleanup of existing runs. Each guest boots
 systemd and receives separate local state and journal qcow2 disks formatted as
 ext4. The run-specific libvirt network has forwarding disabled; it provides
-host-to-guest SSH for setup and evidence collection only. It does not install
-O3K or select an installation policy.
+host-to-guest SSH for setup and evidence collection only. These guests model
+physical qualification nodes with static host-only addresses: the bridge uses
+`192.168.<run-subnet>.1`, Debian 13 uses `.20`, and Ubuntu 24.04 uses `.21`.
+The harness supplies cloud-init NoCloud `network-config` matched to each fixed
+MAC, explicitly disables IPv4/IPv6 DHCP, and configures no gateway or default
+route. The libvirt network has no DHCP range or forwarding. Guest address and
+route checks run before the guest is accepted. This avoids depending on a DHCP
+lease while preserving the isolated network. It does not install O3K or select
+an installation policy.
+
+The static network data uses cloud-init Networking Config Version 1, which
+NoCloud supports and which can be rendered by Debian's ENI backend and the
+Ubuntu image's configured backend. See the
+[cloud-init Version 1 network configuration reference](https://docs.cloud-init.io/en/latest/reference/network-config-format-v1.html)
+and [NoCloud datasource reference](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html).
 
 Run as root on a dedicated qualification host after checking that the supplied
 images are trusted official cloud images and that no production credentials,
@@ -67,10 +80,11 @@ that evidence as a guest-level interruption. It is not host power-loss
 evidence. `destroy` verifies the run marker, run/private/evidence directory
 inodes, every recorded file and domain disk, network interface, domain UUID,
 network UUID and bridge identity, removes only that run's stopped VMs/network
-and private files, and retains evidence. If provisioning fails, resources are
-deliberately retained for inspection. Cleanup fails closed when a partial run
-lacks the identity markers required for safe removal; inspect and remove that
-partial run manually.
+and private files (including `seed/network-config`), and retains evidence. It
+rejects a network definition that enables DHCP or forwarding. If provisioning
+fails, resources are deliberately retained for inspection. Cleanup fails
+closed when a partial run lacks the identity markers required for safe
+removal; inspect and remove that partial run manually.
 
 This infrastructure PR does not include an authenticated O3K candidate,
 release installation, PostgreSQL 16 target, independent host power-cut

@@ -127,13 +127,16 @@ def network_identity(xml_text, name, uuid, bridge):
     actual_bridge = root.find("bridge")
     if actual_bridge is None or actual_bridge.get("name") != bridge:
         raise RuntimeError("qualification bridge identity mismatch")
+    network_ip = root.find("ip")
+    if network_ip is None or network_ip.find("dhcp") is not None:
+        raise RuntimeError("qualification network must have a host address and no DHCP service")
 
 
 def file_identities(directory):
     result = {}
     names = ("base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso",
              "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub",
-             "seed/user-data", "seed/meta-data")
+             "seed/user-data", "seed/meta-data", "seed/network-config")
     for name in names:
         path = directory / name
         info = path.lstat()
@@ -158,7 +161,7 @@ def verify_recorded_files(private, marker):
         allowed_files.update(f"{guest_name}/{name}" for name in (
             "base.qcow2", "root.qcow2", "state.qcow2", "journal.qcow2", "seed.iso",
             "id_ed25519", "id_ed25519.pub", "known_hosts", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub",
-            "seed/user-data", "seed/meta-data"))
+            "seed/user-data", "seed/meta-data", "seed/network-config"))
     for guest_name, guest in marker.get("guests", {}).items():
         recorded = guest.get("files")
         if not isinstance(recorded, dict):
@@ -247,33 +250,39 @@ def ssh(ip, key, known, command):
                  "-o", "ConnectTimeout=3", f"o3kqual@{ip}", command])
 
 
-def lease_ip(network, mac):
-    for line in call(["virsh", "net-dhcp-leases", network], check=False).splitlines():
-        fields = line.split()
-        # Expiry Time contains a date and a time, so it occupies two fields.
-        # Locate the exact MAC/protocol pair rather than indexing the heading.
-        for index, field in enumerate(fields[:-2]):
-            if field.lower() == mac.lower() and fields[index + 1] == "ipv4":
-                try:
-                    return str(ipaddress.IPv4Interface(fields[index + 2]).ip)
-                except ValueError:
-                    continue
-    return None
+def guest_static_ip(subnet_octet, ordinal):
+    if not isinstance(subnet_octet, int) or not 100 <= subnet_octet <= 199:
+        raise ValueError("qualification subnet octet is out of range")
+    if ordinal not in (0, 1):
+        raise ValueError("qualification guest ordinal is out of range")
+    return str(ipaddress.IPv4Address(f"192.168.{subnet_octet}.{20 + ordinal}"))
 
 
-def wait_ssh(network, mac, key, known, host_key_public, timeout):
+def guest_network_config(mac, ip):
+    if not re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", mac.lower()):
+        raise ValueError("qualification guest MAC is malformed")
+    interface = ipaddress.IPv4Interface(f"{ip}/24")
+    octets = str(interface.ip).split(".")
+    if octets[:2] != ["192", "168"] or not 100 <= int(octets[2]) <= 199 or int(octets[3]) not in (20, 21):
+        raise ValueError("qualification guest IP is outside the reserved host-only slots")
+    config = {"version": 1, "config": [{
+        "type": "physical", "name": "qualification", "mac_address": mac.lower(),
+        "subnets": [{"type": "static", "address": str(interface)}],
+    }]}
+    return json.dumps(config, indent=2) + "\n"
+
+
+def wait_ssh(ip, key, known, host_key_public, timeout):
     deadline = time.monotonic() + timeout
+    put(known, f"{ip} {host_key_public}\n")
     while time.monotonic() < deadline:
-        ip = lease_ip(network, mac)
-        if ip:
-            put(known, f"{ip} {host_key_public}\n")
-            try:
-                ssh(ip, key, known, "systemctl --version | head -1")
-                return ip
-            except (RuntimeError, subprocess.CalledProcessError):
-                pass
+        try:
+            ssh(ip, key, known, "systemctl --version | head -1")
+            return ip
+        except (RuntimeError, subprocess.CalledProcessError):
+            pass
         time.sleep(3)
-    raise RuntimeError(f"guest SSH timeout for {mac}")
+    raise RuntimeError(f"guest SSH timeout for static address {ip}")
 
 
 def guest_user_data(name, host_key_private, host_key_public, user_public_key, state_label, journal_label):
@@ -329,8 +338,7 @@ def provision(a):
             raise RuntimeError(f"libvirt network exists: {network}")
         netxml = private / "network.xml"
         put(netxml, f"""<network><name>{network}</name><forward mode='none'/>
-<bridge name='{bridge}' stp='off' delay='0'/><ip address='192.168.{octet}.1' netmask='255.255.255.0'>
-<dhcp><range start='192.168.{octet}.20' end='192.168.{octet}.99'/></dhcp></ip></network>
+<bridge name='{bridge}' stp='off' delay='0'/><ip address='192.168.{octet}.1' netmask='255.255.255.0'/></network>
 """)
         marker["network_xml_inode"] = [netxml.lstat().st_dev, netxml.lstat().st_ino]
         put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
@@ -367,6 +375,7 @@ def provision(a):
             host_key_public = call(["ssh-keygen", "-y", "-f", str(host_key)])
             put(known, "", 0o600)
             mac = "52:54:00:" + ":".join(f"{b:02x}" for b in hashlib.sha256((a.run_id + guest).encode()).digest()[:3])
+            static_ip = guest_static_ip(octet, n)
             state_label, journal_label = f"O3KSTATE{n}", f"O3KJOURNAL{n}"
             user_data = guest_user_data(name, host_key.read_text(), host_key_public,
                                         pub.read_text().strip(), state_label, journal_label)
@@ -374,12 +383,15 @@ def provision(a):
             seed.mkdir(mode=0o700)
             put(seed / "user-data", user_data)
             put(seed / "meta-data", json.dumps({"instance-id": name, "local-hostname": name}) + "\n")
+            put(seed / "network-config", guest_network_config(mac, static_ip))
             iso = d / "seed.iso"
             call(["genisoimage", "-output", str(iso), "-volid", "cidata", "-joliet", "-rock",
                   "-graft-points", "user-data=" + str(seed / "user-data"),
-                  "meta-data=" + str(seed / "meta-data")])
+                  "meta-data=" + str(seed / "meta-data"),
+                  "network-config=" + str(seed / "network-config")])
             marker["guests"][guest] = {"domain": name, "mac": mac, "base_image_sha256": base_sha,
-                                       "network": network, "files": file_identities(d)}
+                                       "network": network, "ip": static_ip, "addressing": "static",
+                                       "files": file_identities(d)}
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
             call(["virt-install", "--connect", "qemu:///system", "--name", name, "--memory", "4096",
                   "--vcpus", "2", "--import", "--osinfo", "detect=on,require=off", "--noautoconsole",
@@ -390,13 +402,15 @@ def provision(a):
             marker["guests"][guest]["uuid"] = domain_identity(
                 call(["virsh", "dumpxml", name]), guest, marker["guests"][guest], private)
             put(marker_path, json.dumps(marker, sort_keys=True, indent=2) + "\n")
-            ip = wait_ssh(network, mac, key, known, host_key_public, a.timeout)
+            ip = wait_ssh(static_ip, key, known, host_key_public, a.timeout)
             ssh(ip, key, known, "sudo -n cloud-init status --wait")
             expected_id, expected_version = (("debian", "13") if guest == "debian13"
                                              else ("ubuntu", "24.04"))
             os_check = (". /etc/os-release; test \"$ID\" = " + expected_id
                         + "; test \"$VERSION_ID\" = " + expected_version + "; ")
-            observed = ssh(ip, key, known, "sudo -n sh -c " + shlex.quote("set -eu; " + os_check + "test -x /usr/lib/systemd/systemd; "
+            network_check = (f"test \"$(ip -4 -o addr show | awk '$4 == \"{static_ip}/24\" {{print $4}}')\" = \"{static_ip}/24\"; "
+                             "test -z \"$(ip -4 route show default)\"; ip -4 -o addr show; ip -4 route; ")
+            observed = ssh(ip, key, known, "sudo -n sh -c " + shlex.quote("set -eu; " + os_check + network_check + "test -x /usr/lib/systemd/systemd; "
                 "test \"$(findmnt -n -o FSTYPE /var/lib/o3k/state)\" = ext4; "
                 "test \"$(findmnt -n -o FSTYPE /var/lib/o3k/journal)\" = ext4; "
                 f"test \"$(blkid -s LABEL -o value \"$(findmnt -n -o SOURCE /var/lib/o3k/state)\")\" = {state_label}; "
@@ -427,6 +441,7 @@ def provision(a):
         result = {"format": "o3k-pp6-environment-v1", "run_id": a.run_id,
                   "source_sha": source_sha or "NOT_RECORDED", "source_tree_sha": source_tree or "NOT_RECORDED",
                   "harness_sha256": sha(Path(__file__)), "network_forwarding": "disabled",
+                  "network_addressing": "static-no-dhcp",
                   "release_artifact": "NOT_PROVIDED", "installed_executable_digests": "NOT_INSTALLED",
                   "host": host, "guests": marker["guests"],
                   "created_at": datetime.now(timezone.utc).isoformat()}
