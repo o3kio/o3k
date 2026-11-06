@@ -350,10 +350,18 @@ def guest_user_data(name, host_key_private, host_key_public, user_public_key, st
     return "#cloud-config\n" + json.dumps(config, indent=2) + "\n"
 
 
-def bounded_call(argv, limit=16000):
-    result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    output = (result.stdout or "")[-limit:]
-    return {"command": argv, "exit_code": result.returncode, "output": output}
+def bounded_call(argv, limit=16000, timeout=10):
+    try:
+        result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=timeout)
+        output = (result.stdout or "")[-limit:]
+        return {"command": argv, "exit_code": result.returncode, "timed_out": False, "output": output}
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        output = output[-limit:]
+        return {"command": argv, "exit_code": None, "timed_out": True, "output": output}
 
 
 def capture_guest_diagnostics(guest_name, guest, private, evidence, key=None, known=None):
