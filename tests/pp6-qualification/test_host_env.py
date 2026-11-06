@@ -26,20 +26,39 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         self.assertEqual(config["users"][1]["sudo"], ["ALL=(ALL) NOPASSWD:ALL"])
         self.assertIs(config["ssh_pwauth"], False)
 
-    def test_lease_ip_parses_real_virsh_timestamp_and_matches_mac_and_protocol(self):
-        leases = ''' Expiry Time           MAC address         Protocol   IP address          Hostname   Client ID
----------------------------------------------------------------------------------------
- 2026-11-04 12:24:01   52:54:00:00:00:02   ipv4       192.168.187.47/24   foreign    -
- 2026-11-04 12:24:01   52:54:00:00:00:01   ipv6       2001:db8::1/64     guest      -
- 2026-11-04 12:24:01   52:54:00:00:00:01   ipv4       192.168.187.48/24   guest      -
-'''
-        with patch.object(HOST_ENV, "call", return_value=leases):
-            self.assertEqual(HOST_ENV.lease_ip("qualification", "52:54:00:00:00:01"), "192.168.187.48")
-            self.assertIsNone(HOST_ENV.lease_ip("qualification", "52:54:00:00:00:03"))
-        for invalid in ("999.168.187.48/24", "192.168.187.48/99", "not-an-ip"):
-            with self.subTest(invalid=invalid), patch.object(
-                    HOST_ENV, "call", return_value=f"2026-11-04 12:24:01 52:54:00:00:00:01 ipv4 {invalid}"):
-                self.assertIsNone(HOST_ENV.lease_ip("qualification", "52:54:00:00:00:01"))
+    def test_static_guest_addresses_use_disjoint_reserved_slots(self):
+        self.assertEqual(HOST_ENV.guest_static_ip(145, 0), "192.168.145.20")
+        self.assertEqual(HOST_ENV.guest_static_ip(145, 1), "192.168.145.21")
+        for subnet, ordinal in ((99, 0), (200, 0), (145, 2)):
+            with self.subTest(subnet=subnet, ordinal=ordinal), self.assertRaises(ValueError):
+                HOST_ENV.guest_static_ip(subnet, ordinal)
+
+    def test_network_config_assigns_static_address_by_mac_without_dhcp_or_gateway(self):
+        import json
+        raw = HOST_ENV.guest_network_config("52:54:00:64:62:e5", "192.168.145.20")
+        config = json.loads(raw)
+        self.assertEqual(config["version"], 1)
+        interface = config["config"][0]
+        self.assertEqual(interface["type"], "physical")
+        self.assertEqual(interface["mac_address"], "52:54:00:64:62:e5")
+        self.assertEqual(interface["subnets"], [{"type": "static", "address": "192.168.145.20/24"}])
+        self.assertNotIn("gateway", interface["subnets"][0])
+        self.assertNotIn("routes", interface["subnets"][0])
+        with self.assertRaises(ValueError):
+            HOST_ENV.guest_network_config("bad-mac", "192.168.145.20")
+        with self.assertRaises(ValueError):
+            HOST_ENV.guest_network_config("52:54:00:64:62:e5", "192.168.145.1")
+
+    def test_wait_ssh_uses_static_ip_and_pins_host_key_without_dhcp(self):
+        ip = "192.168.145.20"
+        with tempfile.TemporaryDirectory() as directory:
+            known = Path(directory) / "known_hosts"
+            key = Path(directory) / "id_ed25519"
+            with patch.object(HOST_ENV, "ssh", return_value="Linux guest") as ssh_call, \
+                    patch.object(HOST_ENV.time, "monotonic", side_effect=(0, 1)):
+                self.assertEqual(HOST_ENV.wait_ssh(ip, key, known, "ssh-ed25519 host-key", 30), ip)
+            ssh_call.assert_called_once_with(ip, key, known, "systemctl --version | head -1")
+            self.assertEqual(known.read_text(encoding="utf-8"), f"{ip} ssh-ed25519 host-key\n")
 
     def test_run_id_is_bounded_and_canonical(self):
         self.assertEqual(HOST_ENV.run_path("pp6-20261101-run01").name, "pp6-20261101-run01")
@@ -115,10 +134,14 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
 
     def test_network_identity_rejects_forwarding_or_identity_change(self):
         xml = ("<network><name>o3k-pp6-run123</name><uuid>net-uuid</uuid>"
-               "<forward mode='none'/><bridge name='p6123456'/></network>")
+               "<forward mode='none'/><bridge name='p6123456'/>"
+               "<ip address='192.168.145.1' netmask='255.255.255.0'/></network>")
         HOST_ENV.network_identity(xml, "o3k-pp6-run123", "net-uuid", "p6123456")
         with self.assertRaises(RuntimeError):
             HOST_ENV.network_identity(xml.replace("none", "nat"), "o3k-pp6-run123", "net-uuid", "p6123456")
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.network_identity(xml.replace("'/></network>", "'><dhcp/></ip></network>"),
+                                      "o3k-pp6-run123", "net-uuid", "p6123456")
 
     def test_installed_release_capture_requires_exact_manifest_and_binary_inventory(self):
         record = {
@@ -156,12 +179,16 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
             network_xml.write_text("<network/>", encoding="utf-8")
             recorded_file = guest_dir / "root.qcow2"
             recorded_file.write_bytes(b"run-owned disk")
+            network_config = guest_dir / "seed" / "network-config"
+            network_config.write_text('{"version": 2}', encoding="utf-8")
             network_info = network_xml.lstat()
             disk_info = recorded_file.lstat()
+            config_info = network_config.lstat()
             marker = {
                 "network_xml_inode": [network_info.st_dev, network_info.st_ino],
                 "guests": {"debian12": {"files": {
-                    "root.qcow2": [disk_info.st_dev, disk_info.st_ino]
+                    "root.qcow2": [disk_info.st_dev, disk_info.st_ino],
+                    "seed/network-config": [config_info.st_dev, config_info.st_ino],
                 }}},
             }
             HOST_ENV.verify_recorded_files(private, marker)
