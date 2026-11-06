@@ -12,6 +12,35 @@ Debian 13 installed-platform support.
 
 ## Current rc.27 E4 status (2026-11-06)
 
+### Independent-boot recovery update
+
+The later isolated attempt `pp6-e4-20261106-0194`, using protected harness
+`48c88c674adfb61edcac7d3aa78780e968c54573` and script SHA-256
+`20c7cafb2aa3de8353241e433f1fed8eae1c3f7612a222f64cde4261e2d4515d`, also
+failed during Debian 13 guest provisioning. Its result JSON SHA-256 is
+`318f41009750970701764a7c6cf319b548bb8be050a4e41a4c0cfd6ec532c0af`; the
+attempt transcript SHA-256 is
+`8273941a26d4ea2791a8d9874e9a666a2a042ae9134745f00a3e0a6119ef6a85`; and
+the retained QEMU log SHA-256 is
+`4aeda397d28e90514f56b5f0975b26709270f1b1aef6c65f7792867a0932ab71`.
+Debian 13 at `192.168.116.20` timed out on SSH. The bridge recorded 90 bytes
+and one packet received, with zero transmitted bytes/packets; neighbor
+resolution remained incomplete. QEMU's log shows the expected root disk at
+boot index 1 and NIC MAC `52:54:00:ab:94:f9`, but does not show guest boot
+progress. The VM's domain XML and serial transcript were not retained, and no
+guest cloud-init/SSH diagnostics were available. Therefore firmware/kernel/
+initramfs boot, NoCloud discovery, network application, and SSH host-key or
+authentication causes remain unresolved; no root cause is established.
+Ownership-checked cleanup passed and retained the evidence. Ubuntu 24.04 was
+not attempted in that invocation, and Q1/Q2 remain NOT_RUN for both guests.
+
+The qualification-only harness recovery change is being prepared for protected
+review. It adds independent guest selection (Debian 13, Ubuntu 24.04, or both)
+and bounded failure capture; it changes no application/release code and does
+not change the immutable rc.27 identity or supported-platform policy. Until
+that change passes exact-head review/checks and merges, no live-boot result is
+claimed from it.
+
 - **Published release:** `v0.4.0-rc.27`, annotated tag object
   `80cdab1568ef0972602214d0c4656ad70858c07e`, source
   `9427e7668afa76bf1f043c9adabe1d616cf5924a`, release workflow run

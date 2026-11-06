@@ -1,5 +1,51 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
+## Current rc.27 guest-boot status (2026-11-06)
+
+Protected `main` is `48c88c674adfb61edcac7d3aa78780e968c54573`; this is the
+qualification harness identity, separate from rc.27 source
+`9427e7668afa76bf1f043c9adabe1d616cf5924a`, annotated tag object
+`80cdab1568ef0972602214d0c4656ad70858c07e`, and authenticated archive
+SHA-256 `dea259144d16eb2cfa59169b5cf73e0e5df528663209e6b8bc34ea3d7da74f05`.
+The Debian 12 release-build baseline remains historical and unchanged. Debian
+13 is an owner-directed future guest target; rc.27's installer supports
+Ubuntu 24.04 and Debian 12 and rejects Debian 13.
+
+Run `pp6-e4-20261106-0194` failed Debian 13 live-boot provisioning on the
+authorized host. SSH to static IP `192.168.116.20` timed out; the host bridge
+observed one packet/90 bytes received and no transmitted traffic, with an
+unresolved neighbor. QEMU command logging confirms the intended root disk boot
+index and virtio NIC MAC, but not guest progress. The original attempt did not
+retain domain XML or a serial transcript; guest cloud-init diagnostics were
+unavailable because SSH never came up. This evidence does not distinguish
+firmware/kernel/initramfs failure, NoCloud discovery, network application,
+interface matching, or SSH key/authentication failure. Root cause remains
+unresolved. Result JSON SHA-256:
+`318f41009750970701764a7c6cf319b548bb8be050a4e41a4c0cfd6ec532c0af`;
+attempt transcript:
+`8273941a26d4ea2791a8d9874e9a666a2a042ae9134745f00a3e0a6119ef6a85`;
+QEMU log:
+`4aeda397d28e90514f56b5f0975b26709270f1b1aef6c65f7792867a0932ab71`.
+The host preflight passed (transcript SHA-256
+`2533035aa42be4b0799b9b3e095d5bf3a5c2790e9d539bbe08d7b6c335483a1f`), and
+ownership-checked cleanup passed with evidence retained. E4 is BLOCKED;
+Debian 13 Q1/Q2 are NOT_RUN, Ubuntu 24.04 Q1/Q2 are NOT_RUN, and no installed
+release evidence exists.
+
+A harness-only change is proposed to allow either guest independently or both
+by default and retain bounded serial, domain/network XML, host bridge/interface,
+route, neighbor, SSH and available cloud-init diagnostics on failure. The
+change is not yet merged and provides no live-boot evidence. After exact-head
+review/checks and protected merge, run Debian 13 and Ubuntu 24.04 independently
+with fresh run IDs; retain every failed attempt. Only after successful Ubuntu
+boot may immutable rc.27 authentication and Ubuntu Q1/Q2 proceed. For Debian
+13, test live boot first, then record the published installer's allowlist
+rejection as expected unsupported-platform behavior; do not bypass it.
+
+Keep #975 OPEN. These updates do not establish Debian 13 product support, PP.6
+GO, independent security acceptance, E5 physical power-loss evidence, or
+production restore activation.
+
 **Status:** executable plan; PP.6 remains **BLOCKED**. **Status snapshot:**
 protected `main` at `c454134e584288b49637b11592bb0b59351d022a` (2026-11-04),
 the merge-queue commit for PR #1215. PR #1215 reviewed head was
