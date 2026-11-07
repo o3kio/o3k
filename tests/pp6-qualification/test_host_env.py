@@ -70,6 +70,12 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         self.assertEqual(config["users"][1]["ssh_authorized_keys"], ["ssh-ed25519 user-key"])
         self.assertEqual(config["users"][1]["sudo"], ["ALL=(ALL) NOPASSWD:ALL"])
         self.assertIs(config["ssh_pwauth"], False)
+        provision_identity = config["runcmd"][1][2]
+        self.assertIn(
+            "useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k",
+            provision_identity,
+        )
+        self.assertNotIn("--home-dir /nonexistent", provision_identity)
 
     def test_static_guest_addresses_use_disjoint_reserved_slots(self):
         self.assertEqual(HOST_ENV.guest_static_ip(145, 0), "192.168.145.20")
