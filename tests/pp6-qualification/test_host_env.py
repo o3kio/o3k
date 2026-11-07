@@ -1,5 +1,8 @@
 import hashlib
 import importlib.util
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,6 +93,9 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         self.assertIn("BindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount", script)
         self.assertIn("mount /var/lib/o3k/state", script)
         self.assertIn("mount /var/lib/o3k/journal", script)
+        self.assertIn("find /var/lib/o3k/state -mindepth 1 -maxdepth 1 -printf '%f\\n'", script)
+        self.assertIn("= lost+found", script)
+        self.assertNotIn("test -z \"$(find /var/lib/o3k/state /var/lib/o3k/journal", script)
         self.assertNotIn("DATA_ROOT=\"$", script)
         self.assertNotIn("systemctl start", script)
         import subprocess
@@ -98,6 +104,72 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         self.assertEqual(parsed.returncode, 0, parsed.stderr)
         with self.assertRaises(ValueError):
             HOST_ENV.guest_storage_setup_script("../../foreign", "O3KJOURNAL0")
+        with self.assertRaises(ValueError):
+            HOST_ENV.ext4_lost_found_assertions("/tmp/a;touch /tmp/pwned", 0, 0)
+
+    def test_fresh_ext4_lost_found_and_foreign_entry_rejection(self):
+        if not shutil.which("mkfs.ext4") or not shutil.which("debugfs"):
+            self.skipTest("e2fsprogs unavailable")
+        with tempfile.TemporaryDirectory(prefix="pp6-ext4-lost-found-") as directory:
+            image = Path(directory) / "fresh.ext4"
+            with image.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024)
+            subprocess.run(["mkfs.ext4", "-F", "-q", "-L", "O3KFIXTURE", str(image)],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            listing = subprocess.run(["debugfs", "-R", "ls -l /", str(image)], check=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).stdout
+            lost = subprocess.run(["debugfs", "-R", "stat /lost+found", str(image)], check=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).stdout
+            lost_listing = subprocess.run(["debugfs", "-R", "ls -l /lost+found", str(image)], check=True,
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).stdout
+            root_names = [line.split()[-1] for line in listing.splitlines()
+                          if line.lstrip()[:1].isdigit() and len(line.split()) >= 7]
+            lost_names = [line.split()[-1] for line in lost_listing.splitlines()
+                          if line.lstrip()[:1].isdigit() and len(line.split()) >= 7]
+            self.assertEqual(root_names, [".", "..", "lost+found"])
+            self.assertEqual(lost_names, [".", ".."])
+            self.assertRegex(lost, r"Type: directory\s+Mode:  0700")
+            self.assertRegex(lost, r"User:\s+0\s+Group:\s+0")
+
+            # Mount when the runner has CAP_SYS_ADMIN; otherwise the real ext4
+            # image above is the deterministic CI fallback for mkfs semantics.
+            cap_eff = next((line.split()[1] for line in Path("/proc/self/status").read_text().splitlines()
+                            if line.startswith("CapEff:")), "0")
+            can_mount = os.geteuid() == 0 and int(cap_eff, 16) & (1 << 21)
+            if can_mount:
+                mountpoint = Path(directory) / "mnt"
+                mountpoint.mkdir()
+                mounted = subprocess.run(["mount", "-o", "loop", str(image), str(mountpoint)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if mounted.returncode == 0:
+                    try:
+                        self.assertEqual(sorted(p.name for p in mountpoint.iterdir()), ["lost+found"])
+                        self.assertEqual((mountpoint / "lost+found").stat().st_mode & 0o777, 0o700)
+                        self.assertEqual(list((mountpoint / "lost+found").iterdir()), [])
+                    finally:
+                        subprocess.run(["umount", str(mountpoint)], check=True)
+
+        assertions = HOST_ENV.ext4_lost_found_assertions
+        with tempfile.TemporaryDirectory(prefix="pp6-mounted-root-fixture-") as directory:
+            root = Path(directory)
+            lost_found = root / "lost+found"
+            lost_found.mkdir(mode=0o700)
+            os.chmod(lost_found, 0o700)
+            check = assertions(str(root), os.geteuid(), os.getegid())
+            result = subprocess.run(["bash", "-c", check], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            (root / "foreign.db").write_text("foreign")
+            self.assertNotEqual(subprocess.run(["bash", "-c", check]).returncode, 0)
+            (root / "foreign.db").unlink()
+            (root / "unexpected-dir").mkdir()
+            self.assertNotEqual(subprocess.run(["bash", "-c", check]).returncode, 0)
+            (root / "unexpected-dir").rmdir()
+            (root / "bad-link").symlink_to(lost_found, target_is_directory=True)
+            self.assertNotEqual(subprocess.run(["bash", "-c", check]).returncode, 0)
+            (root / "bad-link").unlink()
+            (lost_found / "unexpected").write_text("not ext4-generated")
+            self.assertNotEqual(subprocess.run(["bash", "-c", check]).returncode, 0)
 
     def test_postinstall_storage_requires_rc27_ownership_modes_and_distinct_ext4(self):
         record = {
@@ -110,19 +182,35 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
             },
             "filesystem": {"/var/lib/o3k/state": "/dev/vdb ext4 rw,relatime",
                             "/var/lib/o3k/journal": "/dev/vdc ext4 rw,relatime"},
-            "services": {"o3kd.service": "active", "o3k-compute.service": "active"},
+            "lost_found": {
+                "/var/lib/o3k/state": {"type": "directory", "symlink": False,
+                                         "uid": 994, "gid": 984, "mode": 0o700, "device": 11},
+                "/var/lib/o3k/journal": {"type": "directory", "symlink": False,
+                                           "uid": 994, "gid": 984, "mode": 0o700, "device": 12},
+            },
+            "services": {"o3kd.service": "inactive", "o3k-compute.service": "inactive"},
         }
         HOST_ENV.validate_installed_storage(record)
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_installed_services(record)
+        record["services"] = {"o3kd.service": "active", "o3k-compute.service": "active"}
+        HOST_ENV.validate_installed_services(record)
         cases = (
-            {**record, "paths": {**record["paths"], "/var/lib/o3k": {**record["paths"]["/var/lib/o3k"], "mode": 0o755}}},
-            {**record, "paths": {**record["paths"], "/var/lib/o3k/state": {**record["paths"]["/var/lib/o3k/state"], "mode": 0o750}}},
-            {**record, "filesystem": {**record["filesystem"], "/var/lib/o3k/journal": "/dev/vdb ext4 rw"}},
-            {**record, "account": {**record["account"], "home": "/nonexistent"}},
-            {**record, "services": {**record["services"], "o3kd.service": "inactive"}},
+            {**record, "lost_found": {**record["lost_found"],
+                "/var/lib/o3k/state": {**record["lost_found"]["/var/lib/o3k/state"], "symlink": True}}},
+            {**record, "lost_found": {**record["lost_found"],
+                "/var/lib/o3k/journal": {**record["lost_found"]["/var/lib/o3k/journal"], "mode": 0o755}}},
+            {**record, "filesystem": {**record["filesystem"],
+                "/var/lib/o3k/journal": "/dev/vdb ext4 rw"}},
+            {**record, "paths": {**record["paths"],
+                "/var/lib/o3k/state": {**record["paths"]["/var/lib/o3k/state"], "mode": 0o750}}},
         )
         for invalid in cases:
             with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
                 HOST_ENV.validate_installed_storage(invalid)
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_installed_services(
+                {**record, "services": {**record["services"], "o3kd.service": "inactive"}})
 
     def test_static_guest_addresses_use_disjoint_reserved_slots(self):
         self.assertEqual(HOST_ENV.guest_static_ip(145, 0), "192.168.145.20")
@@ -256,24 +344,23 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
                        "uid": 0, "gid": 0, "mode": 0o755, "device": 8, "inode": 10}
                 for name in ("o3kd", "o3k", "o3k-compute", "o3k-network")
             },
-            "account": {"home": "/var/lib/o3k", "shell": "/usr/sbin/nologin",
-                        "uid": 994, "compute_gid": 984},
-            "paths": {
-                "/var/lib/o3k": {"uid": 994, "gid": 984, "mode": 0o711, "device": 10},
-                "/var/lib/o3k/state": {"uid": 994, "gid": 984, "mode": 0o700, "device": 11},
-                "/var/lib/o3k/journal": {"uid": 994, "gid": 984, "mode": 0o700, "device": 12},
-            },
-            "filesystem": {"/var/lib/o3k/state": "/dev/vdb ext4 rw",
-                            "/var/lib/o3k/journal": "/dev/vdc ext4 rw"},
-            "services": {"o3kd.service": "active", "o3k-compute.service": "active"},
         }
-        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.27", "b" * 64)
+        expected = {name: "d" * 64 for name in ("o3kd", "o3k", "o3k-compute", "o3k-network")}
+        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.27", "b" * 64, expected)
+        # Q1 remains PASS without any Q2 account, mount, or service observations.
+        self.assertNotIn("services", record)
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.27", "b" * 64)
+            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.27", "b" * 64, expected)
         altered = {**record, "executables": dict(record["executables"])}
         altered["executables"].pop("o3k-network")
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.27", "b" * 64)
+            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.27", "b" * 64, expected)
+        altered = {**record, "executables": dict(record["executables"])}
+        altered["executables"]["o3k"] = {**record["executables"]["o3k"], "sha256": "e" * 64}
+        with self.assertRaises(RuntimeError):
+            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.27", "b" * 64, expected)
+        with self.assertRaises(ValueError):
+            HOST_ENV.parse_executable_digests(["o3kd=" + "a" * 64])
 
     def test_destroy_identity_check_rejects_unknown_and_replaced_files(self):
         with tempfile.TemporaryDirectory() as directory:
