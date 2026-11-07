@@ -344,7 +344,7 @@ def guest_user_data(name, host_key_private, host_key_public, user_public_key, st
         "ssh_pwauth": False, "disable_root": True,
         "runcmd": [
             ["systemctl", "enable", "--now", "ssh"],
-            ["bash", "-lc", f"set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /nonexistent --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"],
+            ["bash", "-lc", f"set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"],
         ],
     }
     return "#cloud-config\n" + json.dumps(config, indent=2) + "\n"
