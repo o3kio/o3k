@@ -77,6 +77,53 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         )
         self.assertNotIn("--home-dir /nonexistent", provision_identity)
 
+    def test_storage_provisioning_contract_is_fresh_path_only_and_mount_gated(self):
+        script = HOST_ENV.guest_storage_setup_script("O3KSTATE0", "O3KJOURNAL0")
+        self.assertIn('[[ ! -e "$DATA_ROOT" && ! -L "$DATA_ROOT" ]] ||', script)
+        self.assertIn("ROOT_ID=$(stat -c '%d:%i' \"$DATA_ROOT\")", script)
+        self.assertIn("set -o noclobber", script)
+        self.assertIn("o3k-owned-v1 path=/var/lib/o3k", script)
+        self.assertIn('[[ "$(stat -c \'%d:%i\' "$DATA_ROOT")" == "$ROOT_ID" ]]', script)
+        self.assertIn("mkfs.ext4 -F -L O3KSTATE0 /dev/vdb", script)
+        self.assertIn("mkfs.ext4 -F -L O3KJOURNAL0 /dev/vdc", script)
+        self.assertIn("RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal", script)
+        self.assertIn("BindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount", script)
+        self.assertIn("mount /var/lib/o3k/state", script)
+        self.assertIn("mount /var/lib/o3k/journal", script)
+        self.assertNotIn("DATA_ROOT=\"$", script)
+        self.assertNotIn("systemctl start", script)
+        import subprocess
+        parsed = subprocess.run(["bash", "-n"], input=script, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        with self.assertRaises(ValueError):
+            HOST_ENV.guest_storage_setup_script("../../foreign", "O3KJOURNAL0")
+
+    def test_postinstall_storage_requires_rc27_ownership_modes_and_distinct_ext4(self):
+        record = {
+            "account": {"home": "/var/lib/o3k", "shell": "/usr/sbin/nologin",
+                        "uid": 994, "compute_gid": 984},
+            "paths": {
+                "/var/lib/o3k": {"uid": 994, "gid": 984, "mode": 0o711, "device": 10},
+                "/var/lib/o3k/state": {"uid": 994, "gid": 984, "mode": 0o700, "device": 11},
+                "/var/lib/o3k/journal": {"uid": 994, "gid": 984, "mode": 0o700, "device": 12},
+            },
+            "filesystem": {"/var/lib/o3k/state": "/dev/vdb ext4 rw,relatime",
+                            "/var/lib/o3k/journal": "/dev/vdc ext4 rw,relatime"},
+            "services": {"o3kd.service": "active", "o3k-compute.service": "active"},
+        }
+        HOST_ENV.validate_installed_storage(record)
+        cases = (
+            {**record, "paths": {**record["paths"], "/var/lib/o3k": {**record["paths"]["/var/lib/o3k"], "mode": 0o755}}},
+            {**record, "paths": {**record["paths"], "/var/lib/o3k/state": {**record["paths"]["/var/lib/o3k/state"], "mode": 0o750}}},
+            {**record, "filesystem": {**record["filesystem"], "/var/lib/o3k/journal": "/dev/vdb ext4 rw"}},
+            {**record, "account": {**record["account"], "home": "/nonexistent"}},
+            {**record, "services": {**record["services"], "o3kd.service": "inactive"}},
+        )
+        for invalid in cases:
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                HOST_ENV.validate_installed_storage(invalid)
+
     def test_static_guest_addresses_use_disjoint_reserved_slots(self):
         self.assertEqual(HOST_ENV.guest_static_ip(145, 0), "192.168.145.20")
         self.assertEqual(HOST_ENV.guest_static_ip(145, 1), "192.168.145.21")
@@ -209,6 +256,16 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
                        "uid": 0, "gid": 0, "mode": 0o755, "device": 8, "inode": 10}
                 for name in ("o3kd", "o3k", "o3k-compute", "o3k-network")
             },
+            "account": {"home": "/var/lib/o3k", "shell": "/usr/sbin/nologin",
+                        "uid": 994, "compute_gid": 984},
+            "paths": {
+                "/var/lib/o3k": {"uid": 994, "gid": 984, "mode": 0o711, "device": 10},
+                "/var/lib/o3k/state": {"uid": 994, "gid": 984, "mode": 0o700, "device": 11},
+                "/var/lib/o3k/journal": {"uid": 994, "gid": 984, "mode": 0o700, "device": 12},
+            },
+            "filesystem": {"/var/lib/o3k/state": "/dev/vdb ext4 rw",
+                            "/var/lib/o3k/journal": "/dev/vdc ext4 rw"},
+            "services": {"o3kd.service": "active", "o3k-compute.service": "active"},
         }
         HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.27", "b" * 64)
         with self.assertRaises(RuntimeError):

@@ -272,6 +272,38 @@ def validate_installation_record(record, source_sha, version, artifact_sha256):
             or len(record["release_manifest_inode"]) != 2
             or any(not isinstance(x, int) or x < 0 for x in record["release_manifest_inode"])):
         raise RuntimeError("installed release manifest identity is incomplete")
+    validate_installed_storage(record)
+
+
+def validate_installed_storage(record):
+    """Check the exact ownership and mount result of the immutable rc.27 installer."""
+    paths, filesystems = record.get("paths"), record.get("filesystem")
+    account, services = record.get("account"), record.get("services")
+    if not all(isinstance(value, dict) for value in (paths, filesystems, account, services)):
+        raise RuntimeError("installed storage identity is incomplete")
+    if account.get("home") != "/var/lib/o3k" or account.get("shell") != "/usr/sbin/nologin":
+        raise RuntimeError("installed o3k account identity is incompatible")
+    owner = (account.get("uid"), account.get("compute_gid"))
+    root = paths.get("/var/lib/o3k")
+    if not isinstance(root, dict) or (root.get("uid"), root.get("gid"), root.get("mode")) != (*owner, 0o711):
+        raise RuntimeError("installed O3K data root ownership or mode differs from rc.27 contract")
+    sources = []
+    devices = {root.get("device")}
+    for mount in ("/var/lib/o3k/state", "/var/lib/o3k/journal"):
+        path, filesystem = paths.get(mount), filesystems.get(mount)
+        if not isinstance(path, dict) or not isinstance(filesystem, str):
+            raise RuntimeError(f"installed storage identity is missing: {mount}")
+        if (path.get("uid"), path.get("gid"), path.get("mode")) != (*owner, 0o700):
+            raise RuntimeError(f"installed storage ownership or mode differs from rc.27 contract: {mount}")
+        fields = filesystem.split()
+        if len(fields) < 2 or fields[1] != "ext4":
+            raise RuntimeError(f"installed storage is not ext4: {mount}")
+        sources.append(fields[0])
+        devices.add(path.get("device"))
+    if sources[0] == sources[1] or len(devices) != 3:
+        raise RuntimeError("state, journal and O3K data root must be distinct filesystems")
+    if any(services.get(name) != "active" for name in ("o3kd.service", "o3k-compute.service")):
+        raise RuntimeError("installed O3K services are not active")
 
 
 def put(path, text, mode=0o600):
@@ -344,10 +376,60 @@ def guest_user_data(name, host_key_private, host_key_public, user_public_key, st
         "ssh_pwauth": False, "disable_root": True,
         "runcmd": [
             ["systemctl", "enable", "--now", "ssh"],
-            ["bash", "-lc", f"set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"],
+            ["bash", "-lc", guest_storage_setup_script(state_label, journal_label)],
         ],
     }
     return "#cloud-config\n" + json.dumps(config, indent=2) + "\n"
+
+
+def guest_storage_setup_script(state_label, journal_label):
+    """Create the ownership marker only for a newly created disposable guest root."""
+    for label in (state_label, journal_label):
+        if not re.fullmatch(r"[A-Z0-9]{1,16}", label):
+            raise ValueError("guest filesystem labels must be bounded uppercase alphanumerics")
+    return f'''set -Eeuo pipefail
+DATA_ROOT=/var/lib/o3k
+STATE=/var/lib/o3k/state
+JOURNAL=/var/lib/o3k/journal
+[[ ! -e "$DATA_ROOT" && ! -L "$DATA_ROOT" ]] || {{ echo "refusing pre-existing O3K data root" >&2; exit 2; }}
+install -d -o root -g root -m 0755 "$DATA_ROOT"
+ROOT_ID=$(stat -c '%d:%i' "$DATA_ROOT")
+[[ -d "$DATA_ROOT" && ! -L "$DATA_ROOT" && "$(stat -c '%u:%g:%a' "$DATA_ROOT")" == "0:0:755" ]]
+[[ -z "$(find "$DATA_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+[[ ! -e "$DATA_ROOT/.o3k-owned" && ! -L "$DATA_ROOT/.o3k-owned" ]]
+umask 077
+set -o noclobber
+printf 'o3k-owned-v1 path=/var/lib/o3k\\n' >"$DATA_ROOT/.o3k-owned"
+set +o noclobber
+[[ "$(stat -c '%d:%i' "$DATA_ROOT")" == "$ROOT_ID" ]]
+[[ -f "$DATA_ROOT/.o3k-owned" && ! -L "$DATA_ROOT/.o3k-owned" ]]
+[[ "$(cat "$DATA_ROOT/.o3k-owned")" == 'o3k-owned-v1 path=/var/lib/o3k' ]]
+groupadd --system o3k
+useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
+[[ "$(getent passwd o3k | cut -d: -f6,7)" == /var/lib/o3k:/usr/sbin/nologin ]]
+[[ "$(id -gn o3k)" == o3k ]]
+[[ "$(id -nG o3k)" == o3k ]]
+[[ -b /dev/vdb && -b /dev/vdc && "$(stat -c '%t:%T' /dev/vdb)" != "$(stat -c '%t:%T' /dev/vdc)" ]]
+mkfs.ext4 -F -L {state_label} /dev/vdb
+mkfs.ext4 -F -L {journal_label} /dev/vdc
+install -d -o root -g o3k -m 0750 "$STATE" "$JOURNAL"
+[[ -z "$(find "$STATE" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+[[ -z "$(find "$JOURNAL" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+printf 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail,x-systemd.device-timeout=30s 0 2\\nLABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail,x-systemd.device-timeout=30s 0 2\\n' >>/etc/fstab
+install -d -m 0755 /etc/systemd/system/o3kd.service.d /etc/systemd/system/o3k-compute.service.d
+printf '[Unit]\\nRequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal\\nBindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount\\n' > /etc/systemd/system/o3kd.service.d/pp6-storage.conf
+printf '[Unit]\\nRequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal\\nBindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount\\n' > /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
+mount /var/lib/o3k/state
+mount /var/lib/o3k/journal
+[[ "$(findmnt -n -o FSTYPE --target "$STATE")" == ext4 ]]
+[[ "$(findmnt -n -o FSTYPE --target "$JOURNAL")" == ext4 ]]
+[[ "$(findmnt -n -o SOURCE --target "$STATE")" != "$(findmnt -n -o SOURCE --target "$JOURNAL")" ]]
+[[ "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target "$STATE")")" == {state_label} ]]
+[[ "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target "$JOURNAL")")" == {journal_label} ]]
+[[ "$(stat -c '%u:%g:%a' "$STATE")" == "0:$(getent group o3k | cut -d: -f3):750" ]]
+[[ "$(stat -c '%u:%g:%a' "$JOURNAL")" == "0:$(getent group o3k | cut -d: -f3):750" ]]
+systemctl daemon-reload
+'''
 
 
 def bounded_call(argv, limit=16000, timeout=10):
@@ -583,6 +665,14 @@ def provision(a):
                 "test \"$(stat -c %U:%G /var/lib/o3k/state)\" = root:o3k; "
                 "test \"$(stat -c %U:%G /var/lib/o3k/journal)\" = root:o3k; "
                 "test ! -L /var/lib/o3k/state; test ! -L /var/lib/o3k/journal; id o3k; "
+                "test \"$(getent passwd o3k | cut -d: -f6,7)\" = /var/lib/o3k:/usr/sbin/nologin; "
+                "test \"$(id -gn o3k)\" = o3k; test \"$(id -nG o3k)\" = o3k; "
+                "test \"$(stat -c %U:%G:%a /var/lib/o3k)\" = root:root:755; "
+                "test \"$(cat /var/lib/o3k/.o3k-owned)\" = 'o3k-owned-v1 path=/var/lib/o3k'; "
+                "test ! -L /var/lib/o3k/.o3k-owned; "
+                "grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3kd.service.d/pp6-storage.conf; "
+                "grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf; "
+                "test -z \"$(find /var/lib/o3k/state /var/lib/o3k/journal -mindepth 1 -maxdepth 1 -print -quit)\"; "
                 "systemctl --version | head -1; cat /etc/os-release; uname -a; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/state; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/journal; "
@@ -622,6 +712,53 @@ def provision(a):
                                           private, evidence, active_key, active_known)
         print(f"provision failed; run-owned resources retained for diagnosis: {path}", file=sys.stderr)
         raise
+
+
+def verify_install_ready(a):
+    """Record fail-closed guest ownership/mount evidence immediately before install."""
+    require_host()
+    path, marker = load_marker(a.run_id)
+    guest = marker["guests"].get(a.guest)
+    if not guest:
+        raise RuntimeError("guest not found in ownership marker")
+    domain_identity(call(["virsh", "dumpxml", guest["domain"]]), a.guest, guest, path / "private")
+    ordinal = GUESTS.index(a.guest)
+    state_label, journal_label = f"O3KSTATE{ordinal}", f"O3KJOURNAL{ordinal}"
+    script = f'''set -eu
+test ! -e /usr/local/share/o3k/release-manifest.json
+test ! -L /usr/local/share/o3k/release-manifest.json
+test -d /var/lib/o3k && test ! -L /var/lib/o3k
+test "$(stat -c '%U:%G:%a' /var/lib/o3k)" = root:root:755
+test "$(cat /var/lib/o3k/.o3k-owned)" = 'o3k-owned-v1 path=/var/lib/o3k'
+test ! -L /var/lib/o3k/.o3k-owned
+test "$(getent passwd o3k | cut -d: -f6,7)" = /var/lib/o3k:/usr/sbin/nologin
+test "$(id -gn o3k)" = o3k && test "$(id -nG o3k)" = o3k
+test "$(stat -c '%U:%G:%a' /var/lib/o3k/state)" = root:o3k:750
+test "$(stat -c '%U:%G:%a' /var/lib/o3k/journal)" = root:o3k:750
+test ! -L /var/lib/o3k/state && test ! -L /var/lib/o3k/journal
+test "$(findmnt -n -o FSTYPE --target /var/lib/o3k/state)" = ext4
+test "$(findmnt -n -o FSTYPE --target /var/lib/o3k/journal)" = ext4
+test "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target /var/lib/o3k/state)")" = {state_label}
+test "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target /var/lib/o3k/journal)")" = {journal_label}
+test "$(findmnt -n -o SOURCE --target /var/lib/o3k/state)" != "$(findmnt -n -o SOURCE --target /var/lib/o3k/journal)"
+test -z "$(find /var/lib/o3k/state /var/lib/o3k/journal -mindepth 1 -maxdepth 1 -print -quit)"
+grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3kd.service.d/pp6-storage.conf
+grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
+grep -Fqx 'BindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount' /etc/systemd/system/o3kd.service.d/pp6-storage.conf
+grep -Fqx 'BindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount' /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
+printf 'preinstall identity\\n'
+stat -Lc '%n %d:%i %u:%g %a' /var/lib/o3k /var/lib/o3k/state /var/lib/o3k/journal /var/lib/o3k/.o3k-owned
+findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /var/lib/o3k/state
+findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /var/lib/o3k/journal
+blkid /dev/vdb /dev/vdc
+id o3k
+'''
+    observed = ssh(guest["ip"], path / "private" / a.guest / "id_ed25519",
+                   path / "private" / a.guest / "known_hosts",
+                   "sudo -n bash -c " + shlex.quote(script))
+    destination = path / "evidence" / f"{a.guest}.preinstall.txt"
+    put(destination, observed + "\n")
+    print(f"pre-install state verified: {destination} sha256={sha(destination)}")
 
 
 def load_marker(run_id):
@@ -766,7 +903,10 @@ for name in ('o3kd','o3k','o3k-compute','o3k-network'):
  with p.open('rb') as f:
   for block in iter(lambda:f.read(1048576),b''): h.update(block)
  executables[name]={'path':str(p),'sha256':h.hexdigest(),'uid':st.st_uid,'gid':st.st_gid,'mode':stat.S_IMODE(st.st_mode),'device':st.st_dev,'inode':st.st_ino}
-print(json.dumps({'release_manifest':manifest,'release_manifest_sha256':hashlib.sha256(raw).hexdigest(),'release_manifest_inode':[manifest_stat.st_dev,manifest_stat.st_ino],'executables':executables,'os_release':pathlib.Path('/etc/os-release').read_text(),'kernel':subprocess.check_output(['uname','-a'],text=True).strip(),'systemd':subprocess.check_output(['systemctl','--version'],text=True).splitlines()[0],'filesystem':{p:subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE','--target',p],text=True).strip() for p in ('/var/lib/o3k/state','/var/lib/o3k/journal')}},sort_keys=True))'''
+mounts={p:subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE,OPTIONS','--target',p],text=True).strip() for p in ('/var/lib/o3k/state','/var/lib/o3k/journal')}
+paths={p:{'uid':pathlib.Path(p).stat().st_uid,'gid':pathlib.Path(p).stat().st_gid,'mode':stat.S_IMODE(pathlib.Path(p).stat().st_mode),'device':pathlib.Path(p).stat().st_dev,'inode':pathlib.Path(p).stat().st_ino} for p in ('/var/lib/o3k','/var/lib/o3k/state','/var/lib/o3k/journal')}
+import grp,pwd
+print(json.dumps({'release_manifest':manifest,'release_manifest_sha256':hashlib.sha256(raw).hexdigest(),'release_manifest_inode':[manifest_stat.st_dev,manifest_stat.st_ino],'executables':executables,'os_release':pathlib.Path('/etc/os-release').read_text(),'kernel':subprocess.check_output(['uname','-a'],text=True).strip(),'systemd':subprocess.check_output(['systemctl','--version'],text=True).splitlines()[0],'filesystem':mounts,'paths':paths,'account':{'home':pwd.getpwnam('o3k').pw_dir,'shell':pwd.getpwnam('o3k').pw_shell,'uid':pwd.getpwnam('o3k').pw_uid,'compute_gid':grp.getgrnam('o3k-compute').gr_gid},'services':{name:subprocess.run(['systemctl','is-active',name],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT).stdout.strip() for name in ('o3kd.service','o3k-compute.service')}},sort_keys=True))'''
     command = "python3 -c " + shlex.quote(script) + " " + " ".join(
         shlex.quote(value) for value in (a.source_sha, a.version, a.artifact_sha256))
     raw = ssh(guest["ip"], path / "private" / a.guest / "id_ed25519",
@@ -811,6 +951,10 @@ def main():
     q.add_argument("--artifact-sha256", required=True,
                     help="archive digest read from the already verified Sigstore digest manifest")
     q.set_defaults(func=capture_installation)
+    q = sub.add_parser("verify-install-ready")
+    q.add_argument("--run-id", required=True)
+    q.add_argument("--guest", choices=GUESTS, required=True)
+    q.set_defaults(func=verify_install_ready)
     a = p.parse_args()
     try:
         a.func(a)
