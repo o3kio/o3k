@@ -1,6 +1,127 @@
 # PP.6 Stage 2 installed-release qualification matrix
 
-## Current rc.27 guest-boot status (2026-11-06)
+## Current rc.27 installed qualification status (2026-11-07)
+
+**Status: PP.6 BLOCKED; #975 remains OPEN.** Protected `main` is
+`32b5e209c724277c2fc77a1a58fb3a7543bbbbb9`, merged from parent
+`48c88c674adfb61edcac7d3aa78780e968c54573` through PR #1221. PR #1221 exact
+reviewed head `5df40ce3db9dca643e936413cd288c2d649df122` was approved by
+`senolcolak`; exact-head CI `42284063096`, Mock Cinder `42284063141`,
+PostgreSQL pressure `42284063089`, merge-queue CI `42290049783`, Mock Cinder
+`42290049543`, PostgreSQL pressure `42290049792`, post-merge CI `42294370899`,
+Mock Cinder `42294370799`, and closure guard `42294376766` passed.
+
+The qualification harness identity is SHA-256
+`d94de11ec15fa484e40c944146aee39715ba8274935b70fc166bf9403ef6723d`.
+Keep it separate from immutable `v0.4.0-rc.27`: tag object
+`80cdab1568ef0972602214d0c4656ad70858c07e`, source
+`9427e7668afa76bf1f043c9adabe1d616cf5924a`, release workflow run
+`42044020384` attempt 2, archive SHA-256
+`dea259144d16eb2cfa59169b5cf73e0e5df528663209e6b8bc34ea3d7da74f05`.
+Independent keyless Sigstore/OIDC/transparency/provenance, signed manifest,
+asset digest and extracted archive verification passed. The self-contained
+A10 verifier confirmed `recovery-migrate-v2` publisher exclusion. This is
+artifact authentication, not an installed executable identity.
+
+### Ubuntu 24.04 priority lane
+
+Fresh host preflight `pp6-e4-dedicated-preflight-20261107-004` passed on
+authorized host `o3k-pp6-local-runner`; transcript SHA-256
+`0d8f6d77898c165ee39ac7fe34f37ecac138fab065aa16a6114bf7946aa226f3`.
+The official Ubuntu 24.04 cloud image passed signed Canonical SHA256SUMS
+verification with expected and actual SHA-256
+`04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94`.
+
+Runs `pp6-e4-20261107-ubuntu01`, `ubuntu02`, and `ubuntu03` each passed guest
+provisioning on Ubuntu 24.04.5: NoCloud, static IP and expected MAC, pinned
+SSH, systemd, and distinct ext4 state/journal mounts. Each installer attempt
+then failed before O3K executables/service units were installed:
+
+| Run | Installer outcome | Q1 installed identity | Q2 |
+|---|---|---|---|
+| `pp6-e4-20261107-ubuntu01` | `file://` source rejected by curl; preceding SSH variable-expansion attempt also failed authentication | **FAIL**; no installed executable | **NOT_RUN** |
+| `pp6-e4-20261107-ubuntu02` | release authenticity passed; `apt-get update` failed exit 100 on restricted-index size mismatch against signed InRelease metadata | **FAIL**; no installed executable | **NOT_RUN** |
+| `pp6-e4-20261107-ubuntu03` | rc.27 authenticity/archive verification and A10 check passed, then immutable installer rejected pre-created `o3k` account home `/nonexistent`; it requires `/var/lib/o3k` | **FAIL**; no installed executable; result JSON SHA-256 `c53d68e7b77eda40dfb665cedaa5b1dfcc8565222914bacc4c93cabed9fad2a0` | **NOT_RUN** |
+
+The narrow harness-only fix is PR #1222, exact head
+`15811dcf4ce6c2af25de00660e5e335eb826ad70`; it changes the test guest
+account home to `/var/lib/o3k` and adds a regression. At this update it is
+OPEN, requested from `senolcolak`, has no review, and is
+`REVIEW_REQUIRED` / `BLOCKED`. CI run `42358204722` has Rust
+IN_PROGRESS (other reported CI jobs passed); Mock Cinder `42358204764` and
+PostgreSQL pressure `42358204641` passed. Do not use this changed harness
+until exact-head review, every protected check, and protected merge pass.
+
+### Independent Debian 13 lane
+
+After the Ubuntu attempts, fresh preflight
+`pp6-e4-dedicated-preflight-20261107-debian02` passed; transcript SHA-256
+`359b093c58c7c11bb0ff0a062670b15ebf642b1d3eb902aaafe4a5a89c20f6be`. Host
+had root, nested `/dev/kvm`, 8 CPUs, 32,079,972 kB available memory,
+258,471,243,776 bytes free in `/var/lib/libvirt`, IPv4/IPv6 forwarding off,
+no production route, no active guest/custom network, and required commands.
+Inactive pools point only at retained earlier PP6 run paths.
+
+The official Debian 13 image's SHA-512 matched the HTTPS cloud manifest
+exactly. Manifest SHA-256 is
+`12d276e2c1befd925a35509659c8887cd931ece7aba9bd8597cf13322aa1d225`; image
+SHA-512 is
+`f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d`,
+image SHA-256 is
+`b2aca2bee42c7082fd6aba4a5bb1a89612087a405e99896920f3346f7b23b9d1`. The
+cloud path returned HTTP 404 for `SHA512SUMS.sign`; record HTTPS origin and
+exact manifest checksum as provenance, with no detached-signature claim.
+
+`pp6-e4-20261107-debian13-001` is a pre-provision FAIL: the wrapper created
+the run directory to capture stdout before invoking the harness, which
+correctly refused the existing path; no guest was made. Separate run
+`pp6-e4-20261107-debian13-002`, using
+only protected harness `32b5e209c724277c2fc77a1a58fb3a7543bbbbb9` and SHA
+`d94de11ec15fa484e40c944146aee39715ba8274935b70fc166bf9403ef6723d`, failed
+the 600-second SSH deadline at `192.168.195.20`. Its bounded serial log
+repeats GRUB `Booting Debian GNU/Linux`; NIC counters report zero TX packets
+and bytes; neighbor resolution is FAILED. Domain/network XML, QEMU/libvirt
+logs, bridge/routes/neighbors and preflight/image identity are retained under
+`/var/lib/o3k-pp6-qualification/runs/pp6-e4-20261107-debian13-002/evidence/`.
+Evidence manifest SHA-256:
+`f1ddd9e6ea9d06b0fbe49b70e4647f6bc86cd3b742ef5410f16457ad3600dc24`. SSH
+never became available, so cloud-init and guest journal were inaccessible;
+the boot root cause is unresolved. Ownership-checked cleanup removed the
+run-owned guest/network and retained evidence. Installer unsupported-platform
+rejection is **NOT_RUN**. Debian 13 support is not claimed.
+
+The existing installed-release acceptance plan specifies Debian 12 and Ubuntu
+24.04, while current owner direction prohibits new Debian 12 tests and names
+Debian 13/Ubuntu 24.04. Debian 13 is not a substitute for Debian 12, and its
+unsupported rejection does not meet the Debian 12 acceptance target. This
+target conflict requires owner resolution; keep Debian 12 unprovisioned.
+
+### Current evidence classes and next gate
+
+- **E1:** local #1222 regression passed 16/16 and Python compilation passed;
+  exact-head CI is not
+  fully complete while Rust remains in progress.
+- **E2:** #1221 exact-head, merge-queue, and post-merge checks passed. #1222
+  exact-head review and protected checks remain incomplete.
+- **E3:** Ubuntu guest provisioning passed in three independent runs; Debian
+  13 guest boot failed. No E3 result becomes E4.
+- **E4:** **FAIL/BLOCKED**. Artifact authentication passed. Ubuntu installer
+  attempts failed before installed executable identity; Debian 13 did not
+  boot. Q1 installed identity has no PASS; Q2 is NOT_RUN. Historical
+  `pp6-e4-20261106-0194` remains FAIL with its original unresolved diagnosis
+  and hashes.
+- **E5:** physical host power loss **NOT_RUN**. Guest reboot/force-restart is
+  not E5.
+
+Next action: complete independent review and all protected gates for PR #1222,
+then use only its protected merge for a fresh Ubuntu 24.04 run and repeat Q1
+then Q2. Keep all prior installer attempts FAIL. #975 stays OPEN; backup /
+restore, PKI, observability, upgrade/recovery, pressure, docs, independent
+review and zero BLOCKER/HIGH/MEDIUM owner acceptance remain required. No A10
+publisher enablement, production restore mutation, Araf, PP.7 or general
+Debian 13 support work is authorized here.
+
+## Historical rc.27 guest-boot status (2026-11-06; superseded above)
 
 Protected `main` is `48c88c674adfb61edcac7d3aa78780e968c54573`; this is the
 qualification harness identity, separate from rc.27 source
@@ -168,7 +289,7 @@ tablespace `41914576122` before merging to
 retained as diagnostic history. Passing checks and source-built regressions do
 not authorize release publication.
 
-## Candidate Q1/Q2 status by operating system
+## Historical candidate Q1/Q2 status snapshot (2026-11-06; superseded above)
 
 These are the proposed rc.27 installed-release lanes. No host preflight or guest
 installation has been performed for this candidate in this preparation. The
@@ -180,7 +301,7 @@ not identified in the retained evidence cited here.
 | Debian 12 | **NOT_RUN / BLOCKED** — rc.27 has no authenticated release assets or installed identity | **NOT_RUN / BLOCKED** — no rc.27 installation |
 | Ubuntu 24.04 | **NOT_RUN / BLOCKED** — rc.27 has no authenticated release assets or installed identity | **NOT_RUN / BLOCKED** — no rc.27 installation |
 
-## Current evidence classification
+## Historical evidence classification snapshot (2026-11-06; superseded above)
 
 | Tier / lane | Result |
 |---|---|
@@ -190,7 +311,7 @@ not identified in the retained evidence cited here.
 | E4 authenticated installed release | **NOT_RUN / BLOCKED**: rc.26 verifier failure prevented installation; rc.27 is not published and no Q1/Q2 guest installation has run. |
 | E5 physical host power loss | **NOT_RUN / BLOCKED**: requires separately authorized disposable bare-metal host and BMC/PDU control. |
 
-## Critical dependencies and current verdict
+## Historical critical-dependency snapshot (2026-11-06; superseded above)
 
 1. **B0 — governance:** PASS for protected merges #1212–#1214 and the current
    protected-main merge queue. PR #1212 reviewed head
