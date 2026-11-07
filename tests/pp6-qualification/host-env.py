@@ -243,7 +243,8 @@ def verify_recorded_files(private, marker):
                 raise RuntimeError(f"run-owned file identity changed; refusing cleanup: {path}")
 
 
-def validate_installation_record(record, source_sha, version, artifact_sha256):
+def validate_installation_record(record, source_sha, version, artifact_sha256,
+                                 expected_executable_sha256):
     manifest = record.get("release_manifest")
     if not isinstance(manifest, dict):
         raise RuntimeError("installed release manifest is missing or malformed")
@@ -255,6 +256,11 @@ def validate_installation_record(record, source_sha, version, artifact_sha256):
     required = {"o3kd", "o3k", "o3k-compute", "o3k-network"}
     if not isinstance(executables, dict) or set(executables) != required:
         raise RuntimeError("installed release executable inventory is incomplete")
+    if (not isinstance(expected_executable_sha256, dict)
+            or set(expected_executable_sha256) != required
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                   for value in expected_executable_sha256.values())):
+        raise RuntimeError("authenticated release executable digest inventory is incomplete")
     for name, value in executables.items():
         if (not isinstance(value, dict)
                 or value.get("path") != f"/usr/local/bin/{name}"
@@ -262,6 +268,7 @@ def validate_installation_record(record, source_sha, version, artifact_sha256):
                 or not re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
                 or value.get("uid") != 0 or value.get("gid") != 0
                 or value.get("mode") != 0o755
+                or value.get("sha256") != expected_executable_sha256[name]
                 or not isinstance(value.get("device"), int)
                 or not isinstance(value.get("inode"), int)
                 or value["device"] < 0 or value["inode"] <= 0):
@@ -272,6 +279,62 @@ def validate_installation_record(record, source_sha, version, artifact_sha256):
             or len(record["release_manifest_inode"]) != 2
             or any(not isinstance(x, int) or x < 0 for x in record["release_manifest_inode"])):
         raise RuntimeError("installed release manifest identity is incomplete")
+def validate_installed_storage(record):
+    """Validate the installed state/journal mounts independently of Q1 identity."""
+    paths, filesystems = record.get("paths"), record.get("filesystem")
+    account, lost_found = record.get("account"), record.get("lost_found")
+    if not all(isinstance(value, dict) for value in (paths, filesystems, account, lost_found)):
+        raise RuntimeError("installed storage identity is incomplete")
+    if account.get("home") != "/var/lib/o3k" or account.get("shell") != "/usr/sbin/nologin":
+        raise RuntimeError("installed o3k account identity is incompatible")
+    owner = (account.get("uid"), account.get("compute_gid"))
+    root = paths.get("/var/lib/o3k")
+    if not isinstance(root, dict) or (root.get("uid"), root.get("gid"), root.get("mode")) != (*owner, 0o711):
+        raise RuntimeError("installed O3K data root ownership or mode differs from rc.27 contract")
+    sources = []
+    devices = {root.get("device")}
+    for mount in ("/var/lib/o3k/state", "/var/lib/o3k/journal"):
+        path, filesystem = paths.get(mount), filesystems.get(mount)
+        if not isinstance(path, dict) or not isinstance(filesystem, str):
+            raise RuntimeError(f"installed storage identity is missing: {mount}")
+        if (path.get("uid"), path.get("gid"), path.get("mode")) != (*owner, 0o700):
+            raise RuntimeError(f"installed storage ownership or mode differs from rc.27 contract: {mount}")
+        fields = filesystem.split()
+        if len(fields) < 2 or fields[1] != "ext4":
+            raise RuntimeError(f"installed storage is not ext4: {mount}")
+        sources.append(fields[0])
+        devices.add(path.get("device"))
+        lost = lost_found.get(mount)
+        if (not isinstance(lost, dict) or lost.get("type") != "directory"
+                or lost.get("symlink") is not False or lost.get("uid") != owner[0]
+                or lost.get("gid") != owner[1] or lost.get("mode") != 0o700
+                or lost.get("device") != path.get("device")):
+            raise RuntimeError(f"installed ext4 lost+found identity differs from rc.27 contract: {mount}")
+    if sources[0] == sources[1] or len(devices) != 3:
+        raise RuntimeError("state, journal and O3K data root must be distinct filesystems")
+
+
+def validate_installed_services(record):
+    """Check service health separately from Q1 release identity and mount evidence."""
+    services = record.get("services")
+    if not isinstance(services, dict):
+        raise RuntimeError("installed service status is missing")
+    if any(services.get(name) != "active" for name in ("o3kd.service", "o3k-compute.service")):
+        raise RuntimeError("installed O3K services are not active")
+
+
+def ext4_lost_found_assertions(mountpoint, uid, gid):
+    """Return shell assertions for a fresh ext4 root without discarding lost+found."""
+    if (not isinstance(mountpoint, str) or not mountpoint.startswith("/")
+            or not re.fullmatch(r"/[A-Za-z0-9_./-]+", mountpoint)
+            or ".." in Path(mountpoint).parts):
+        raise ValueError("unsupported qualification mountpoint")
+    if any(not isinstance(value, int) or value < 0 for value in (uid, gid)):
+        raise ValueError("invalid expected ext4 root owner")
+    return f'''set -eu\ntest -d {mountpoint}/lost+found && test ! -L {mountpoint}/lost+found
+test "$(stat -c '%F:%u:%g:%a:%d' {mountpoint}/lost+found)" = "directory:{uid}:{gid}:700:$(stat -c '%d' {mountpoint})"
+test "$(find {mountpoint} -mindepth 1 -maxdepth 1 -printf '%f\\n')" = lost+found
+test -z "$(find {mountpoint}/lost+found -mindepth 1 -print -quit)"'''
 
 
 def put(path, text, mode=0o600):
@@ -344,10 +407,62 @@ def guest_user_data(name, host_key_private, host_key_public, user_public_key, st
         "ssh_pwauth": False, "disable_root": True,
         "runcmd": [
             ["systemctl", "enable", "--now", "ssh"],
-            ["bash", "-lc", f"set -eu; mkfs.ext4 -F -L {state_label} /dev/vdb; mkfs.ext4 -F -L {journal_label} /dev/vdc; groupadd --system o3k || getent group o3k >/dev/null; useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k || id o3k >/dev/null; install -d -o root -g o3k -m 0750 /var/lib/o3k/state /var/lib/o3k/journal; echo 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail 0 2' >> /etc/fstab; echo 'LABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail 0 2' >> /etc/fstab; mount /var/lib/o3k/state; mount /var/lib/o3k/journal; chown root:o3k /var/lib/o3k/state /var/lib/o3k/journal; chmod 0750 /var/lib/o3k/state /var/lib/o3k/journal"],
+            ["bash", "-lc", guest_storage_setup_script(state_label, journal_label)],
         ],
     }
     return "#cloud-config\n" + json.dumps(config, indent=2) + "\n"
+
+
+def guest_storage_setup_script(state_label, journal_label):
+    """Create the ownership marker only for a newly created disposable guest root."""
+    for label in (state_label, journal_label):
+        if not re.fullmatch(r"[A-Z0-9]{1,16}", label):
+            raise ValueError("guest filesystem labels must be bounded uppercase alphanumerics")
+    return f'''set -Eeuo pipefail
+DATA_ROOT=/var/lib/o3k
+STATE=/var/lib/o3k/state
+JOURNAL=/var/lib/o3k/journal
+[[ ! -e "$DATA_ROOT" && ! -L "$DATA_ROOT" ]] || {{ echo "refusing pre-existing O3K data root" >&2; exit 2; }}
+install -d -o root -g root -m 0755 "$DATA_ROOT"
+ROOT_ID=$(stat -c '%d:%i' "$DATA_ROOT")
+[[ -d "$DATA_ROOT" && ! -L "$DATA_ROOT" && "$(stat -c '%u:%g:%a' "$DATA_ROOT")" == "0:0:755" ]]
+[[ -z "$(find "$DATA_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+[[ ! -e "$DATA_ROOT/.o3k-owned" && ! -L "$DATA_ROOT/.o3k-owned" ]]
+umask 077
+set -o noclobber
+printf 'o3k-owned-v1 path=/var/lib/o3k\\n' >"$DATA_ROOT/.o3k-owned"
+set +o noclobber
+[[ "$(stat -c '%d:%i' "$DATA_ROOT")" == "$ROOT_ID" ]]
+[[ -f "$DATA_ROOT/.o3k-owned" && ! -L "$DATA_ROOT/.o3k-owned" ]]
+[[ "$(cat "$DATA_ROOT/.o3k-owned")" == 'o3k-owned-v1 path=/var/lib/o3k' ]]
+groupadd --system o3k
+useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
+[[ "$(getent passwd o3k | cut -d: -f6,7)" == /var/lib/o3k:/usr/sbin/nologin ]]
+[[ "$(id -gn o3k)" == o3k ]]
+[[ "$(id -nG o3k)" == o3k ]]
+[[ -b /dev/vdb && -b /dev/vdc && "$(stat -c '%t:%T' /dev/vdb)" != "$(stat -c '%t:%T' /dev/vdc)" ]]
+mkfs.ext4 -F -L {state_label} /dev/vdb
+mkfs.ext4 -F -L {journal_label} /dev/vdc
+install -d -o root -g o3k -m 0750 "$STATE" "$JOURNAL"
+[[ -z "$(find "$STATE" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+[[ -z "$(find "$JOURNAL" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+printf 'LABEL={state_label} /var/lib/o3k/state ext4 defaults,nofail,x-systemd.device-timeout=30s 0 2\\nLABEL={journal_label} /var/lib/o3k/journal ext4 defaults,nofail,x-systemd.device-timeout=30s 0 2\\n' >>/etc/fstab
+install -d -m 0755 /etc/systemd/system/o3kd.service.d /etc/systemd/system/o3k-compute.service.d
+printf '[Unit]\\nRequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal\\nBindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount\\n' > /etc/systemd/system/o3kd.service.d/pp6-storage.conf
+printf '[Unit]\\nRequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal\\nBindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount\\n' > /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
+mount /var/lib/o3k/state
+mount /var/lib/o3k/journal
+[[ "$(findmnt -n -o FSTYPE --target "$STATE")" == ext4 ]]
+[[ "$(findmnt -n -o FSTYPE --target "$JOURNAL")" == ext4 ]]
+[[ "$(findmnt -n -o SOURCE --target "$STATE")" != "$(findmnt -n -o SOURCE --target "$JOURNAL")" ]]
+[[ "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target "$STATE")")" == {state_label} ]]
+[[ "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target "$JOURNAL")")" == {journal_label} ]]
+{ext4_lost_found_assertions("/var/lib/o3k/state", 0, 0)}
+{ext4_lost_found_assertions("/var/lib/o3k/journal", 0, 0)}
+[[ "$(stat -c '%u:%g:%a' "$STATE")" == "0:$(getent group o3k | cut -d: -f3):750" ]]
+[[ "$(stat -c '%u:%g:%a' "$JOURNAL")" == "0:$(getent group o3k | cut -d: -f3):750" ]]
+systemctl daemon-reload
+'''
 
 
 def bounded_call(argv, limit=16000, timeout=10):
@@ -583,7 +698,17 @@ def provision(a):
                 "test \"$(stat -c %U:%G /var/lib/o3k/state)\" = root:o3k; "
                 "test \"$(stat -c %U:%G /var/lib/o3k/journal)\" = root:o3k; "
                 "test ! -L /var/lib/o3k/state; test ! -L /var/lib/o3k/journal; id o3k; "
-                "systemctl --version | head -1; cat /etc/os-release; uname -a; "
+                "test \"$(getent passwd o3k | cut -d: -f6,7)\" = /var/lib/o3k:/usr/sbin/nologin; "
+                "test \"$(id -gn o3k)\" = o3k; test \"$(id -nG o3k)\" = o3k; "
+                "test \"$(stat -c %U:%G:%a /var/lib/o3k)\" = root:root:755; "
+                "test \"$(cat /var/lib/o3k/.o3k-owned)\" = 'o3k-owned-v1 path=/var/lib/o3k'; "
+                "test ! -L /var/lib/o3k/.o3k-owned; "
+                "test \"$(find /var/lib/o3k -mindepth 1 -maxdepth 1 -printf '%f\\n' | sort)\" = \"$(printf '.o3k-owned\\njournal\\nstate')\"; "
+                "grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3kd.service.d/pp6-storage.conf; "
+                "grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf; "
+                + ext4_lost_found_assertions("/var/lib/o3k/state", 0, 0) + "; "
+                + ext4_lost_found_assertions("/var/lib/o3k/journal", 0, 0) + "; "
+                + "systemctl --version | head -1; cat /etc/os-release; uname -a; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/state; "
                 "findmnt -n -o TARGET,SOURCE,FSTYPE /var/lib/o3k/journal; "
                 "stat -Lc '%n %d:%i %u:%g %a' /var/lib/o3k/state /var/lib/o3k/journal"))
@@ -622,6 +747,55 @@ def provision(a):
                                           private, evidence, active_key, active_known)
         print(f"provision failed; run-owned resources retained for diagnosis: {path}", file=sys.stderr)
         raise
+
+
+def verify_install_ready(a):
+    """Record fail-closed guest ownership/mount evidence immediately before install."""
+    require_host()
+    path, marker = load_marker(a.run_id)
+    guest = marker["guests"].get(a.guest)
+    if not guest:
+        raise RuntimeError("guest not found in ownership marker")
+    domain_identity(call(["virsh", "dumpxml", guest["domain"]]), a.guest, guest, path / "private")
+    ordinal = GUESTS.index(a.guest)
+    state_label, journal_label = f"O3KSTATE{ordinal}", f"O3KJOURNAL{ordinal}"
+    script = f'''set -eu
+test ! -e /usr/local/share/o3k/release-manifest.json
+test ! -L /usr/local/share/o3k/release-manifest.json
+test -d /var/lib/o3k && test ! -L /var/lib/o3k
+test "$(stat -c '%U:%G:%a' /var/lib/o3k)" = root:root:755
+test "$(cat /var/lib/o3k/.o3k-owned)" = 'o3k-owned-v1 path=/var/lib/o3k'
+test ! -L /var/lib/o3k/.o3k-owned
+test "$(getent passwd o3k | cut -d: -f6,7)" = /var/lib/o3k:/usr/sbin/nologin
+test "$(id -gn o3k)" = o3k && test "$(id -nG o3k)" = o3k
+test "$(stat -c '%U:%G:%a' /var/lib/o3k/state)" = root:o3k:750
+test "$(stat -c '%U:%G:%a' /var/lib/o3k/journal)" = root:o3k:750
+test ! -L /var/lib/o3k/state && test ! -L /var/lib/o3k/journal
+test "$(findmnt -n -o FSTYPE --target /var/lib/o3k/state)" = ext4
+test "$(findmnt -n -o FSTYPE --target /var/lib/o3k/journal)" = ext4
+test "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target /var/lib/o3k/state)")" = {state_label}
+test "$(blkid -s LABEL -o value "$(findmnt -n -o SOURCE --target /var/lib/o3k/journal)")" = {journal_label}
+test "$(findmnt -n -o SOURCE --target /var/lib/o3k/state)" != "$(findmnt -n -o SOURCE --target /var/lib/o3k/journal)"
+test "$(find /var/lib/o3k -mindepth 1 -maxdepth 1 -printf '%f\\n' | sort)" = "$(printf '.o3k-owned\\njournal\\nstate')"
+{ext4_lost_found_assertions("/var/lib/o3k/state", 0, 0)}
+{ext4_lost_found_assertions("/var/lib/o3k/journal", 0, 0)}
+grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3kd.service.d/pp6-storage.conf
+grep -Fqx 'RequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal' /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
+grep -Fqx 'BindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount' /etc/systemd/system/o3kd.service.d/pp6-storage.conf
+grep -Fqx 'BindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount' /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
+printf 'preinstall identity\\n'
+stat -Lc '%n %d:%i %u:%g %a' /var/lib/o3k /var/lib/o3k/state /var/lib/o3k/journal /var/lib/o3k/.o3k-owned
+findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /var/lib/o3k/state
+findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /var/lib/o3k/journal
+blkid /dev/vdb /dev/vdc
+id o3k
+'''
+    observed = ssh(guest["ip"], path / "private" / a.guest / "id_ed25519",
+                   path / "private" / a.guest / "known_hosts",
+                   "sudo -n bash -c " + shlex.quote(script))
+    destination = path / "evidence" / f"{a.guest}.preinstall.txt"
+    put(destination, observed + "\n")
+    print(f"pre-install state verified: {destination} sha256={sha(destination)}")
 
 
 def load_marker(run_id):
@@ -732,6 +906,19 @@ def force_restart(a):
     print(json.dumps(event, sort_keys=True))
 
 
+def parse_executable_digests(values):
+    result = {}
+    for item in values:
+        name, separator, digest = item.partition("=")
+        if (not separator or name not in ("o3kd", "o3k", "o3k-compute", "o3k-network")
+                or name in result or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ValueError("executable digests must be four unique NAME=sha256 entries")
+        result[name] = digest
+    if set(result) != {"o3kd", "o3k", "o3k-compute", "o3k-network"}:
+        raise ValueError("all four authenticated executable digests are required")
+    return result
+
+
 def capture_installation(a):
     require_host()
     if not re.fullmatch(r"[0-9a-f]{40}", a.source_sha):
@@ -745,7 +932,7 @@ def capture_installation(a):
     if not guest:
         raise RuntimeError("guest not found in ownership marker")
     domain_identity(call(["virsh", "dumpxml", guest["domain"]]), a.guest, guest, path / "private")
-    script = r'''import hashlib,json,os,pathlib,stat,subprocess,sys
+    script = r'''import hashlib,json,pathlib,stat,sys
 expected_source,expected_version,expected_artifact=sys.argv[1:4]
 manifest_path=pathlib.Path('/usr/local/share/o3k/release-manifest.json')
 raw=manifest_path.read_bytes()
@@ -766,21 +953,61 @@ for name in ('o3kd','o3k','o3k-compute','o3k-network'):
  with p.open('rb') as f:
   for block in iter(lambda:f.read(1048576),b''): h.update(block)
  executables[name]={'path':str(p),'sha256':h.hexdigest(),'uid':st.st_uid,'gid':st.st_gid,'mode':stat.S_IMODE(st.st_mode),'device':st.st_dev,'inode':st.st_ino}
-print(json.dumps({'release_manifest':manifest,'release_manifest_sha256':hashlib.sha256(raw).hexdigest(),'release_manifest_inode':[manifest_stat.st_dev,manifest_stat.st_ino],'executables':executables,'os_release':pathlib.Path('/etc/os-release').read_text(),'kernel':subprocess.check_output(['uname','-a'],text=True).strip(),'systemd':subprocess.check_output(['systemctl','--version'],text=True).splitlines()[0],'filesystem':{p:subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE','--target',p],text=True).strip() for p in ('/var/lib/o3k/state','/var/lib/o3k/journal')}},sort_keys=True))'''
+print(json.dumps({'release_manifest':manifest,'release_manifest_sha256':hashlib.sha256(raw).hexdigest(),'release_manifest_inode':[manifest_stat.st_dev,manifest_stat.st_ino],'executables':executables},sort_keys=True))'''
     command = "python3 -c " + shlex.quote(script) + " " + " ".join(
         shlex.quote(value) for value in (a.source_sha, a.version, a.artifact_sha256))
     raw = ssh(guest["ip"], path / "private" / a.guest / "id_ed25519",
               path / "private" / a.guest / "known_hosts", command)
     record = json.loads(raw)
-    validate_installation_record(record, a.source_sha, a.version, a.artifact_sha256)
+    expected = parse_executable_digests(a.executable_sha256)
+    validate_installation_record(record, a.source_sha, a.version, a.artifact_sha256, expected)
     record["guest"] = a.guest
     record["captured_at"] = datetime.now(timezone.utc).isoformat()
+    record["q1_result"] = "PASS"
     evidence = path / "evidence"
     destination = evidence / f"{a.guest}.installation.json"
     temporary = evidence / f".{a.guest}.installation.tmp"
     put(temporary, json.dumps(record, sort_keys=True, indent=2) + "\n", 0o600)
     os.replace(temporary, destination)
-    print(f"recorded authenticated candidate identity for {a.guest}: {destination}")
+    print(f"Q1 PASS: authenticated installed release identity for {a.guest}: {destination}")
+
+
+def capture_runtime(a):
+    """Capture Q2 storage/service predicates independently from Q1 identity."""
+    require_host()
+    path, marker = load_marker(a.run_id)
+    guest = marker["guests"].get(a.guest)
+    if not guest:
+        raise RuntimeError("guest not found in ownership marker")
+    domain_identity(call(["virsh", "dumpxml", guest["domain"]]), a.guest, guest, path / "private")
+    script = r'''import grp,json,pathlib,pwd,stat,subprocess
+mounts={p:subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE,OPTIONS','--target',p],text=True).strip() for p in ('/var/lib/o3k/state','/var/lib/o3k/journal')}
+paths={p:{'uid':pathlib.Path(p).stat().st_uid,'gid':pathlib.Path(p).stat().st_gid,'mode':stat.S_IMODE(pathlib.Path(p).stat().st_mode),'device':pathlib.Path(p).stat().st_dev,'inode':pathlib.Path(p).stat().st_ino} for p in ('/var/lib/o3k','/var/lib/o3k/state','/var/lib/o3k/journal')}
+lost_found={}
+for mount in ('/var/lib/o3k/state','/var/lib/o3k/journal'):
+ p=pathlib.Path(mount)/'lost+found'
+ st=p.lstat()
+ lost_found[mount]={'type':'directory' if stat.S_ISDIR(st.st_mode) else 'other','symlink':stat.S_ISLNK(st.st_mode),'uid':st.st_uid,'gid':st.st_gid,'mode':stat.S_IMODE(st.st_mode),'device':st.st_dev}
+print(json.dumps({'filesystem':mounts,'paths':paths,'lost_found':lost_found,'account':{'home':pwd.getpwnam('o3k').pw_dir,'shell':pwd.getpwnam('o3k').pw_shell,'uid':pwd.getpwnam('o3k').pw_uid,'compute_gid':grp.getgrnam('o3k-compute').gr_gid},'services':{name:subprocess.run(['systemctl','is-active',name],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT).stdout.strip() for name in ('o3kd.service','o3k-compute.service')}},sort_keys=True))'''
+    raw = ssh(guest["ip"], path / "private" / a.guest / "id_ed25519",
+              path / "private" / a.guest / "known_hosts", "sudo -n python3 -c " + shlex.quote(script))
+    record = json.loads(raw)
+    checks = {}
+    for name, validate in (("storage", validate_installed_storage),
+                           ("services", validate_installed_services)):
+        try:
+            validate(record)
+            checks[name] = {"result": "PASS"}
+        except RuntimeError as error:
+            checks[name] = {"result": "FAIL", "predicate": str(error)}
+    record.update({"guest": a.guest, "captured_at": datetime.now(timezone.utc).isoformat(),
+                   "q2_runtime_checks": checks,
+                   "q2_result": "PARTIAL; acceptance scenarios not yet run"})
+    destination = path / "evidence" / f"{a.guest}.runtime.json"
+    put(destination, json.dumps(record, sort_keys=True, indent=2) + "\n", 0o600)
+    print(f"Q2 runtime evidence: {destination} sha256={sha(destination)} checks={json.dumps(checks, sort_keys=True)}")
+    if any(check["result"] != "PASS" for check in checks.values()):
+        raise RuntimeError("one or more Q2 runtime predicates failed; evidence retained")
 
 
 def main():
@@ -810,7 +1037,17 @@ def main():
     q.add_argument("--version", required=True)
     q.add_argument("--artifact-sha256", required=True,
                     help="archive digest read from the already verified Sigstore digest manifest")
+    q.add_argument("--executable-sha256", action="append", required=True,
+                    metavar="NAME=SHA256", help="authenticated archive digest; repeat for all four executables")
     q.set_defaults(func=capture_installation)
+    q = sub.add_parser("capture-runtime")
+    q.add_argument("--run-id", required=True)
+    q.add_argument("--guest", choices=GUESTS, required=True)
+    q.set_defaults(func=capture_runtime)
+    q = sub.add_parser("verify-install-ready")
+    q.add_argument("--run-id", required=True)
+    q.add_argument("--guest", choices=GUESTS, required=True)
+    q.set_defaults(func=verify_install_ready)
     a = p.parse_args()
     try:
         a.func(a)

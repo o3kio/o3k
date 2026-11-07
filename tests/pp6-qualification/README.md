@@ -17,6 +17,67 @@ route checks run before the guest is accepted. This avoids depending on a DHCP
 lease while preserving the isolated network. It does not install O3K or select
 an installation policy.
 
+## rc.27 clean-guest ownership contract
+
+The immutable rc.27 installer owns its standard `/var/lib/o3k` path only when
+that path is absent or carries its exact `.o3k-owned` marker. It refuses a
+populated unmarked directory and recursively changes ownership of everything
+under the marked path. The harness therefore creates the marker only after a
+clean guest proves `/var/lib/o3k` did not exist, creates that directory itself,
+records and rechecks its device/inode, and verifies that it is still empty.
+This protocol has no path argument and cannot mark an arbitrary host path.
+Existing directories, symlinks, unexpected files, or replacement directory
+identities fail provisioning; no installer is run on those guests.
+
+The harness formats only the two fresh qcow2 disks attached to the run-owned
+guest as `/dev/vdb` and `/dev/vdc`. It verifies both mountpoint directories
+are empty before mounting, then permits only ext4's validated empty
+`lost+found` directory (root-owned mode `0700`) on each freshly formatted
+filesystem. It rejects any other entry, symlink, non-directory `lost+found`,
+unexpected owner/mode, or non-empty `lost+found`; it never removes that
+directory. The pre-install check repeats these assertions immediately before
+installation. It requires distinct ext4 devices and expected labels, and
+records the exact account as `o3k:o3k`, home `/var/lib/o3k`, shell
+`/usr/sbin/nologin`. Systemd `RequiresMountsFor` and `BindsTo` drop-ins gate
+both O3K services on the state and journal mounts. The fstab entries use
+`nofail` so a missing disposable volume does not prevent host access; the
+service dependency still prevents either O3K service from starting without
+both mounts.
+
+Before installation, `verify-install-ready` repeats these checks over
+host-key-pinned SSH and retains the exact directory identities, mount source,
+filesystem, labels, account, and systemd dependency evidence. Q1's
+`capture-installation` checks installed manifest identity and exact installed
+executable SHA-256 values against the four binary digests from the
+independently authenticated archive's `SHA256SUMS`. It does not require Q2
+services or mounts to be healthy. Run `capture-runtime` separately for Q2
+storage and service predicates. It checks rc.27's expected resulting layout:
+`/var/lib/o3k` is owned by `o3k:o3k-compute` mode `0711`; its immediate state
+and journal mount directories are owned by the same account/group mode `0700`;
+and ext4's `lost+found` directories retain expected ownership and mode after
+the installer's recursive `chown` and directory `chmod`. The two ext4 mount
+devices must remain distinct from each other and from the guest root
+filesystem. Runtime evidence records storage and service results separately
+and labels Q2 partial until all documented acceptance scenarios pass.
+The mounted filesystem roots are freshly formatted and empty before install,
+so rc.27's recursive `chown` cannot adopt unknown guest state. O3K can write
+inside the mounted filesystem roots because it owns those directories.
+
+The focused `test_rc27_installer_guard.py` runs the actual authenticated rc.27
+`packaging/install.sh` in temporary non-system paths. Run it only against the
+already authenticated/extracted release bundle:
+
+```sh
+python3 tests/pp6-qualification/test_rc27_installer_guard.py \
+  --release-root /srv/qualification/o3k-0.4.0-rc.27 \
+  --evidence-dir /srv/qualification/evidence/rc27-installer-guard
+```
+
+It requires the published installer's independently recorded SHA-256 and
+exercises a clean disposable marker, populated foreign data, an invalid
+marker, and a symlink. The fixture uses `--profile fake` and temporary paths;
+it verifies the real ownership guard, but is not installed E4 evidence.
+
 The static network data uses cloud-init Networking Config Version 1, which
 NoCloud supports and which can be rendered by Debian's ENI backend and the
 Ubuntu image's configured backend. See the
@@ -56,16 +117,22 @@ installed, capture its identity on each guest:
 tests/pp6-qualification/host-env.py capture-installation \
   --run-id pp6-20261101-run01 --guest debian13 \
   --source-sha <exact-tag-commit> --version <release-version-without-v> \
-  --artifact-sha256 <archive-digest-from-verified-sigstore-manifest>
+  --artifact-sha256 <archive-digest-from-verified-sigstore-manifest> \
+  --executable-sha256 o3kd=<authenticated-bin-o3kd-sha256> \
+  --executable-sha256 o3k=<authenticated-bin-o3k-sha256> \
+  --executable-sha256 o3k-compute=<authenticated-bin-o3k-compute-sha256> \
+  --executable-sha256 o3k-network=<authenticated-bin-o3k-network-sha256>
+tests/pp6-qualification/host-env.py capture-runtime \
+  --run-id pp6-20261101-run01 --guest debian13
 ```
 
-The capture requires the installed manifest to match the supplied source,
-version, `libvirt` profile and digest, then hashes the four installed
-executables and records their ownership, mode and inodes alongside the guest
-OS, kernel, systemd and filesystem identities. This records the caller's
-authenticated artifact identity; it does not perform Sigstore verification.
-Verify the OIDC/Sigstore provenance and release bundle before supplying these
-values. Set `O3K_PP6_SOURCE_SHA` when qualifying a detached source tree;
+Q1 capture requires the installed manifest to match the supplied source,
+version, `libvirt` profile and artifact digest, then hashes the four installed
+executables and compares each digest with the authenticated archive inventory.
+Q2 capture records runtime filesystem and service predicates separately. The
+caller must authenticate the archive and read `SHA256SUMS` from that verified
+bundle before supplying these values; the harness does not perform Sigstore
+verification. Set `O3K_PP6_SOURCE_SHA` when qualifying a detached source tree;
 otherwise the checked-out Git HEAD is recorded. The private directory
 contains run-only SSH user and host keys, disks and cloud-init seeds. The guest
 host key is pinned into `known_hosts` from the host-generated public key; the
