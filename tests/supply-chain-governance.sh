@@ -119,11 +119,12 @@ expected_exceptions = [
             "SQLite affected by a page-cache uninitialized-memory disclosure. The "
             "vector is local: the process must open a crafted database whose sibling "
             "-wal file has a different page size. O3K opens only its own store files "
-            "under root-owned 0700 state/journal directories; no less-trusted party "
-            "can place a crafted pair there, and no O3K feature opens "
-            "operator-supplied SQLite files. No released SQLx accepts the fixed "
-            "libsqlite3-sys >= 0.39 (0.8.6 caps at 0.30.x, 0.9.0 caps below 0.38), so "
-            "an upgrade cannot clear the advisory today."
+            "under root-owned, non-group-writable state/journal directories (0700 "
+            "where O3K creates them, root:o3k 0750 in the qualified installed "
+            "layout); no less-trusted party can write a crafted pair there, and no "
+            "O3K feature opens operator-supplied SQLite files. No released SQLx "
+            "accepts the fixed libsqlite3-sys >= 0.39 (0.8.6 caps at 0.30.x, 0.9.0 "
+            "caps below 0.38), so an upgrade cannot clear the advisory today."
         ),
         "review_trigger": (
             "Remove as soon as SQLx resolves libsqlite3-sys >= 0.39 (bundled SQLite "
@@ -189,13 +190,20 @@ if not any(
     package.get("name") == "sqlx-sqlite"
     and any(
         dependency.split(" ", 1)[0] == "libsqlite3-sys"
+        and (
+            # An unversioned edge is exact only while a single libsqlite3-sys
+            # is locked; with several, the edge must name the waived version.
+            (" " not in dependency
+             and len(sqlite_packages) == 1)
+            or dependency == "libsqlite3-sys 0.30.1"
+        )
         for dependency in package.get("dependencies", [])
     )
     for package in cargo_lock.get("package", [])
 ):
     fail(
-        "RUSTSEC-2026-0459 exception requires the locked sqlx-sqlite to depend on "
-        "libsqlite3-sys"
+        "RUSTSEC-2026-0459 exception requires the locked sqlx-sqlite to resolve "
+        "libsqlite3-sys to the waived 0.30.1 package"
     )
 
 deny = deny_path.read_text(encoding="utf-8")
@@ -212,6 +220,8 @@ if workflow.count(database["commit"]) != 1:
     fail("CI must contain exactly one occurrence of the pinned advisory DB commit")
 if workflow.count("--ignore RUSTSEC-2023-0071") != 1:
     fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2023-0071")
+if workflow.count("--ignore RUSTSEC-2026-0459") != 1:
+    fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2026-0459")
 if "--ignore RUSTSEC-2026-0381" in workflow:
     fail("CI must not suppress RUSTSEC-2026-0381 for the unaffected locked package")
 if workflow.count("cargo audit") != 1:
@@ -220,10 +230,16 @@ audit_line = next(line for line in workflow.splitlines() if "cargo audit" in lin
 for required in ('--db "${advisory_db}"', "--no-fetch", "--stale"):
     if required not in audit_line:
         fail(f"cargo audit invocation is missing {required}")
-if "--ignore RUSTSEC-2023-0071" not in audit_line:
-    fail("cargo audit invocation is missing --ignore RUSTSEC-2023-0071")
-if "--ignore RUSTSEC-2026-0381" in audit_line:
-    fail("cargo audit must not suppress RUSTSEC-2026-0381 for the unaffected locked package")
+# Both legs of the supply-chain gate must suppress exactly the reviewed
+# exception set: the cargo-deny leg via deny.toml, the cargo-audit leg via
+# --ignore. A pinned advisory-DB bump therefore cannot split the two legs.
+expected_audit_ignores = {"RUSTSEC-2023-0071"} | expected_ids
+audit_ignores = set(re.findall(r"--ignore\s+(RUSTSEC-[0-9-]+)", audit_line))
+if audit_ignores != expected_audit_ignores:
+    fail(
+        "cargo audit invocation must ignore exactly the reviewed exception set: "
+        f"{sorted(expected_audit_ignores)}"
+    )
 
 print("supply-chain advisory governance passed")
 PY
