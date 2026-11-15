@@ -61,9 +61,10 @@ pub fn assert_destructive_postgres_test_database_name(
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, CanonicalAddressRealmRecord, CanonicalNetworkRecord,
-    CanonicalOperationRecord, ComputeRepository, ControllerEpoch, ControllerId, ControllerSession,
-    ControllerState, CoordinationRepository, DurableStore, FabricHostTransportIdentityRecord,
+    ArtifactTransferUpdate, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    CanonicalNetworkRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
+    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, ControllerState,
+    CoordinationRepository, DurableStore, FabricHostTransportIdentityRecord,
     IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
     ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, ImageRepository,
     KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
@@ -121,6 +122,7 @@ pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_list_resources_by_kind_includes_deleted_tombstones(store.clone()).await;
     test_durable_store_operations(store.clone()).await;
     test_durable_store_lifecycle_terminalization(store.clone()).await;
+    test_network_repository_realm_cleanup_finalization(store.clone()).await;
     test_durable_store_provider_references(store.clone()).await;
     test_durable_store_agent_commands(store.clone()).await;
     test_durable_store_artifact_transfers(store.clone()).await;
@@ -1064,6 +1066,529 @@ pub async fn test_durable_store_lifecycle_terminalization<S: StoreUnderTest>(sto
             .iter()
             .any(|r| r.id == res_c && r.observed_state == "DELETED"),
         "the DELETED tombstone must remain visible to repair scans"
+    );
+}
+
+/// Issue #1047: realm cleanup finalization must commit the guarded realm
+/// DELETE, the terminal `resources` projection, and the canonical operation's
+/// terminal update in ONE transaction. Both adapters must behave identically:
+/// a rejected finalization commits nothing (the crash boundary), equivalent
+/// replay neither errors nor re-applies, and a conflicting terminal state is
+/// rejected without rewriting durable state.
+pub async fn test_network_repository_realm_cleanup_finalization<S: StoreUnderTest>(store: Arc<S>) {
+    // ── Fixture: canonical network + native realm with a resource projection
+    // plus the deterministic realm-delete operation and metadata the network
+    // service accepts before any provider mutation. ──
+    let proj = format!("proj-{}", Uuid::now_v7());
+    let network = CanonicalNetworkRecord {
+        id: Uuid::now_v7(),
+        project_id: proj.clone(),
+        name: "realm-finalization".to_owned(),
+        admin_state_up: true,
+        generation: 1,
+        state: "active".to_owned(),
+    };
+    store
+        .insert_canonical_network(&network)
+        .await
+        .expect("insert canonical network");
+    let realm = CanonicalAddressRealmRecord {
+        id: Uuid::now_v7(),
+        network_id: network.id,
+        project_id: proj.clone(),
+        prefix: "10.90.0.0/24".to_owned(),
+        overlapping_prefixes: false,
+        generation: 1,
+        state: "active".to_owned(),
+    };
+    store
+        .insert_canonical_realm(&realm)
+        .await
+        .expect("insert canonical realm");
+    store
+        .insert_resource(&ResourceRecord {
+            id: realm.id,
+            kind: "network:address_realm".to_owned(),
+            project_id: proj.clone(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "active".to_owned(),
+            observed_state: "active".to_owned(),
+            provider_id: None,
+        })
+        .await
+        .expect("insert realm projection");
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:realm-delete:{proj}:{}", realm.id).as_bytes(),
+    );
+    let request = IdempotencyReservationRequest::from_semantics(
+        proj.clone(),
+        "network:DeleteRealm",
+        format!("canonical:realm-delete:{}", realm.id),
+        "network:address_realm",
+        Some(&realm.id.to_string()),
+        &serde_json::json!({ "realm_id": realm.id }),
+        operation_id,
+    )
+    .expect("idempotency request");
+    store
+        .create_or_replay_canonical_scoped_operation(
+            &OperationRecord {
+                id: operation_id,
+                resource_id: realm.id,
+                kind: "lifecycle:realm-delete".to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            },
+            &CanonicalOperationRecord {
+                id: operation_id,
+                service: "network".to_owned(),
+                action: "network:DeleteRealm".to_owned(),
+                actor: "o3k:network-service".to_owned(),
+                owner_scope: proj.clone(),
+                resource_type: "network:address_realm".to_owned(),
+                resource_id: Some(realm.id.to_string()),
+                state: OperationState::Pending,
+                attempt: 0,
+                created_at: "2026-11-10T00:00:00Z".to_owned(),
+                started_at: None,
+                finished_at: None,
+                error: None,
+                request_id: None,
+            },
+            &request,
+        )
+        .await
+        .expect("create realm-delete operation");
+    let deleting = store
+        .begin_canonical_realm_deletion(&proj, &realm.id, 1)
+        .await
+        .expect("begin realm deletion");
+    assert_eq!(deleting.state, "deleting");
+    let projection = store
+        .update_resource(
+            realm.id,
+            1,
+            "deleting",
+            "deleting",
+            i64::try_from(deleting.generation).expect("deleting generation"),
+            None,
+        )
+        .await
+        .expect("mark projection deleting");
+    assert_eq!(projection.generation, 2);
+    let running = CanonicalOperationLifecycleUpdate::new(
+        o3k_kernel::OperationState::Running,
+        1,
+        Some("2026-11-10T00:00:01Z".to_owned()),
+        None,
+        None,
+    )
+    .expect("running lifecycle");
+    store
+        .update_canonical_operation_lifecycle(operation_id, &running)
+        .await
+        .expect("mark operation running");
+    let succeeded = || {
+        CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Succeeded,
+            2,
+            Some("2026-11-10T00:00:01Z".to_owned()),
+            Some("2026-11-10T00:00:02Z".to_owned()),
+            None,
+        )
+        .expect("succeeded lifecycle")
+    };
+
+    // ── 1. Dependent race: a pool appears before finalization; the guarded
+    // realm DELETE fails and the WHOLE transaction commits nothing. ──
+    let pool = CanonicalAddressPoolRecord {
+        id: Uuid::now_v7(),
+        realm_id: realm.id,
+        project_id: proj.clone(),
+        prefix: "10.90.0.0/26".to_owned(),
+        gateway: None,
+        first_usable: "10.90.0.1".parse().expect("first usable"),
+        last_usable: "10.90.0.62".parse().expect("last usable"),
+        generation: 1,
+        state: "active".to_owned(),
+    };
+    store
+        .insert_canonical_pool(&pool)
+        .await
+        .expect("insert blocking pool");
+    let blocked = store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm.id,
+            deleting.generation,
+            operation_id,
+            &succeeded(),
+        )
+        .await
+        .expect_err("a dependent pool must block finalization");
+    assert!(matches!(blocked, StoreError::NetworkInUse), "{blocked:?}");
+    let realm_after_block = store
+        .get_canonical_realm(&proj, &realm.id)
+        .await
+        .expect("realm after blocked finalization")
+        .expect("realm must survive a failed finalization");
+    assert_eq!(realm_after_block.state, "deleting");
+    assert_eq!(
+        store
+            .get_canonical_operation(operation_id)
+            .await
+            .expect("operation after blocked finalization")
+            .state,
+        OperationState::Running,
+        "a rejected finalization must leave the operation non-terminal"
+    );
+    let projection_after_block = store
+        .get_resource(realm.id)
+        .await
+        .expect("projection after blocked finalization");
+    assert_eq!(projection_after_block.generation, 2);
+    assert_eq!(projection_after_block.desired_state, "deleting");
+    assert_eq!(projection_after_block.observed_state, "deleting");
+    store
+        .delete_canonical_pool(&proj, &pool.id)
+        .await
+        .expect("remove blocking pool");
+
+    // ── 2. Atomic finalization: one call commits the terminal triple ──
+    store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm.id,
+            deleting.generation,
+            operation_id,
+            &succeeded(),
+        )
+        .await
+        .expect("finalize realm cleanup");
+    assert!(
+        store
+            .get_canonical_realm(&proj, &realm.id)
+            .await
+            .expect("realm after finalization")
+            .is_none(),
+        "the realm row must be deleted"
+    );
+    let canonical_after = store
+        .get_canonical_operation(operation_id)
+        .await
+        .expect("canonical operation after finalization");
+    assert_eq!(canonical_after.state, OperationState::Succeeded);
+    assert!(
+        canonical_after.finished_at.is_some(),
+        "finalization must finish the canonical metadata exactly like update_canonical_operation_lifecycle"
+    );
+    let projection_after = store
+        .get_resource(realm.id)
+        .await
+        .expect("projection after finalization");
+    assert_eq!(
+        projection_after.generation, 3,
+        "exactly one generation advance"
+    );
+    assert_eq!(projection_after.desired_state, "deleted");
+    assert_eq!(projection_after.observed_state, "deleted");
+    assert_eq!(projection_after.observed_generation, 2);
+
+    // ── 3. Equivalent replay: no error, no double application ──
+    store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm.id,
+            deleting.generation,
+            operation_id,
+            &succeeded(),
+        )
+        .await
+        .expect("replay finalization");
+    let projection_replay = store
+        .get_resource(realm.id)
+        .await
+        .expect("projection after replay");
+    assert_eq!(
+        projection_replay.generation, 3,
+        "replay must not bump the projection generation again"
+    );
+    assert_eq!(projection_replay.observed_state, "deleted");
+
+    // ── 4. A conflicting terminal state is rejected; nothing is rewritten ──
+    let conflicting = CanonicalOperationLifecycleUpdate::new(
+        o3k_kernel::OperationState::Failed,
+        3,
+        Some("2026-11-10T00:00:01Z".to_owned()),
+        Some("2026-11-10T00:00:03Z".to_owned()),
+        Some("late failure evidence".to_owned()),
+    )
+    .expect("conflicting lifecycle");
+    let conflict = store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm.id,
+            deleting.generation,
+            operation_id,
+            &conflicting,
+        )
+        .await
+        .expect_err("a conflicting terminal state must be rejected");
+    assert!(matches!(conflict, StoreError::Corrupt(_)), "{conflict:?}");
+    assert_eq!(
+        store
+            .get_canonical_operation(operation_id)
+            .await
+            .expect("operation after conflict")
+            .state,
+        OperationState::Succeeded,
+        "a rejected conflict must not rewrite the terminal operation"
+    );
+    assert_eq!(
+        store
+            .get_resource(realm.id)
+            .await
+            .expect("projection after conflict")
+            .generation,
+        3
+    );
+
+    // ── 5. Missing operation: nothing commits, the realm stays re-drivable ──
+    let realm_b = CanonicalAddressRealmRecord {
+        id: Uuid::now_v7(),
+        network_id: network.id,
+        project_id: proj.clone(),
+        prefix: "10.91.0.0/24".to_owned(),
+        overlapping_prefixes: false,
+        generation: 1,
+        state: "active".to_owned(),
+    };
+    store
+        .insert_canonical_realm(&realm_b)
+        .await
+        .expect("insert canonical realm B");
+    let deleting_b = store
+        .begin_canonical_realm_deletion(&proj, &realm_b.id, 1)
+        .await
+        .expect("begin realm B deletion");
+    let missing_op = Uuid::now_v7();
+    let missing = store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm_b.id,
+            deleting_b.generation,
+            missing_op,
+            &succeeded(),
+        )
+        .await
+        .expect_err("an unknown operation must be rejected");
+    assert!(
+        matches!(missing, StoreError::OperationNotFound),
+        "{missing:?}"
+    );
+    let realm_b_after = store
+        .get_canonical_realm(&proj, &realm_b.id)
+        .await
+        .expect("realm B after missing operation")
+        .expect("realm B must survive");
+    assert_eq!(realm_b_after.state, "deleting");
+
+    // ── 6. A stale projection generation rolls the WHOLE finalization back ──
+    store
+        .insert_resource(&ResourceRecord {
+            id: realm_b.id,
+            kind: "network:address_realm".to_owned(),
+            project_id: proj.clone(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "active".to_owned(),
+            observed_state: "active".to_owned(),
+            provider_id: None,
+        })
+        .await
+        .expect("insert stale realm B projection");
+    let operation_b = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:realm-delete:{proj}:{}", realm_b.id).as_bytes(),
+    );
+    let request_b = IdempotencyReservationRequest::from_semantics(
+        proj.clone(),
+        "network:DeleteRealm",
+        format!("canonical:realm-delete:{}", realm_b.id),
+        "network:address_realm",
+        Some(&realm_b.id.to_string()),
+        &serde_json::json!({ "realm_id": realm_b.id }),
+        operation_b,
+    )
+    .expect("idempotency request B");
+    store
+        .create_or_replay_canonical_scoped_operation(
+            &OperationRecord {
+                id: operation_b,
+                resource_id: realm_b.id,
+                kind: "lifecycle:realm-delete".to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            },
+            &CanonicalOperationRecord {
+                id: operation_b,
+                service: "network".to_owned(),
+                action: "network:DeleteRealm".to_owned(),
+                actor: "o3k:network-service".to_owned(),
+                owner_scope: proj.clone(),
+                resource_type: "network:address_realm".to_owned(),
+                resource_id: Some(realm_b.id.to_string()),
+                state: OperationState::Pending,
+                attempt: 0,
+                created_at: "2026-11-10T00:00:00Z".to_owned(),
+                started_at: None,
+                finished_at: None,
+                error: None,
+                request_id: None,
+            },
+            &request_b,
+        )
+        .await
+        .expect("create realm B operation");
+    let stale_projection = store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm_b.id,
+            deleting_b.generation,
+            operation_b,
+            &succeeded(),
+        )
+        .await
+        .expect_err("a stale projection generation must be rejected");
+    assert!(
+        matches!(stale_projection, StoreError::StaleGeneration),
+        "{stale_projection:?}"
+    );
+    let realm_b_stale_after = store
+        .get_canonical_realm(&proj, &realm_b.id)
+        .await
+        .expect("realm B after stale rejection")
+        .expect("realm B must survive a stale rejection");
+    assert_eq!(realm_b_stale_after.state, "deleting");
+    assert_eq!(
+        store
+            .get_resource(realm_b.id)
+            .await
+            .expect("stale projection after rejection")
+            .observed_state,
+        "active",
+        "a stale rejection must not rewrite the projection"
+    );
+    assert_eq!(
+        store
+            .get_canonical_operation(operation_b)
+            .await
+            .expect("operation B after stale rejection")
+            .state,
+        OperationState::Pending,
+        "a stale rejection must leave the operation non-terminal"
+    );
+
+    // ── 7. Finalization without a projection succeeds (Neutron-subnet shape) ──
+    let realm_c = CanonicalAddressRealmRecord {
+        id: Uuid::now_v7(),
+        network_id: network.id,
+        project_id: proj.clone(),
+        prefix: "10.92.0.0/24".to_owned(),
+        overlapping_prefixes: false,
+        generation: 1,
+        state: "active".to_owned(),
+    };
+    store
+        .insert_canonical_realm(&realm_c)
+        .await
+        .expect("insert canonical realm C");
+    let operation_c = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:realm-delete:{proj}:{}", realm_c.id).as_bytes(),
+    );
+    let deleting_c = store
+        .begin_canonical_realm_deletion(&proj, &realm_c.id, 1)
+        .await
+        .expect("begin realm C deletion");
+    let request_c = IdempotencyReservationRequest::from_semantics(
+        proj.clone(),
+        "network:DeleteRealm",
+        format!("canonical:realm-delete:{}", realm_c.id),
+        "network:address_realm",
+        Some(&realm_c.id.to_string()),
+        &serde_json::json!({ "realm_id": realm_c.id }),
+        operation_c,
+    )
+    .expect("idempotency request C");
+    store
+        .create_or_replay_canonical_scoped_operation(
+            &OperationRecord {
+                id: operation_c,
+                resource_id: realm_c.id,
+                kind: "lifecycle:realm-delete".to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            },
+            &CanonicalOperationRecord {
+                id: operation_c,
+                service: "network".to_owned(),
+                action: "network:DeleteRealm".to_owned(),
+                actor: "o3k:network-service".to_owned(),
+                owner_scope: proj.clone(),
+                resource_type: "network:address_realm".to_owned(),
+                resource_id: Some(realm_c.id.to_string()),
+                state: OperationState::Pending,
+                attempt: 0,
+                created_at: "2026-11-10T00:00:00Z".to_owned(),
+                started_at: None,
+                finished_at: None,
+                error: None,
+                request_id: None,
+            },
+            &request_c,
+        )
+        .await
+        .expect("create realm C operation");
+    store
+        .finalize_realm_cleanup(
+            &proj,
+            &realm_c.id,
+            deleting_c.generation,
+            operation_c,
+            &succeeded(),
+        )
+        .await
+        .expect("finalize without a projection");
+    assert!(
+        store
+            .get_canonical_realm(&proj, &realm_c.id)
+            .await
+            .expect("realm C after finalization")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .get_canonical_operation(operation_c)
+            .await
+            .expect("operation C after finalization")
+            .state,
+        OperationState::Succeeded
+    );
+    assert!(
+        matches!(
+            store.get_resource(realm_c.id).await,
+            Err(StoreError::ResourceNotFound)
+        ),
+        "no tombstone row may be created for a realm without a projection"
     );
 }
 

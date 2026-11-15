@@ -4,10 +4,10 @@ use uuid::Uuid;
 use crate::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FabricHostTransportIdentityRecord,
-    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
-    PortRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
-    StoreError, SubnetRecord,
+    CanonicalNetworkRecord, CanonicalOperationLifecycleUpdate, CanonicalRealmBindingRecord,
+    FabricHostTransportIdentityRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, NetworkRepository, PortRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
+    SecurityGroupRuleRecord, StoreError, SubnetRecord,
 };
 
 use super::O3kStore;
@@ -529,6 +529,37 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => {
                 s.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
                     .await
+            }
+        }
+    }
+    async fn finalize_realm_cleanup(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.finalize_realm_cleanup(
+                    project_id,
+                    realm_id,
+                    expected_generation,
+                    operation_id,
+                    lifecycle,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.finalize_realm_cleanup(
+                    project_id,
+                    realm_id,
+                    expected_generation,
+                    operation_id,
+                    lifecycle,
+                )
+                .await
             }
         }
     }
