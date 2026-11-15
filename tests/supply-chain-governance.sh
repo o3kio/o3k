@@ -109,6 +109,29 @@ expected_exceptions = [
             "certificate-data resolution changes."
         ),
     },
+    {
+        "id": "RUSTSEC-2026-0459",
+        "package": "libsqlite3-sys",
+        "affected_version": "0.30.1",
+        "owner": "O3K maintainers",
+        "rationale": (
+            "libsqlite3-sys 0.30.1 (via sqlx-sqlite 0.8.6, bundled feature) vendors a "
+            "SQLite affected by a page-cache uninitialized-memory disclosure. The "
+            "vector is local: the process must open a crafted database whose sibling "
+            "-wal file has a different page size. O3K opens only its own store files "
+            "under root-owned, non-group-writable state/journal directories (0700 "
+            "where O3K creates them, root:o3k 0750 in the qualified installed "
+            "layout); no less-trusted party can write a crafted pair there, and no "
+            "O3K feature opens operator-supplied SQLite files. No released SQLx "
+            "accepts the fixed libsqlite3-sys >= 0.39 (0.8.6 caps at 0.30.x, 0.9.0 "
+            "caps below 0.38), so an upgrade cannot clear the advisory today."
+        ),
+        "review_trigger": (
+            "Remove as soon as SQLx resolves libsqlite3-sys >= 0.39 (bundled SQLite "
+            ">= 3.54.0) and the workspace upgrades, or if any code path opens "
+            "externally supplied SQLite files."
+        ),
+    },
 ]
 if type(exceptions) is not list or len(exceptions) != len(expected_exceptions):
     fail("policy.exceptions must contain exactly the reviewed exceptions")
@@ -149,18 +172,62 @@ if not any(
 ):
     fail("RUSTSEC-2026-0381 exception requires the fixed webpki-roots 1.0.10 package")
 
+# RUSTSEC-2026-0459 is ignored only for the reviewed SQLx SQLite edge. Keep
+# the exception precondition tied to the actual lock graph so a dependency
+# update cannot silently broaden or strand this waiver.
+sqlite_exception = expected_exceptions[2]
+sqlite_packages = [
+    package
+    for package in cargo_lock.get("package", [])
+    if package.get("name") == sqlite_exception["package"]
+    and package.get("version") == sqlite_exception["affected_version"]
+]
+if len(sqlite_packages) != 1:
+    fail(
+        "RUSTSEC-2026-0459 exception requires exactly one locked libsqlite3-sys 0.30.1"
+    )
+if not any(
+    package.get("name") == "sqlx-sqlite"
+    and any(
+        dependency.split(" ", 1)[0] == "libsqlite3-sys"
+        and (
+            # An unversioned edge is exact only while a single libsqlite3-sys
+            # is locked; with several, the edge must name the waived version.
+            (" " not in dependency
+             and len(sqlite_packages) == 1)
+            or dependency == "libsqlite3-sys 0.30.1"
+        )
+        for dependency in package.get("dependencies", [])
+    )
+    for package in cargo_lock.get("package", [])
+):
+    fail(
+        "RUSTSEC-2026-0459 exception requires the locked sqlx-sqlite to resolve "
+        "libsqlite3-sys to the waived 0.30.1 package"
+    )
+
 deny = deny_path.read_text(encoding="utf-8")
-deny_ids = re.findall(r'(?m)^\s*id\s*=\s*"([A-Z0-9-]+)"\s*,?\s*$', deny)
-expected_ids = set()
+deny_ids = re.findall(r'\bid\s*=\s*"(RUSTSEC-[0-9-]+)"', deny)
+expected_ids = {"RUSTSEC-2026-0459"}
 if set(deny_ids) != expected_ids or len(deny_ids) != len(expected_ids):
-    fail("deny.toml must not suppress advisories for unaffected locked packages")
+    fail(
+        "deny.toml must suppress exactly the reviewed RUSTSEC-2026-0459 exception "
+        "and no other advisory"
+    )
 
 workflow = workflow_path.read_text(encoding="utf-8")
 if workflow.count(database["commit"]) != 1:
     fail("CI must contain exactly one occurrence of the pinned advisory DB commit")
-if workflow.count("--ignore RUSTSEC-2023-0071") != 1:
+# Accept both cargo-audit flag spellings (`--ignore ID` and `--ignore=ID`) so
+# an equals-form suppression cannot evade the review checks.
+def ignore_occurrences(workflow_text, advisory_id):
+    return len(re.findall(rf"--ignore[=\s]+{re.escape(advisory_id)}(?![0-9-])", workflow_text))
+
+if ignore_occurrences(workflow, "RUSTSEC-2023-0071") != 1:
     fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2023-0071")
-if "--ignore RUSTSEC-2026-0381" in workflow:
+if ignore_occurrences(workflow, "RUSTSEC-2026-0459") != 1:
+    fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2026-0459")
+if ignore_occurrences(workflow, "RUSTSEC-2026-0381"):
     fail("CI must not suppress RUSTSEC-2026-0381 for the unaffected locked package")
 if workflow.count("cargo audit") != 1:
     fail("CI must contain exactly one cargo audit invocation")
@@ -168,10 +235,16 @@ audit_line = next(line for line in workflow.splitlines() if "cargo audit" in lin
 for required in ('--db "${advisory_db}"', "--no-fetch", "--stale"):
     if required not in audit_line:
         fail(f"cargo audit invocation is missing {required}")
-if "--ignore RUSTSEC-2023-0071" not in audit_line:
-    fail("cargo audit invocation is missing --ignore RUSTSEC-2023-0071")
-if "--ignore RUSTSEC-2026-0381" in audit_line:
-    fail("cargo audit must not suppress RUSTSEC-2026-0381 for the unaffected locked package")
+# Both legs of the supply-chain gate must suppress exactly the reviewed
+# exception set: the cargo-deny leg via deny.toml, the cargo-audit leg via
+# --ignore. A pinned advisory-DB bump therefore cannot split the two legs.
+expected_audit_ignores = {"RUSTSEC-2023-0071"} | expected_ids
+audit_ignores = set(re.findall(r"--ignore[=\s]+(RUSTSEC-[0-9-]+)", audit_line))
+if audit_ignores != expected_audit_ignores:
+    fail(
+        "cargo audit invocation must ignore exactly the reviewed exception set: "
+        f"{sorted(expected_audit_ignores)}"
+    )
 
 print("supply-chain advisory governance passed")
 PY
