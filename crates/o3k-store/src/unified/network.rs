@@ -515,23 +515,6 @@ impl NetworkRepository for O3kStore {
             }
         }
     }
-    async fn finalize_canonical_realm_deletion(
-        &self,
-        project_id: &str,
-        realm_id: &Uuid,
-        expected_generation: u64,
-    ) -> Result<(), StoreError> {
-        match self {
-            Self::Sqlite(s) => {
-                s.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
-                    .await
-            }
-            Self::Postgres(s) => {
-                s.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
-                    .await
-            }
-        }
-    }
     async fn finalize_realm_cleanup(
         &self,
         project_id: &str,

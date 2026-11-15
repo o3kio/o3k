@@ -1093,30 +1093,6 @@ impl PostgresStore {
             .ok_or(StoreError::ResourceNotFound)
     }
 
-    pub async fn finalize_canonical_realm_deletion(
-        &self,
-        project_id: &str,
-        realm_id: &Uuid,
-        expected_generation: u64,
-    ) -> Result<(), StoreError> {
-        let result = sqlx::query(
-            "DELETE FROM canonical_address_realms WHERE id = $1 AND project_id = $2 AND generation = $3 AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
-        )
-        .bind(realm_id.to_string())
-        .bind(project_id)
-        .bind(crate::checked_generation(expected_generation)?)
-        .execute(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            return match self.get_canonical_realm(project_id, realm_id).await? {
-                Some(_) => Err(StoreError::NetworkInUse),
-                None => Err(StoreError::ResourceNotFound),
-            };
-        }
-        Ok(())
-    }
-
     pub async fn finalize_realm_cleanup(
         &self,
         project_id: &str,
@@ -1858,15 +1834,6 @@ impl NetworkRepository for PostgresStore {
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError> {
         self.advance_canonical_realm_generation(project_id, realm_id, expected_generation)
-            .await
-    }
-    async fn finalize_canonical_realm_deletion(
-        &self,
-        project_id: &str,
-        realm_id: &Uuid,
-        expected_generation: u64,
-    ) -> Result<(), StoreError> {
-        self.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
             .await
     }
 

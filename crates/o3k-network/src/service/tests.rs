@@ -4409,17 +4409,6 @@ impl o3k_store::NetworkRepository for RealmCleanupFaultStore {
             .await
     }
 
-    async fn finalize_canonical_realm_deletion(
-        &self,
-        project_id: &str,
-        realm_id: &Uuid,
-        expected_generation: u64,
-    ) -> Result<(), StoreError> {
-        self.inner
-            .finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
-            .await
-    }
-
     async fn list_canonical_realm_bindings(
         &self,
         realm_id: &Uuid,

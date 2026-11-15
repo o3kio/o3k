@@ -561,12 +561,6 @@ pub trait NetworkRepository:
         realm_id: &Uuid,
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError>;
-    async fn finalize_canonical_realm_deletion(
-        &self,
-        project_id: &str,
-        realm_id: &Uuid,
-        expected_generation: u64,
-    ) -> Result<(), StoreError>;
     /// Atomically finalizes an accepted canonical Realm cleanup in ONE
     /// transaction (issue #1047): the guarded realm DELETE, the terminal
     /// `resources` projection, and the canonical operation's terminal
