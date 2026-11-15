@@ -121,6 +121,7 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         self.assertLess(chmod, check_state)
         self.assertLess(chmod, check_journal)
         self.assertNotIn("chown root:o3k /var/lib/o3k/state", script)
+        self.assertNotIn("chown root:o3k /var/lib/o3k/journal", script)
 
     def test_fresh_ext4_lost_found_and_foreign_entry_rejection(self):
         if not shutil.which("mkfs.ext4") or not shutil.which("debugfs"):
