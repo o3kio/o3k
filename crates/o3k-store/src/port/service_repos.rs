@@ -7,15 +7,16 @@ use crate::domain::records::{
     AuditEventRecord, BootstrapStateRecord, BuildingBlockRecord, CanonicalAddressPoolRecord,
     CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
     CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord, CanonicalNetworkRecord,
-    CanonicalRealmBindingRecord, CloudProfileRecord, EnrollmentGrantRecord,
-    FabricHostTransportIdentityRecord, FederatedBindingRecord, ImageMetadataRecord, KeypairRecord,
-    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
-    PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
-    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
+    CanonicalOperationLifecycleUpdate, CanonicalRealmBindingRecord, CloudProfileRecord,
+    EnrollmentGrantRecord, FabricHostTransportIdentityRecord, FederatedBindingRecord,
+    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
+    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
+    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementCapacitySummary,
+    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
+    PlacementProviderStateRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
+    VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -560,11 +561,27 @@ pub trait NetworkRepository:
         realm_id: &Uuid,
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError>;
-    async fn finalize_canonical_realm_deletion(
+    /// Atomically finalizes an accepted canonical Realm cleanup in ONE
+    /// transaction (issue #1047): the guarded realm DELETE, the terminal
+    /// `resources` projection, and the canonical operation's terminal
+    /// lifecycle update. These used to be three separate durable writes with
+    /// `.await` boundaries, and a crash between them stranded the projection
+    /// in `deleting` while the operation went terminal — a state no
+    /// reconciliation pass repairs. The tombstone is conditional on
+    /// projection existence and fenced on `expected_generation`
+    /// (Neutron-compatible Subnets have no projection); a missing projection
+    /// is not an error. The realm DELETE keeps its generation fence and
+    /// dependent checks. Replay after a full commit is an idempotent no-op;
+    /// a conflicting terminal state, a stale projection generation, or
+    /// remaining dependents roll the WHOLE transaction back and commit
+    /// nothing, leaving the cleanup re-drivable.
+    async fn finalize_realm_cleanup(
         &self,
         project_id: &str,
         realm_id: &Uuid,
         expected_generation: u64,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
     ) -> Result<(), StoreError>;
     async fn list_canonical_realm_bindings(
         &self,

@@ -2991,3 +2991,1897 @@ async fn server_owned_endpoint_cleanup_preserves_a_bound_endpoint_until_unbound(
     let _ = fs::remove_file(format!("{sqlite_path}-shm"));
     Ok(())
 }
+use o3k_kernel::{Reservation, ReservationId, ResourceAmount, Usage};
+use o3k_store::{
+    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
+    AuditEventRecord, CanonicalAcceptanceOutcome, CanonicalAddressPoolRecord,
+    CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
+    CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord,
+    CanonicalNetworkRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
+    CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord, CanonicalRealmBindingRecord,
+    CanonicalReusableNetworkPolicyRecord, FabricHostTransportIdentityRecord,
+    IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, LifecycleTerminalization,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkPlanWorkRecord,
+    NetworkPlanWorkState, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
+    OperationState, PortRecord, ProviderReference, RepositoryPage, ResourceRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, StoreError,
+    StoredIdempotencyReservation, SubnetRecord,
+};
+
+// ── Issue #1047: realm cleanup finalization must be one transaction ──────────
+
+/// Delegating repository for the issue-#1047 crash boundary. Every method
+/// passes through to the wrapped store except `finalize_realm_cleanup`, which
+/// supports two modes:
+///
+/// - `fail_next_finalize()`: the NEXT finalization fails on a sabotaged realm
+///   identity, so the REAL primitive fails with its genuine
+///   `ResourceNotFound` error. This is the control-plane crash at the worst
+///   possible moment — every provider side effect has already happened and
+///   the durable finalization is about to commit — and the invariant under
+///   test is that a failed finalization commits nothing (the transaction is
+///   all-or-nothing).
+/// - `arm_converged_assertion()`: after a delegated finalization the realm
+///   row must be gone, the operation must be terminal, and an existing
+///   projection must be `deleted`. A split commit would surface here
+///   deterministically instead of needing a racy external observer.
+struct RealmCleanupFaultStore {
+    inner: Arc<dyn o3k_store::NetworkRepository>,
+    fail_next: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    assert_converged: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RealmCleanupFaultStore {
+    fn new(inner: Arc<dyn o3k_store::NetworkRepository>) -> Self {
+        Self {
+            inner,
+            fail_next: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assert_converged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn fail_next_finalize(&self) {
+        self.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn arm_converged_assertion(&self) {
+        self.assert_converged
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_store::DurableStore for RealmCleanupFaultStore {
+    async fn insert_network_plan_work(
+        &self,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        self.inner.insert_network_plan_work(work).await
+    }
+
+    async fn insert_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        self.inner
+            .insert_network_plan_work_under_lease(
+                realm_work_key,
+                controller_id,
+                controller_epoch,
+                fencing_token,
+                work,
+            )
+            .await
+    }
+
+    async fn get_network_plan_work(
+        &self,
+        command_id: &str,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        self.inner.get_network_plan_work(command_id).await
+    }
+
+    async fn update_network_plan_work(
+        &self,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        self.inner
+            .update_network_plan_work(command_id, expected_revision, state, outcome)
+            .await
+    }
+
+    async fn update_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        self.inner
+            .update_network_plan_work_under_lease(
+                realm_work_key,
+                controller_id,
+                controller_epoch,
+                fencing_token,
+                command_id,
+                expected_revision,
+                state,
+                outcome,
+            )
+            .await
+    }
+
+    async fn supersede_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        old_command_id: &str,
+        expected_old_revision: u64,
+        successor: &NetworkPlanWorkRecord,
+    ) -> Result<(NetworkPlanWorkRecord, NetworkPlanWorkRecord), StoreError> {
+        self.inner
+            .supersede_network_plan_work_under_lease(
+                realm_work_key,
+                controller_id,
+                controller_epoch,
+                fencing_token,
+                old_command_id,
+                expected_old_revision,
+                successor,
+            )
+            .await
+    }
+
+    async fn list_unresolved_network_plan_work(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        self.inner.list_unresolved_network_plan_work().await
+    }
+
+    async fn list_network_plan_work_history(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        self.inner.list_network_plan_work_history().await
+    }
+
+    async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
+        self.inner.insert_resource(resource).await
+    }
+
+    async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError> {
+        self.inner.get_resource(id).await
+    }
+
+    async fn list_resources(
+        &self,
+        project_id: &str,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        self.inner.list_resources(project_id, kind).await
+    }
+
+    async fn list_resources_for_reconciliation(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        self.inner.list_resources_for_reconciliation(kind).await
+    }
+
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RepositoryPage<ResourceRecord>, StoreError> {
+        self.inner
+            .list_resources_page(project_id, kind, after_id, limit)
+            .await
+    }
+
+    async fn update_resource(
+        &self,
+        id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+    ) -> Result<ResourceRecord, StoreError> {
+        self.inner
+            .update_resource(
+                id,
+                expected_generation,
+                desired_state,
+                observed_state,
+                observed_generation,
+                provider_id,
+            )
+            .await
+    }
+
+    async fn update_resource_and_complete_operation(
+        &self,
+        resource_id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<ResourceRecord, StoreError> {
+        self.inner
+            .update_resource_and_complete_operation(
+                resource_id,
+                expected_generation,
+                desired_state,
+                observed_state,
+                observed_generation,
+                provider_id,
+                operation_id,
+                lifecycle,
+            )
+            .await
+    }
+
+    async fn terminalize_lifecycle(
+        &self,
+        terminalization: &LifecycleTerminalization<'_>,
+    ) -> Result<(OperationRecord, ResourceRecord), StoreError> {
+        self.inner.terminalize_lifecycle(terminalization).await
+    }
+
+    async fn update_resource_from_observation(
+        &self,
+        id: Uuid,
+        update: &ObservationUpdate<'_>,
+    ) -> Result<ResourceRecord, StoreError> {
+        self.inner
+            .update_resource_from_observation(id, update)
+            .await
+    }
+
+    async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
+        self.inner.insert_operation(operation).await
+    }
+
+    async fn reserve_idempotent_operation(
+        &self,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        self.inner.reserve_idempotent_operation(request).await
+    }
+
+    async fn get_idempotency_reservation(
+        &self,
+        owner_scope: &str,
+        action: &str,
+        key: &str,
+    ) -> Result<Option<StoredIdempotencyReservation>, StoreError> {
+        self.inner
+            .get_idempotency_reservation(owner_scope, action, key)
+            .await
+    }
+
+    async fn create_or_replay_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        self.inner
+            .create_or_replay_idempotent_operation(operation, request)
+            .await
+    }
+
+    async fn create_or_replay_canonical_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        self.inner
+            .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+            .await
+    }
+
+    async fn create_or_replay_canonical_scoped_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        self.inner
+            .create_or_replay_canonical_scoped_operation(operation, canonical, request)
+            .await
+    }
+
+    async fn create_or_replay_canonical_resource_operation(
+        &self,
+        resource: &ResourceRecord,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<CanonicalAcceptanceOutcome, StoreError> {
+        self.inner
+            .create_or_replay_canonical_resource_operation(
+                resource,
+                operation,
+                canonical,
+                request,
+                expected_placement_allocation_id,
+            )
+            .await
+    }
+
+    async fn create_or_replay_canonical_lifecycle_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<CanonicalAcceptanceOutcome, StoreError> {
+        self.inner
+            .create_or_replay_canonical_lifecycle_operation(operation, canonical, request)
+            .await
+    }
+
+    async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
+        self.inner.get_operation(id).await
+    }
+
+    async fn get_canonical_operation(
+        &self,
+        id: Uuid,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        self.inner.get_canonical_operation(id).await
+    }
+
+    async fn list_canonical_operations_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        self.inner
+            .list_canonical_operations_page(owner_scope, after_id, limit)
+            .await
+    }
+
+    async fn update_canonical_operation_lifecycle(
+        &self,
+        id: Uuid,
+        update: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        self.inner
+            .update_canonical_operation_lifecycle(id, update)
+            .await
+    }
+
+    async fn update_operation(
+        &self,
+        id: Uuid,
+        state: OperationState,
+        provider_operation_id: Option<&str>,
+        error_category: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<OperationRecord, StoreError> {
+        self.inner
+            .update_operation(
+                id,
+                state,
+                provider_operation_id,
+                error_category,
+                error_message,
+            )
+            .await
+    }
+
+    async fn list_non_terminal_lifecycle_operations(
+        &self,
+    ) -> Result<Vec<OperationRecord>, StoreError> {
+        self.inner.list_non_terminal_lifecycle_operations().await
+    }
+
+    async fn attach_provider_reference(
+        &self,
+        reference: &ProviderReference,
+    ) -> Result<(), StoreError> {
+        self.inner.attach_provider_reference(reference).await
+    }
+
+    async fn get_provider_reference(
+        &self,
+        resource_id: Uuid,
+        provider_name: &str,
+    ) -> Result<ProviderReference, StoreError> {
+        self.inner
+            .get_provider_reference(resource_id, provider_name)
+            .await
+    }
+
+    async fn insert_agent_command(
+        &self,
+        command: &AgentCommandRecord,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        self.inner.insert_agent_command(command).await
+    }
+
+    async fn get_agent_command(&self, command_id: &str) -> Result<AgentCommandRecord, StoreError> {
+        self.inner.get_agent_command(command_id).await
+    }
+
+    async fn get_agent_command_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        self.inner
+            .get_agent_command_by_idempotency_key(idempotency_key)
+            .await
+    }
+
+    async fn get_agent_command_by_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        self.inner
+            .get_agent_command_by_operation(operation_id)
+            .await
+    }
+
+    async fn update_agent_command(
+        &self,
+        command_id: &str,
+        state: AgentCommandState,
+        accepted_sequence: u64,
+        last_sequence: u64,
+        provider_operation_id: Option<&str>,
+        provider_resource_id: Option<&str>,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        self.inner
+            .update_agent_command(
+                command_id,
+                state,
+                accepted_sequence,
+                last_sequence,
+                provider_operation_id,
+                provider_resource_id,
+            )
+            .await
+    }
+
+    async fn list_recoverable_agent_commands(&self) -> Result<Vec<AgentCommandRecord>, StoreError> {
+        self.inner.list_recoverable_agent_commands().await
+    }
+
+    async fn insert_artifact_transfer(
+        &self,
+        transfer: &ArtifactTransferRecord,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        self.inner.insert_artifact_transfer(transfer).await
+    }
+
+    async fn get_artifact_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        self.inner.get_artifact_transfer(transfer_id).await
+    }
+
+    async fn rebind_artifact_transfer_epoch(
+        &self,
+        transfer_id: &str,
+        expected_agent_epoch: &str,
+        new_agent_epoch: &str,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        self.inner
+            .rebind_artifact_transfer_epoch(transfer_id, expected_agent_epoch, new_agent_epoch)
+            .await
+    }
+
+    async fn update_artifact_transfer(
+        &self,
+        transfer_id: &str,
+        expected_agent_epoch: &str,
+        update: ArtifactTransferUpdate,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        self.inner
+            .update_artifact_transfer(transfer_id, expected_agent_epoch, update)
+            .await
+    }
+
+    async fn list_recoverable_artifact_transfers(
+        &self,
+    ) -> Result<Vec<ArtifactTransferRecord>, StoreError> {
+        self.inner.list_recoverable_artifact_transfers().await
+    }
+
+    async fn expire_transfers_of_terminal_operations(&self) -> Result<u64, StoreError> {
+        self.inner.expire_transfers_of_terminal_operations().await
+    }
+
+    async fn insert_image_overlay(
+        &self,
+        overlay: &ImageOverlayOwnershipRecord,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        self.inner.insert_image_overlay(overlay).await
+    }
+
+    async fn get_image_overlay(
+        &self,
+        overlay_id: &str,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        self.inner.get_image_overlay(overlay_id).await
+    }
+
+    async fn update_image_overlay(
+        &self,
+        overlay_id: &str,
+        expected_identity: &ImageOverlayIdentity,
+        update: ImageOverlayUpdate,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        self.inner
+            .update_image_overlay(overlay_id, expected_identity, update)
+            .await
+    }
+
+    async fn list_image_overlays(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Vec<ImageOverlayOwnershipRecord>, StoreError> {
+        self.inner.list_image_overlays(resource_id).await
+    }
+
+    async fn count_image_overlay_references(
+        &self,
+        base_sha256: &str,
+        base_format: &str,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .count_image_overlay_references(base_sha256, base_format)
+            .await
+    }
+
+    async fn delete_image_overlay(
+        &self,
+        overlay_id: &str,
+        expected_identity: &ImageOverlayIdentity,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        self.inner
+            .delete_image_overlay(overlay_id, expected_identity)
+            .await
+    }
+
+    async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError> {
+        self.inner.increment_operation_retry(operation_id).await
+    }
+
+    async fn insert_resource_and_operation(
+        &self,
+        resource: &ResourceRecord,
+        operation: &OperationRecord,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .insert_resource_and_operation(resource, operation, expected_placement_allocation_id)
+            .await
+    }
+
+    async fn revive_resource_and_operation(
+        &self,
+        id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation: &OperationRecord,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<ResourceRecord, StoreError> {
+        self.inner
+            .revive_resource_and_operation(
+                id,
+                expected_generation,
+                desired_state,
+                observed_state,
+                observed_generation,
+                provider_id,
+                operation,
+                expected_placement_allocation_id,
+            )
+            .await
+    }
+
+    async fn readiness_check(&self) -> Result<(), StoreError> {
+        self.inner.readiness_check().await
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_store::QuotaRepository for RealmCleanupFaultStore {
+    async fn get_limit_state(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<(LimitValue, u64), StoreError> {
+        self.inner.get_limit_state(scope, key).await
+    }
+
+    async fn set_limit_if_generation(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .set_limit_if_generation(scope, key, limit, expected_generation)
+            .await
+    }
+
+    async fn set_limit_if_generation_with_audit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+        audit: &AuditEventRecord,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .set_limit_if_generation_with_audit(scope, key, limit, expected_generation, audit)
+            .await
+    }
+
+    async fn get_limit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<LimitValue, StoreError> {
+        self.inner.get_limit(scope, key).await
+    }
+
+    async fn set_limit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+    ) -> Result<(), StoreError> {
+        self.inner.set_limit(scope, key, limit).await
+    }
+
+    async fn get_usage(&self, scope: &OwnershipScope, key: &LimitKey) -> Result<Usage, StoreError> {
+        self.inner.get_usage(scope, key).await
+    }
+
+    async fn reserve_quota(
+        &self,
+        scope: &OwnershipScope,
+        operation_id: &str,
+        amounts: &[ResourceAmount],
+    ) -> Result<Reservation, StoreError> {
+        self.inner.reserve_quota(scope, operation_id, amounts).await
+    }
+
+    async fn commit_reservation(&self, reservation_id: &ReservationId) -> Result<(), StoreError> {
+        self.inner.commit_reservation(reservation_id).await
+    }
+
+    async fn release_reservation(&self, reservation_id: &ReservationId) -> Result<(), StoreError> {
+        self.inner.release_reservation(reservation_id).await
+    }
+
+    async fn release_reservation_for_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .release_reservation_for_operation(operation_id)
+            .await
+    }
+
+    async fn get_reservation_for_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<Reservation>, StoreError> {
+        self.inner.get_reservation_for_operation(operation_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_store::CanonicalPolicyRepository for RealmCleanupFaultStore {
+    async fn insert_reusable_policy(
+        &self,
+        policy: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_reusable_policy(policy).await
+    }
+
+    async fn get_reusable_policy(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        self.inner.get_reusable_policy(project_id, id).await
+    }
+
+    async fn list_reusable_policies(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        self.inner.list_reusable_policies(project_id).await
+    }
+
+    async fn update_reusable_policy(
+        &self,
+        policy: &CanonicalReusableNetworkPolicyRecord,
+        expected_generation: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        self.inner
+            .update_reusable_policy(policy, expected_generation)
+            .await
+    }
+
+    async fn transition_reusable_policy_state(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        state: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        self.inner
+            .transition_reusable_policy_state(project_id, id, expected_generation, state)
+            .await
+    }
+
+    async fn delete_reusable_policy(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_reusable_policy(project_id, id).await
+    }
+
+    async fn insert_policy_rule(
+        &self,
+        rule: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_policy_rule(rule).await
+    }
+
+    async fn get_policy_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.inner.get_policy_rule(project_id, id).await
+    }
+
+    async fn list_policy_rules(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.inner.list_policy_rules(project_id, policy_id).await
+    }
+
+    async fn begin_policy_rule_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+        self.inner
+            .begin_policy_rule_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.inner.list_deleting_policy_rules().await
+    }
+
+    async fn finalize_policy_rule_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .finalize_policy_rule_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn delete_policy_rule(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_policy_rule(project_id, id).await
+    }
+
+    async fn insert_policy_attachment(
+        &self,
+        attachment: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_policy_attachment(attachment).await
+    }
+
+    async fn get_policy_attachment(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.inner.get_policy_attachment(project_id, id).await
+    }
+
+    async fn list_policy_attachments(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.inner
+            .list_policy_attachments(project_id, policy_id)
+            .await
+    }
+
+    async fn list_endpoint_policy_attachments(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.inner
+            .list_endpoint_policy_attachments(project_id, endpoint_id)
+            .await
+    }
+
+    async fn replace_policy_attachment_set(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        policy_ids: &[Uuid],
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.inner
+            .replace_policy_attachment_set(project_id, endpoint_id, policy_ids)
+            .await
+    }
+
+    async fn begin_policy_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+        self.inner
+            .begin_policy_attachment_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.inner.list_deleting_policy_attachments().await
+    }
+
+    async fn finalize_policy_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .finalize_policy_attachment_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn delete_policy_attachment(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner.delete_policy_attachment(project_id, id).await
+    }
+
+    async fn upsert_policy_realization(
+        &self,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.upsert_policy_realization(realization).await
+    }
+
+    async fn get_policy_realization(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        self.inner
+            .get_policy_realization(project_id, endpoint_id)
+            .await
+    }
+
+    async fn list_policy_realizations(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        self.inner.list_policy_realizations(project_id).await
+    }
+
+    async fn set_policy_realization_outcome(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        expected_fingerprint: &str,
+        expected_attempt_id: &Uuid,
+        state: &str,
+        observed_fingerprint: Option<&str>,
+        observed_generation: Option<u64>,
+        provider_resource_id: Option<&str>,
+        last_outcome: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .set_policy_realization_outcome(
+                project_id,
+                endpoint_id,
+                expected_fingerprint,
+                expected_attempt_id,
+                state,
+                observed_fingerprint,
+                observed_generation,
+                provider_resource_id,
+                last_outcome,
+            )
+            .await
+    }
+
+    async fn requeue_policy_realization(
+        &self,
+        expected_attempt_id: &Uuid,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .requeue_policy_realization(expected_attempt_id, realization)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_store::NetworkRepository for RealmCleanupFaultStore {
+    async fn finalize_realm_cleanup(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<(), StoreError> {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            // The simulated crash runs through the REAL primitive with a
+            // sabotaged realm identity: a genuine store failure, and (because
+            // the primitive is one transaction) provably no durable effect.
+            return self
+                .inner
+                .finalize_realm_cleanup(
+                    project_id,
+                    &Uuid::now_v7(),
+                    expected_generation,
+                    operation_id,
+                    lifecycle,
+                )
+                .await;
+        }
+        self.inner
+            .finalize_realm_cleanup(
+                project_id,
+                realm_id,
+                expected_generation,
+                operation_id,
+                lifecycle,
+            )
+            .await?;
+        if self
+            .assert_converged
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // A split commit would surface here deterministically instead of
+            // needing a racy external observer.
+            let realm_row = self.inner.get_canonical_realm(project_id, realm_id).await;
+            assert!(
+                matches!(realm_row, Ok(None)),
+                "finalize_realm_cleanup must remove the realm row, got {realm_row:?}"
+            );
+            let operation = self.inner.get_operation(operation_id).await;
+            assert!(
+                matches!(operation, Ok(ref op) if op.state == lifecycle.state),
+                "finalize_realm_cleanup must leave the operation in the \
+                 terminalized state, got {operation:?}"
+            );
+            if let Ok(resource) = self.inner.get_resource(*realm_id).await {
+                assert_eq!(
+                    resource.observed_state, "deleted",
+                    "finalize_realm_cleanup must terminalize the projection"
+                );
+            }
+        }
+        Ok(())
+    }
+    async fn get_fabric_host_identity(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<FabricHostTransportIdentityRecord>, StoreError> {
+        self.inner.get_fabric_host_identity(host_id).await
+    }
+
+    async fn list_fabric_host_identities(
+        &self,
+    ) -> Result<Vec<FabricHostTransportIdentityRecord>, StoreError> {
+        self.inner.list_fabric_host_identities().await
+    }
+
+    async fn upsert_fabric_host_identity(
+        &self,
+        identity: &FabricHostTransportIdentityRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<FabricHostTransportIdentityRecord, StoreError> {
+        self.inner
+            .upsert_fabric_host_identity(identity, expected_generation)
+            .await
+    }
+
+    async fn get_canonical_owner(
+        &self,
+        resource_name: &str,
+        id: &Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        self.inner.get_canonical_owner(resource_name, id).await
+    }
+
+    async fn insert_canonical_network(
+        &self,
+        network: &CanonicalNetworkRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_canonical_network(network).await
+    }
+
+    async fn get_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
+        self.inner.get_canonical_network(project_id, id).await
+    }
+
+    async fn list_canonical_networks(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
+        self.inner.list_canonical_networks(project_id).await
+    }
+
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+        admin_state_up: bool,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        self.inner
+            .update_canonical_network(project_id, id, expected_generation, name, admin_state_up)
+            .await
+    }
+
+    async fn insert_canonical_l3_gateway(
+        &self,
+        gateway: &CanonicalL3GatewayRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_canonical_l3_gateway(gateway).await
+    }
+
+    async fn get_canonical_l3_gateway(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayRecord>, StoreError> {
+        self.inner.get_canonical_l3_gateway(project_id, id).await
+    }
+
+    async fn list_canonical_l3_gateways(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        self.inner.list_canonical_l3_gateways(project_id).await
+    }
+
+    async fn list_canonical_l3_gateways_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        self.inner.list_canonical_l3_gateways_by_state(state).await
+    }
+
+    async fn update_canonical_l3_gateway(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        self.inner
+            .update_canonical_l3_gateway(
+                project_id,
+                id,
+                expected_generation,
+                name,
+                external_realm_id,
+                enable_snat,
+            )
+            .await
+    }
+
+    async fn begin_canonical_l3_gateway_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        self.inner
+            .begin_canonical_l3_gateway_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn finalize_canonical_l3_gateway_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .finalize_canonical_l3_gateway_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn insert_canonical_l3_gateway_attachment(
+        &self,
+        attachment: &CanonicalL3GatewayAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .insert_canonical_l3_gateway_attachment(attachment)
+            .await
+    }
+
+    async fn get_canonical_l3_gateway_attachment(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.inner
+            .get_canonical_l3_gateway_attachment(project_id, id)
+            .await
+    }
+
+    async fn list_canonical_l3_gateway_attachments(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.inner
+            .list_canonical_l3_gateway_attachments(project_id, gateway_id)
+            .await
+    }
+
+    async fn list_canonical_l3_gateway_attachments_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.inner
+            .list_canonical_l3_gateway_attachments_by_state(state)
+            .await
+    }
+
+    async fn list_canonical_realm_l3_gateway_attachments(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.inner
+            .list_canonical_realm_l3_gateway_attachments(project_id, realm_id)
+            .await
+    }
+
+    async fn begin_canonical_l3_gateway_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalL3GatewayAttachmentRecord, StoreError> {
+        self.inner
+            .begin_canonical_l3_gateway_attachment_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn finalize_canonical_l3_gateway_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .finalize_canonical_l3_gateway_attachment_deletion(project_id, id, expected_generation)
+            .await
+    }
+
+    async fn insert_canonical_realm(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_canonical_realm(realm).await
+    }
+
+    async fn get_canonical_realm(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalAddressRealmRecord>, StoreError> {
+        self.inner.get_canonical_realm(project_id, id).await
+    }
+
+    async fn list_canonical_realms(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.inner
+            .list_canonical_realms(project_id, network_id)
+            .await
+    }
+
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.inner.list_active_canonical_realms().await
+    }
+
+    async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.inner.list_deleting_canonical_realms().await
+    }
+
+    async fn insert_canonical_pool(
+        &self,
+        pool: &CanonicalAddressPoolRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_canonical_pool(pool).await
+    }
+
+    async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_subnet_bundle(realm, pool, subnet).await
+    }
+
+    async fn list_canonical_pools(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalAddressPoolRecord>, StoreError> {
+        self.inner.list_canonical_pools(project_id, realm_id).await
+    }
+
+    async fn delete_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner.delete_canonical_pool(project_id, pool_id).await
+    }
+
+    async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<std::net::Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        self.inner
+            .update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+            .await
+    }
+
+    async fn insert_canonical_endpoint(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_canonical_endpoint(endpoint).await
+    }
+
+    async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .insert_canonical_endpoint_and_port(endpoint, port)
+            .await
+    }
+
+    async fn list_canonical_endpoints(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalEndpointRecord>, StoreError> {
+        self.inner
+            .list_canonical_endpoints(project_id, realm_id)
+            .await
+    }
+
+    async fn get_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalEndpointRecord>, StoreError> {
+        self.inner
+            .get_canonical_endpoint(project_id, endpoint_id)
+            .await
+    }
+
+    async fn delete_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .delete_canonical_endpoint(project_id, endpoint_id)
+            .await
+    }
+
+    async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .delete_canonical_endpoint_and_port(project_id, endpoint_id)
+            .await
+    }
+
+    async fn upsert_canonical_policy(
+        &self,
+        policy: &CanonicalNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.upsert_canonical_policy(policy).await
+    }
+
+    async fn list_canonical_policies(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRecord>, StoreError> {
+        self.inner
+            .list_canonical_policies(project_id, network_id)
+            .await
+    }
+
+    async fn delete_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .delete_canonical_policy(project_id, policy_id)
+            .await
+    }
+
+    async fn begin_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        self.inner
+            .begin_canonical_realm_deletion(project_id, realm_id, expected_generation)
+            .await
+    }
+
+    async fn advance_canonical_realm_generation(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        self.inner
+            .advance_canonical_realm_generation(project_id, realm_id, expected_generation)
+            .await
+    }
+
+    async fn list_canonical_realm_bindings(
+        &self,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError> {
+        self.inner.list_canonical_realm_bindings(realm_id).await
+    }
+
+    async fn insert_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_canonical_realm_binding(binding).await
+    }
+
+    async fn get_canonical_realm_binding(
+        &self,
+        fabric_domain_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Option<CanonicalRealmBindingRecord>, StoreError> {
+        self.inner
+            .get_canonical_realm_binding(fabric_domain_id, realm_id)
+            .await
+    }
+
+    async fn delete_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+        expected_realm_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .delete_canonical_realm_binding(binding, expected_realm_generation)
+            .await
+    }
+
+    async fn delete_canonical_realm(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .delete_canonical_realm(project_id, realm_id)
+            .await
+    }
+
+    async fn delete_canonical_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .delete_canonical_network(project_id, network_id)
+            .await
+    }
+
+    async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {
+        self.inner.backfill_canonical_network_state().await
+    }
+
+    async fn allocate_network_address(
+        &self,
+        realm_id: &Uuid,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        operation_id: &str,
+        prefix: &str,
+    ) -> Result<NetworkAddressAllocationRecord, StoreError> {
+        self.inner
+            .allocate_network_address(realm_id, project_id, endpoint_id, operation_id, prefix)
+            .await
+    }
+
+    async fn release_network_address(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .release_network_address(project_id, endpoint_id)
+            .await
+    }
+
+    async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+        self.inner.insert_network_intent(intent).await
+    }
+
+    async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError> {
+        self.inner.list_network_intents(project_id).await
+    }
+
+    async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError> {
+        self.inner.get_network_intent(project_id, id).await
+    }
+
+    async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError> {
+        self.inner
+            .update_network_intent(
+                project_id,
+                id,
+                expected_generation,
+                payload,
+                plan_fingerprint_sha256,
+                status,
+            )
+            .await
+    }
+
+    async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
+        self.inner.insert_network(network).await
+    }
+
+    async fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, StoreError> {
+        self.inner.list_networks(project_id).await
+    }
+
+    async fn get_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkRecord>, StoreError> {
+        self.inner.get_network(project_id, id).await
+    }
+
+    async fn delete_network(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_network(project_id, id).await
+    }
+
+    async fn insert_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        self.inner.insert_subnet(subnet).await
+    }
+
+    async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, StoreError> {
+        self.inner.list_subnets(project_id).await
+    }
+
+    async fn list_subnets_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<SubnetRecord>, StoreError> {
+        self.inner
+            .list_subnets_for_network(project_id, network_id)
+            .await
+    }
+
+    async fn get_subnet(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SubnetRecord>, StoreError> {
+        self.inner.get_subnet(project_id, id).await
+    }
+
+    async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_subnet(project_id, id).await
+    }
+
+    async fn delete_subnet_bundle(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_subnet_bundle(project_id, id).await
+    }
+
+    async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        self.inner.update_subnet(subnet).await
+    }
+
+    async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .update_subnet_bundle(subnet, pool_id, expected_pool_generation)
+            .await
+    }
+
+    async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
+        self.inner.insert_port(port).await
+    }
+
+    async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, StoreError> {
+        self.inner.list_ports(project_id).await
+    }
+
+    async fn list_ports_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<PortRecord>, StoreError> {
+        self.inner
+            .list_ports_for_network(project_id, network_id)
+            .await
+    }
+
+    async fn get_port(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<PortRecord>, StoreError> {
+        self.inner.get_port(project_id, id).await
+    }
+
+    async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError> {
+        self.inner.get_port_by_id(id).await
+    }
+
+    async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_port(project_id, id).await
+    }
+
+    async fn update_port_binding(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        binding_host: Option<&str>,
+        binding_state: Option<&str>,
+    ) -> Result<PortRecord, StoreError> {
+        self.inner
+            .update_port_binding(project_id, id, binding_host, binding_state)
+            .await
+    }
+
+    async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+    ) -> Result<PortRecord, StoreError> {
+        self.inner.update_port_name(project_id, id, name).await
+    }
+
+    async fn insert_security_group(&self, group: &SecurityGroupRecord) -> Result<(), StoreError> {
+        self.inner.insert_security_group(group).await
+    }
+
+    async fn list_security_groups(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<SecurityGroupRecord>, StoreError> {
+        self.inner.list_security_groups(project_id).await
+    }
+
+    async fn get_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRecord>, StoreError> {
+        self.inner.get_security_group(project_id, id).await
+    }
+
+    async fn update_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+        description: &str,
+    ) -> Result<SecurityGroupRecord, StoreError> {
+        self.inner
+            .update_security_group(project_id, id, name, description)
+            .await
+    }
+
+    async fn delete_security_group(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.inner.delete_security_group(project_id, id).await
+    }
+
+    async fn insert_security_group_rule(
+        &self,
+        rule: &SecurityGroupRuleRecord,
+    ) -> Result<(), StoreError> {
+        self.inner.insert_security_group_rule(rule).await
+    }
+
+    async fn list_security_group_rules(
+        &self,
+        project_id: &str,
+        group_id: &Uuid,
+    ) -> Result<Vec<SecurityGroupRuleRecord>, StoreError> {
+        self.inner
+            .list_security_group_rules(project_id, group_id)
+            .await
+    }
+
+    async fn get_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRuleRecord>, StoreError> {
+        self.inner.get_security_group_rule(project_id, id).await
+    }
+
+    async fn delete_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.inner.delete_security_group_rule(project_id, id).await
+    }
+
+    async fn list_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: Option<&Uuid>,
+    ) -> Result<Vec<SecurityGroupBindingRecord>, StoreError> {
+        self.inner
+            .list_security_group_bindings(project_id, endpoint_id)
+            .await
+    }
+
+    async fn replace_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        group_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        self.inner
+            .replace_security_group_bindings(project_id, endpoint_id, group_ids)
+            .await
+    }
+}
+
+/// Issue #1047: the realm DELETE, the `resources` DELETED tombstone, and the
+/// canonical operation's Succeeded terminal update must commit in ONE
+/// transaction. They used to be three separate durable writes with a
+/// swallowed tombstone error, so a fault between them returned `Removed`
+/// while stranding the projection in `deleting` forever — a state no repair
+/// pass fixes. The atomic primitive must instead commit nothing on failure
+/// and stay re-drivable, converge exactly once, and accept idempotent replay.
+#[tokio::test]
+async fn realm_cleanup_terminalization_is_atomic() -> Result<(), Box<dyn std::error::Error>> {
+    let path = root("realm-cleanup-terminalization");
+    let sqlite_path = format!("{}.sqlite", path.display());
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_file(&sqlite_path);
+    let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+    let fault = Arc::new(RealmCleanupFaultStore::new(store.clone()));
+    fault.arm_converged_assertion();
+    let service = NetworkService::open_for_test(&path, fault.clone()).await?;
+    let network = service
+        .create_canonical_network_for_project("project-a", "atomic".to_owned())
+        .await?;
+    let realm = service
+        .create_canonical_realm_for_project(
+            "project-a",
+            network.id,
+            "10.41.0.0/24".to_owned(),
+            false,
+        )
+        .await?;
+    let binding = o3k_store::CanonicalRealmBindingRecord {
+        fabric_domain_id: "fabric-a".to_owned(),
+        realm_id: realm.id,
+        provider_kind: "geneve".to_owned(),
+        provider_segment_id: 411,
+        binding_generation: 1,
+        state: "active".to_owned(),
+    };
+    store.insert_canonical_realm_binding(&binding).await?;
+    assert!(matches!(
+        service
+            .delete_canonical_realm_for_project("project-a", realm.id)
+            .await,
+        Err(NetworkError::Conflict)
+    ));
+    let first = service
+        .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+        .await?;
+    let operation_id = match first {
+        RealmCleanupProgress::AwaitingObservation { operation_id, .. } => operation_id,
+        _ => return Err("unexpected replay progress".into()),
+    };
+
+    // The crash: the provider side effects happened (the binding and pool
+    // removals committed), the finalization is about to fail.
+    fault.fail_next_finalize();
+    let crashed = service
+        .observe_canonical_realm_cleanup_for_project(
+            "project-a",
+            realm.id,
+            vec![RealmCleanupObservation::Absent(binding)],
+        )
+        .await;
+    assert!(
+        matches!(crashed, Err(NetworkError::NotFound)),
+        "the injected finalization failure must propagate: {crashed:?}"
+    );
+    // Issue #1047 invariant after the crash: NONE of the three durable
+    // writes is committed, exactly as if the finalization never ran, so the
+    // cleanup stays re-drivable.
+    let realm_after = store
+        .get_canonical_realm("project-a", &realm.id)
+        .await?
+        .ok_or("realm must survive a failed finalization")?;
+    assert_eq!(realm_after.state, "deleting");
+    assert_eq!(
+        store.get_canonical_operation(operation_id).await?.state,
+        o3k_store::OperationState::Running
+    );
+    let resource = store.get_resource(realm.id).await?;
+    assert_eq!(resource.desired_state, "deleting");
+    assert_eq!(resource.observed_state, "deleting");
+
+    // Re-drive converges once: the absent binding already proved the provider
+    // cleanup, so the observation set is empty now.
+    let removed = service
+        .observe_canonical_realm_cleanup_for_project("project-a", realm.id, vec![])
+        .await?;
+    assert_eq!(removed, RealmCleanupProgress::Removed { operation_id });
+    assert!(
+        store
+            .get_canonical_realm("project-a", &realm.id)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        store.get_canonical_operation(operation_id).await?.state,
+        o3k_store::OperationState::Succeeded
+    );
+    let resource = store.get_resource(realm.id).await?;
+    assert_eq!(resource.desired_state, "deleted");
+    assert_eq!(
+        resource.observed_state, "deleted",
+        "the tombstone must commit atomically with the terminal operation"
+    );
+
+    // Idempotent replay: a second finalization neither errors nor re-applies.
+    let canonical = store.get_canonical_operation(operation_id).await?;
+    let replay_update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+        o3k_kernel::OperationState::Succeeded,
+        canonical.attempt.saturating_add(1),
+        canonical.started_at.clone(),
+        Some(
+            canonical
+                .started_at
+                .clone()
+                .unwrap_or_else(|| canonical.created_at.clone()),
+        ),
+        None,
+    )?;
+    fault
+        .finalize_realm_cleanup(
+            "project-a",
+            &realm.id,
+            realm_after.generation,
+            operation_id,
+            &replay_update,
+        )
+        .await?;
+    let resource = store.get_resource(realm.id).await?;
+    assert_eq!(resource.observed_state, "deleted");
+
+    // A restarted control plane must not need to repair anything: reopening
+    // runs the recovery scan, and the projection must still be terminal.
+    drop(service);
+    let reopened_store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+    let _reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
+    let resource = reopened_store.get_resource(realm.id).await?;
+    assert_eq!(resource.observed_state, "deleted");
+    let _ = fs::remove_dir_all(path);
+    let _ = fs::remove_file(sqlite_path);
+    Ok(())
+}

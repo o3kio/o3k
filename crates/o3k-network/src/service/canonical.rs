@@ -1778,23 +1778,6 @@ impl NetworkService {
                 .await
                 .map_err(map_store_error)?;
         }
-        self.inner
-            .repository
-            .finalize_canonical_realm_deletion(project_id, &realm_id, realm.generation)
-            .await
-            .map_err(map_store_error)?;
-        let _ = self
-            .inner
-            .repository
-            .update_resource(
-                realm_id,
-                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
-                "deleted",
-                "deleted",
-                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
-                None,
-            )
-            .await;
         let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
             o3k_kernel::OperationState::Succeeded,
             canonical.attempt.saturating_add(1),
@@ -1810,7 +1793,13 @@ impl NetworkService {
         .map_err(map_store_error)?;
         self.inner
             .repository
-            .update_canonical_operation_lifecycle(operation.id, &update)
+            .finalize_realm_cleanup(
+                project_id,
+                &realm_id,
+                realm.generation,
+                operation.id,
+                &update,
+            )
             .await
             .map_err(map_store_error)?;
         Ok(RealmCleanupProgress::Removed {
