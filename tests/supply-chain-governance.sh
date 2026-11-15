@@ -218,11 +218,16 @@ if set(deny_ids) != expected_ids or len(deny_ids) != len(expected_ids):
 workflow = workflow_path.read_text(encoding="utf-8")
 if workflow.count(database["commit"]) != 1:
     fail("CI must contain exactly one occurrence of the pinned advisory DB commit")
-if workflow.count("--ignore RUSTSEC-2023-0071") != 1:
+# Accept both cargo-audit flag spellings (`--ignore ID` and `--ignore=ID`) so
+# an equals-form suppression cannot evade the review checks.
+def ignore_occurrences(workflow_text, advisory_id):
+    return len(re.findall(rf"--ignore[=\s]+{re.escape(advisory_id)}(?![0-9-])", workflow_text))
+
+if ignore_occurrences(workflow, "RUSTSEC-2023-0071") != 1:
     fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2023-0071")
-if workflow.count("--ignore RUSTSEC-2026-0459") != 1:
+if ignore_occurrences(workflow, "RUSTSEC-2026-0459") != 1:
     fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2026-0459")
-if "--ignore RUSTSEC-2026-0381" in workflow:
+if ignore_occurrences(workflow, "RUSTSEC-2026-0381"):
     fail("CI must not suppress RUSTSEC-2026-0381 for the unaffected locked package")
 if workflow.count("cargo audit") != 1:
     fail("CI must contain exactly one cargo audit invocation")
@@ -234,7 +239,7 @@ for required in ('--db "${advisory_db}"', "--no-fetch", "--stale"):
 # exception set: the cargo-deny leg via deny.toml, the cargo-audit leg via
 # --ignore. A pinned advisory-DB bump therefore cannot split the two legs.
 expected_audit_ignores = {"RUSTSEC-2023-0071"} | expected_ids
-audit_ignores = set(re.findall(r"--ignore\s+(RUSTSEC-[0-9-]+)", audit_line))
+audit_ignores = set(re.findall(r"--ignore[=\s]+(RUSTSEC-[0-9-]+)", audit_line))
 if audit_ignores != expected_audit_ignores:
     fail(
         "cargo audit invocation must ignore exactly the reviewed exception set: "
