@@ -107,6 +107,21 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             HOST_ENV.ext4_lost_found_assertions("/tmp/a;touch /tmp/pwned", 0, 0)
 
+    def test_storage_setup_establishes_mount_root_ownership_after_mounting(self):
+        script = HOST_ENV.guest_storage_setup_script("O3KSTATE0", "O3KJOURNAL0")
+        mount_state = script.index("mount /var/lib/o3k/state")
+        mount_journal = script.index("mount /var/lib/o3k/journal")
+        chown = script.index('chown root:o3k "$STATE" "$JOURNAL"')
+        chmod = script.index('chmod 0750 "$STATE" "$JOURNAL"')
+        check_state = script.index('[[ "$(stat -c \'%u:%g:%a\' "$STATE")" ==')
+        check_journal = script.index('[[ "$(stat -c \'%u:%g:%a\' "$JOURNAL")" ==')
+        self.assertLess(mount_state, chown)
+        self.assertLess(mount_journal, chown)
+        self.assertLess(chown, chmod)
+        self.assertLess(chmod, check_state)
+        self.assertLess(chmod, check_journal)
+        self.assertNotIn("chown root:o3k /var/lib/o3k/state", script)
+
     def test_fresh_ext4_lost_found_and_foreign_entry_rejection(self):
         if not shutil.which("mkfs.ext4") or not shutil.which("debugfs"):
             self.skipTest("e2fsprogs unavailable")
