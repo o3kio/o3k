@@ -4,6 +4,10 @@
 [advisories]
 version = 2
 ignore = [
+  # Reviewed exception; see docs/supply-chain/advisory-exceptions.yaml. The
+  # governance test tests/supply-chain-governance.sh ties this suppression to
+  # the locked libsqlite3-sys 0.30.1 graph edge and fails closed on drift.
+  { id = "RUSTSEC-2026-0459", reason = "bundled SQLite page-cache disclosure requires a local attacker-placed db/-wal pair; O3K opens only its own store files under root-owned, non-group-writable state/journal directories, and no released SQLx accepts the fixed libsqlite3-sys >= 0.39" },
 ]
 
 [licenses]
