@@ -109,6 +109,28 @@ expected_exceptions = [
             "certificate-data resolution changes."
         ),
     },
+    {
+        "id": "RUSTSEC-2026-0459",
+        "package": "libsqlite3-sys",
+        "affected_version": "0.30.1",
+        "owner": "O3K maintainers",
+        "rationale": (
+            "libsqlite3-sys 0.30.1 (via sqlx-sqlite 0.8.6, bundled feature) vendors a "
+            "SQLite affected by a page-cache uninitialized-memory disclosure. The "
+            "vector is local: the process must open a crafted database whose sibling "
+            "-wal file has a different page size. O3K opens only its own store files "
+            "under root-owned 0700 state/journal directories; no less-trusted party "
+            "can place a crafted pair there, and no O3K feature opens "
+            "operator-supplied SQLite files. No released SQLx accepts the fixed "
+            "libsqlite3-sys >= 0.39 (0.8.6 caps at 0.30.x, 0.9.0 caps below 0.38), so "
+            "an upgrade cannot clear the advisory today."
+        ),
+        "review_trigger": (
+            "Remove as soon as SQLx resolves libsqlite3-sys >= 0.39 (bundled SQLite "
+            ">= 3.54.0) and the workspace upgrades, or if any code path opens "
+            "externally supplied SQLite files."
+        ),
+    },
 ]
 if type(exceptions) is not list or len(exceptions) != len(expected_exceptions):
     fail("policy.exceptions must contain exactly the reviewed exceptions")
@@ -149,11 +171,41 @@ if not any(
 ):
     fail("RUSTSEC-2026-0381 exception requires the fixed webpki-roots 1.0.10 package")
 
+# RUSTSEC-2026-0459 is ignored only for the reviewed SQLx SQLite edge. Keep
+# the exception precondition tied to the actual lock graph so a dependency
+# update cannot silently broaden or strand this waiver.
+sqlite_exception = expected_exceptions[2]
+sqlite_packages = [
+    package
+    for package in cargo_lock.get("package", [])
+    if package.get("name") == sqlite_exception["package"]
+    and package.get("version") == sqlite_exception["affected_version"]
+]
+if len(sqlite_packages) != 1:
+    fail(
+        "RUSTSEC-2026-0459 exception requires exactly one locked libsqlite3-sys 0.30.1"
+    )
+if not any(
+    package.get("name") == "sqlx-sqlite"
+    and any(
+        dependency.split(" ", 1)[0] == "libsqlite3-sys"
+        for dependency in package.get("dependencies", [])
+    )
+    for package in cargo_lock.get("package", [])
+):
+    fail(
+        "RUSTSEC-2026-0459 exception requires the locked sqlx-sqlite to depend on "
+        "libsqlite3-sys"
+    )
+
 deny = deny_path.read_text(encoding="utf-8")
-deny_ids = re.findall(r'(?m)^\s*id\s*=\s*"([A-Z0-9-]+)"\s*,?\s*$', deny)
-expected_ids = set()
+deny_ids = re.findall(r'\bid\s*=\s*"(RUSTSEC-[0-9-]+)"', deny)
+expected_ids = {"RUSTSEC-2026-0459"}
 if set(deny_ids) != expected_ids or len(deny_ids) != len(expected_ids):
-    fail("deny.toml must not suppress advisories for unaffected locked packages")
+    fail(
+        "deny.toml must suppress exactly the reviewed RUSTSEC-2026-0459 exception "
+        "and no other advisory"
+    )
 
 workflow = workflow_path.read_text(encoding="utf-8")
 if workflow.count(database["commit"]) != 1:
