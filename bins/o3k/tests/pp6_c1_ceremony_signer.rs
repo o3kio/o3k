@@ -6,6 +6,7 @@
 //!
 //! The test is skipped (with a message) when python3 or the `cryptography`
 //! module is unavailable; CI runners that have both execute it fully.
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use ed25519_dalek::VerifyingKey;
 use o3k::recovery_identity as identity;
@@ -72,11 +73,12 @@ fn qualification_signer_output_passes_the_canonical_verifiers() {
         "--policy-key-id",
         policy_key_id,
     ]);
-    let keys_meta: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(keys.join("keys.json")).unwrap(),
-    )
-    .unwrap();
-    let policy_pub = keys_meta["public_keys"]["policy"].as_str().unwrap().to_string();
+    let keys_meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(keys.join("keys.json")).unwrap()).unwrap();
+    let policy_pub = keys_meta["public_keys"]["policy"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let journal_root_pub = keys_meta["public_keys"]["journal-root"]
         .as_str()
         .unwrap()
@@ -115,7 +117,11 @@ fn qualification_signer_output_passes_the_canonical_verifiers() {
         "trust_bundle_path": "/etc/o3k/recovery-trust.json"
     });
     let descriptor_path = work.join("descriptor.json");
-    std::fs::write(&descriptor_path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+    std::fs::write(
+        &descriptor_path,
+        serde_json::to_string(&descriptor).unwrap(),
+    )
+    .unwrap();
     run_signer(&[
         "sign",
         "--descriptor",
