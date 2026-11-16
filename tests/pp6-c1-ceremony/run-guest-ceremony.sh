@@ -236,8 +236,10 @@ run_install_with_docs "$EVIDENCE/install.log" \
 
 log "asserting healthy services"
 # o3k-compute can still be converging right after enablement; wait fail-closed.
+# is-active exits 3 for non-active units and ssh propagates that, so the
+# probe must never run bare under set -e/pipefail.
 for _ in $(seq 1 24); do
-  services_state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service')"
+  services_state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service; true')"
   [[ "$(sed -n 1p <<<"$services_state")" == active \
     && "$(sed -n 2p <<<"$services_state")" == active ]] && break
   sleep 5
@@ -300,8 +302,10 @@ assert_denied_after_tamper tampered-trust
 assert_recovers tampered-trust
 
 "${SSH[@]}" 'sudo systemctl start o3k-compute.service'
-"${SSH[@]}" 'systemctl is-active o3kd.service && systemctl is-active o3k-compute.service' \
-  | tee "$EVIDENCE/services-final.txt"
+final_state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service; true')"
+printf '%s\n' "$final_state" | tee "$EVIDENCE/services-final.txt"
+[[ "$(sed -n 1p "$EVIDENCE/services-final.txt")" == active ]]
+[[ "$(sed -n 2p "$EVIDENCE/services-final.txt")" == active ]]
 
 # ---- evidence --------------------------------------------------------------
 "${SSH[@]}" 'sudo tar -C / -czf - etc/o3k/installation-policy.json etc/o3k/recovery-trust.json 2>/dev/null' \
