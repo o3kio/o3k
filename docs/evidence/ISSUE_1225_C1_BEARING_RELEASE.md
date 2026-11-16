@@ -60,6 +60,16 @@ required (ADR-0185).
   canonical Rust verifiers (`verify_signed`, `verify_policy`,
   `verify_initial_state_transition`, `verify_trust_bundle`) with tamper
   negatives.
+- `bins/o3k/src/recovery_installation.rs` — startup-guard gap found by the
+  disposable-guest negative matrix: the v1 `NEVER_RECOVERED` startup path
+  read `/etc/o3k/recovery-trust.json` and the durable trust high-water but
+  never authenticated them, so a tampered installed trust bundle did not
+  deny startup. Startup now runs the same `load_trust` verification
+  (digest binding, scope, revocation freshness) the designated-tip path
+  already used. Fail-before/pass-after: the new root+namespace test
+  `tampered_trust_bundle_denies_startup_observation_on_never_recovered`
+  fails without the fix and passes with it; all six
+  `pp6_c1_reanchor_realfs` tests pass with it.
 
 ## Security/architecture acceptance request
 
