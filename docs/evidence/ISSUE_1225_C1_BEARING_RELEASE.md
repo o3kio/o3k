@@ -68,8 +68,9 @@ required (ADR-0185).
   (digest binding, scope, revocation freshness) the designated-tip path
   already used. Fail-before/pass-after: the new root+namespace test
   `tampered_trust_bundle_denies_startup_observation_on_never_recovered`
-  fails without the fix and passes with it; all six
-  `pp6_c1_reanchor_realfs` tests pass with it.
+  fails without the fix and passes with it; the full
+  `pp6_c1_reanchor_realfs` suite (the six pre-existing tests plus the new
+  one) passes with it.
 
 ## Security/architecture acceptance request
 
@@ -87,9 +88,21 @@ guard and all C1 verifiers are unchanged.
   (run on the clean review head).
 - `cargo test -p o3k --test pp6_c1_ceremony_signer`: signer output passes
   the canonical verifiers; tamper negatives fail.
-- Disposable Ubuntu 24.04 guest ceremony run: recorded under the evidence
-  directory referenced below once executed (driver:
-  `tests/pp6-c1-ceremony/run-guest-ceremony.sh`).
+- Disposable Ubuntu 24.04 guest ceremony runs (vendor-verified
+  `ubuntu-24.04-server-cloudimg-amd64.img` SHA-256
+  `04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94`,
+  throwaway qualification keys, C1-bearing bundle built from this branch on
+  the Debian 12 baseline): the ceremony-less install was refused at the
+  early gate before any host mutation; prepare -> offline sign -> install
+  succeeded; `o3kd` and `o3k-compute` reached `active` and
+  `/healthz` returned `{"status":"ok"}`; every negative was rejected —
+  tampered policy/state/trust at install (provisioning rejection), and
+  tampered installed policy, missing state high-water, and tampered
+  installed trust at startup, with recovery after each restore. Two
+  consecutive full runs passed after the guard fix; one earlier run exposed
+  and fixed the genesis-startup trust-authentication gap above. This is
+  disposable-guest qualification evidence, not the protected-harness
+  installed Q1/Q2 (which remains NOT_RUN until rc.28 is published).
 
 ## Residual obligations (not part of this change)
 
@@ -103,3 +116,15 @@ guard and all C1 verifiers are unchanged.
   replacement/revocation).
 - PP.5/PP.6/PP.7 umbrella issues remain open; this change claims no
   certification.
+- Normative tension recorded for the reviewer: SPEC-0050 §7.2.1 says a
+  NEVER_RECOVERED installation "has no recovery-journal or installed
+  journal-trust dependency"; the genesis-startup `load_trust` call makes
+  startup authenticate trust (including 24 h revocation freshness) before
+  any designation. This branch treats that as a fail-closed tightening
+  required by the #1225 successor acceptance ("negative tests for
+  missing/tampered C1 policy and stale identities"); the reviewer must
+  ACCEPT the tightening, or ask for the digest-only variant (tamper
+  detection without freshness gating) recorded as the smallest alternative.
+- Operators must budget the 24 h revocation refresh cadence
+  (`o3k recovery-trust-update`) for any installation that outlives a day
+  (docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md).

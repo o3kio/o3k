@@ -331,6 +331,12 @@ PY
     O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
     O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID" \
     O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+  # A flag value other than exactly 0/1 must fail closed, never silently
+  # produce a non-C1 release (#1225 review).
+  c1_expect_refusal flag-typo "O3K_C1_INSTALLATION_POLICY_ENABLED must be 0 or 1" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=yes \
+    O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID" \
+    O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="$C1_PUBKEY"
   echo "C1 fail-closed builder cases passed (unset/malformed key id and public key)"
 else
   echo "skipping install.sh asset build assertions: source tree is not clean"

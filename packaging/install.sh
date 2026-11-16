@@ -122,16 +122,18 @@ bundle_missing_binary() {
 # without this early gate an aborted first attempt would leave payload files
 # installed but the ownership ledger unwritten, so the documented recovery
 # (re-running with --c1-prepare-only) would then fail on "foreign" files.
-if [[ "$C1_PREPARE_ONLY" != 1 && -f "$ROOT_DIR/manifest.json" ]] && python3 - "$ROOT_DIR/manifest.json" <<'PY'
+if [[ "$C1_PREPARE_ONLY" != 1 && -f "$ROOT_DIR/manifest.json" ]]; then
+  command -v python3 >/dev/null 2>&1     || { echo "python3 is required to inspect the release manifest" >&2; exit 1; }
+  if python3 - "$ROOT_DIR/manifest.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream: value = json.load(stream)
 sys.exit(0 if "installation_policy_authority" in value else 1)
 PY
-then
+  then
   [[ -n "$C1_POLICY_INPUT" && -n "$C1_STATE_INPUT" && -n "$C1_TRUST_INPUT" ]] || {
     cat >&2 <<'JOURNEY'
 C1 release requires offline-signed policy/state/trust inputs.
-Two-step journey:
+Three-step journey:
   1. Prepare:  sudo packaging/install.sh --c1-prepare-only [--c1-backend sqlite|postgresql]
                creates the recovery parent and per-installation directories
                and prints the unsigned provisioning descriptor for the
@@ -143,6 +145,7 @@ Two-step journey:
                runs the legacy-evidence absence check before NEVER_RECOVERED)
 JOURNEY
     exit 2; }
+  fi
 fi
 if [[ "$PROFILE" == libvirt ]]; then "$ROOT_DIR/packaging/preflight.sh" --profile libvirt --data-dir "$DATA_DIR"; fi
 if [[ -z "$BINARY" ]]; then
@@ -537,7 +540,7 @@ then
     [[ -n "$C1_POLICY_INPUT" && -n "$C1_STATE_INPUT" && -n "$C1_TRUST_INPUT" ]] || {
       cat >&2 <<'JOURNEY'
 C1 release requires offline-signed policy/state/trust inputs.
-Two-step journey:
+Three-step journey:
   1. Prepare:  sudo packaging/install.sh --c1-prepare-only [--c1-backend sqlite|postgresql]
                creates the recovery parent and per-installation directories
                and prints the unsigned provisioning descriptor for the

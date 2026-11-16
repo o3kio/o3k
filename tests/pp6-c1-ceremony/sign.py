@@ -132,13 +132,15 @@ def cmd_sign(args):
     assert 0 < cert_days <= 90, "certificate validity must be at most 90 days"
 
     def revocation_document(sequence):
+        # Backdate like the certificate not_before: the signer clock may be
+        # ahead of the target host, and the verifier rejects now < issued_at.
         return {
             "format": "o3k-recovery-revocations-v1",
             "site_id": descriptor["site_id"],
             "profile": descriptor["profile"],
             "sequence": sequence,
-            "issued_at": now,
-            "next_update": now + 86_400,
+            "issued_at": now - 300,
+            "next_update": now - 300 + 86_400,
             "revoked_serials": [],
             "revoked_key_ids": [],
         }

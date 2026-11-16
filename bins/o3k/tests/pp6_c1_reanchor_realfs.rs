@@ -2828,5 +2828,9 @@ fn tampered_trust_bundle_denies_startup_observation_on_never_recovered() {
         stdout.contains(DENIED_PREFIX),
         "tampered trust bundle must deny startup observation: {stdout}"
     );
+    assert!(
+        doctor_denial(&stdout).contains("trust"),
+        "the denial must name the trust material, not an incidental cause: {stdout}"
+    );
     fs::remove_dir_all(&fixture).unwrap();
 }

@@ -196,6 +196,9 @@ C1_POLICY_KEY_ID="${O3K_C1_INSTALLATION_POLICY_KEY_ID:-}"
 C1_POLICY_PUBLIC_KEY="${O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY:-}"
 C1_POLICY_PATH="/etc/o3k/installation-policy.json"
 C1_POLICY_FORMAT="o3k-installation-policy-v1"
+if [[ "$C1_INSTALLATION_POLICY_ENABLED" != 0 && "$C1_INSTALLATION_POLICY_ENABLED" != 1 ]]; then
+  echo "O3K_C1_INSTALLATION_POLICY_ENABLED must be 0 or 1" >&2; exit 2
+fi
 if [[ "$C1_INSTALLATION_POLICY_ENABLED" == 1 ]]; then
   [[ "$C1_POLICY_KEY_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "invalid C1 policy key id" >&2; exit 2; }
   [[ "$C1_POLICY_PUBLIC_KEY" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid C1 policy public key" >&2; exit 2; }

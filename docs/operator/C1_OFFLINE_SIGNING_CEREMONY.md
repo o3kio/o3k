@@ -29,11 +29,15 @@ produced by the **offline signing ceremony** below.
   roots for the `restore_journal` and `recovery_evidence` purposes.
 
 Offline root operations require two of three named custodians at the
-offline signing workstation (SPEC-0050 §2). Every key has a signed
+offline signing workstation (SPEC-0050 preamble, "Accepted technical
+contract" ceremony rules). Every key has a signed
 non-secret custody record (PP.6 D2); physical storage locations and private
 keys are excluded from the record and from this repository. All five keys
 must be distinct; a signer key must never equal a root key, and the journal
-side must never share key material with the evidence side.
+side must never share key material with the evidence side. When exporting
+the authority key for the release environment, confirm it is the 64-hex
+**public** verifying key: a raw Ed25519 private seed has the same shape, and
+publishing it would compromise the authority.
 
 ## Preconditions
 
@@ -80,7 +84,8 @@ expectations before signing.
 ## Step 2 — sign (on the offline workstation)
 
 Two custodians display and confirm each document before signing
-(SPEC-0050 §2). Produce three canonical (RFC 8785 JCS) JSON documents:
+(SPEC-0050 preamble). Produce three canonical (RFC 8785 JCS) JSON
+documents:
 
 1. **`trust.json`** — an `o3k-recovery-trust-v1` bundle for the descriptor's
    installation/site/profile/backend: root-signed
@@ -95,9 +100,15 @@ Two custodians display and confirm each document before signing
    field-for-field from the descriptor (`target_device`/`target_inode` are
    the descriptor's `data_root_device`/`data_root_inode`), plus
    `policy_revision: 1`, `prior_policy_digest` of 64 zero hex characters
-   (genesis), and `trust_bundle_digest` = SHA-256 hex of the canonical
-   `trust.json` bytes. Sign with the installation-policy authority key;
-   the envelope must name the release manifest's `key_id`.
+   (genesis), `trust_bundle_digest` = SHA-256 hex of the canonical
+   `trust.json` bytes, the journal/evidence trust-root IDs and public keys
+   exactly as carried by `trust.json`
+   (`journal_trust_root_id`/`journal_trust_root_public_key`/
+   `evidence_trust_root_id`/`evidence_trust_root_public_key`), and
+   `signer_key_id` equal to the release manifest's
+   `installation_policy_authority.key_id`. Sign with the
+   installation-policy authority key; the envelope must name the same
+   `key_id`.
 3. **`state.json`** — a signed `o3k-installation-state-v1` genesis:
    `sequence: 0`, `state: "NEVER_RECOVERED"`, empty `prior_record_digest`,
    all optional digest/operation fields `null`, `policy_revision: 1`, and

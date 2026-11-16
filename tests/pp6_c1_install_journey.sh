@@ -93,7 +93,7 @@ run_block "$WORK_DIR/case1.log"
 status=$?
 set -e
 [[ $status -eq 2 ]] && ok "missing inputs exit 2" || bad "missing inputs exit=$status (want 2)"
-grep -q "Two-step journey" "$WORK_DIR/case1.log.stderr" \
+grep -q "Three-step journey" "$WORK_DIR/case1.log.stderr" \
   && ok "journey message printed" || bad "journey message missing"
 grep -q -- "--c1-prepare-only" "$WORK_DIR/case1.log.stderr" \
   && ok "journey names the prepare step" || bad "prepare step missing"

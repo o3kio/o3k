@@ -40,14 +40,21 @@ same `verify_signed` / `verify_policy` / `verify_initial_state_transition`
 
 ```bash
 python3 sign.py keygen --out /tmp/c1qual-keys --policy-key-id c1qual-policy-2026-11
-# build a qualification bundle carrying that public key (NOT the protected
-# release workflow):
+# Build a qualification bundle carrying that public key (NOT the protected
+# release workflow). Constraints: make-release.sh requires a clean checkout,
+# the version must equal the O3K_INSTALLER_VERSION pin in
+# packaging/get-o3k.sh, and the binaries must pass the glibc baseline (use
+# scripts/build-release-binaries-debian12.sh output):
+sudo scripts/build-release-binaries-debian12.sh target/release-debian12
 O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
 O3K_C1_INSTALLATION_POLICY_KEY_ID=c1qual-policy-2026-11 \
 O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY=<from keys.json> \
 O3K_UPGRADE_FROM_MIN_VERSION=v0.4.0-rc.5 \
-  packaging/make-release.sh 0.0.0-c1qual libvirt
+O3K_RELEASE_BINARIES_DIR=target/release-debian12 \
+  packaging/make-release.sh 0.4.0-rc.28 libvirt
+O3K_RELEASE_SIGNATURE_SCHEME=sigstore packaging/make-release-archive.sh 0.4.0-rc.28
 sudo tests/pp6-c1-ceremony/run-guest-ceremony.sh \
-  --bundle dist/o3k-0.0.0-c1qual --keys /tmp/c1qual-keys \
-  --evidence /tmp/c1qual-evidence
+  --bundle dist/o3k-0.4.0-rc.28 --keys /tmp/c1qual-keys \
+  --evidence /tmp/c1qual-evidence \
+  --artifact-sha256 $(awk '{print $1}' dist/o3k-0.4.0-rc.28-linux-x86_64.tar.gz.sha256)
 ```
