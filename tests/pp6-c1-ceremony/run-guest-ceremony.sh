@@ -20,6 +20,7 @@ set -Eeuo pipefail
 BUNDLE=
 KEYS=
 EVIDENCE=
+ARTIFACT_SHA256=
 IMAGE="${O3K_C1QUAL_IMAGE:-/var/tmp/pp6-e4-inputs/ubuntu-24.04-server-cloudimg-amd64.img}"
 IMAGE_SHA256="${O3K_C1QUAL_IMAGE_SHA256:-}"
 KEEP_GUEST=0
@@ -30,16 +31,19 @@ while (($#)); do
     --bundle) BUNDLE="$2"; shift 2;;
     --keys) KEYS="$2"; shift 2;;
     --evidence) EVIDENCE="$2"; shift 2;;
+    --artifact-sha256) ARTIFACT_SHA256="$2"; shift 2;;
     --image) IMAGE="$2"; shift 2;;
     --image-sha256) IMAGE_SHA256="$2"; shift 2;;
     --keep-guest) KEEP_GUEST=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
-[[ -n "$BUNDLE" && -n "$KEYS" && -n "$EVIDENCE" ]] || {
-  echo "usage: $0 --bundle DIR --keys DIR --evidence DIR [--image PATH] [--keep-guest]" >&2
+[[ -n "$BUNDLE" && -n "$KEYS" && -n "$EVIDENCE" && -n "$ARTIFACT_SHA256" ]] || {
+  echo "usage: $0 --bundle DIR --keys DIR --evidence DIR --artifact-sha256 HEX [--image PATH] [--keep-guest]" >&2
   exit 2
 }
+[[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "--artifact-sha256 must be the verified 64-hex tarball digest" >&2; exit 2; }
 [[ -f "$BUNDLE/manifest.json" && -x "$BUNDLE/bin/o3kd" && -x "$BUNDLE/bin/o3k-compute" ]] \
   || { echo "--bundle must be an extracted libvirt release bundle" >&2; exit 2; }
 python3 - "$BUNDLE/manifest.json" <<'PY'
@@ -134,7 +138,8 @@ tar -C "$BUNDLE" -cf - . | "${SSH[@]}" 'tar -C /tmp/o3k-bundle -xf -'
 "${SSH[@]}" 'sudo /tmp/o3k-bundle/packaging/bootstrap-certs.sh' >"$EVIDENCE/guest-tls-bootstrap.log" 2>&1
 
 INSTALL=(sudo /tmp/o3k-bundle/packaging/install.sh --profile libvirt --noninteractive
-         --prefix /usr/local --data-dir /var/lib/o3k --config-dir /etc/o3k --log-dir /var/log/o3k)
+         --prefix /usr/local --data-dir /var/lib/o3k --config-dir /etc/o3k --log-dir /var/log/o3k
+         --release-artifact-sha256 "$ARTIFACT_SHA256")
 
 # ---- negative: a C1 release refuses a ceremony-less install ---------------
 log "negative: install without C1 inputs must fail closed with the journey message"
