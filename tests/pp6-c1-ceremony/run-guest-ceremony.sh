@@ -65,8 +65,8 @@ fi
 
 cleanup() {
   local rc=$?
-  virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
   if [[ "$KEEP_GUEST" != 1 ]]; then
+    virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 || true
     rm -rf -- "$WORK/overlay.qcow2" "$WORK/seed.iso"
   fi
@@ -245,8 +245,14 @@ for _ in $(seq 1 24); do
   sleep 5
 done
 printf '%s\n' "$services_state" | tee "$EVIDENCE/services-active.txt"
-[[ "$(sed -n 1p "$EVIDENCE/services-active.txt")" == active ]]
-[[ "$(sed -n 2p "$EVIDENCE/services-active.txt")" == active ]]
+if [[ "$(sed -n 1p "$EVIDENCE/services-active.txt")" != active \
+  || "$(sed -n 2p "$EVIDENCE/services-active.txt")" != active ]]; then
+  # Capture the failure for diagnosis before failing the run.
+  "${SSH[@]}" 'sudo journalctl -u o3kd.service -u o3k-compute.service --no-pager -n 80' \
+    >"$EVIDENCE/service-failure-journal.txt" 2>&1 || true
+  echo "services did not both become active; see service-failure-journal.txt" >&2
+  exit 1
+fi
 "${SSH[@]}" 'curl -fsS http://127.0.0.1:18080/healthz' | tee "$EVIDENCE/o3kd-healthz.json"
 "${SSH[@]}" 'systemctl status o3kd.service --no-pager -l | head -30; echo ---; sudo journalctl -u o3kd.service -n 30 --no-pager' \
   >"$EVIDENCE/o3kd-status.txt" 2>&1
