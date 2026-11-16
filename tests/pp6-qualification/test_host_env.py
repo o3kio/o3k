@@ -349,7 +349,7 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
         record = {
             "release_manifest": {
                 "source_commit": "a" * 40,
-                "version": "0.4.0-rc.27",
+                "version": "0.4.0-rc.28",
                 "profile": "libvirt",
                 "release_artifact_sha256": "b" * 64,
             },
@@ -362,19 +362,19 @@ class HostEnvironmentSafetyTests(unittest.TestCase):
             },
         }
         expected = {name: "d" * 64 for name in ("o3kd", "o3k", "o3k-compute", "o3k-network")}
-        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.27", "b" * 64, expected)
+        HOST_ENV.validate_installation_record(record, "a" * 40, "0.4.0-rc.28", "b" * 64, expected)
         # Q1 remains PASS without any Q2 account, mount, or service observations.
         self.assertNotIn("services", record)
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.27", "b" * 64, expected)
+            HOST_ENV.validate_installation_record(record, "e" * 40, "0.4.0-rc.28", "b" * 64, expected)
         altered = {**record, "executables": dict(record["executables"])}
         altered["executables"].pop("o3k-network")
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.27", "b" * 64, expected)
+            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.28", "b" * 64, expected)
         altered = {**record, "executables": dict(record["executables"])}
         altered["executables"]["o3k"] = {**record["executables"]["o3k"], "sha256": "e" * 64}
         with self.assertRaises(RuntimeError):
-            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.27", "b" * 64, expected)
+            HOST_ENV.validate_installation_record(altered, "a" * 40, "0.4.0-rc.28", "b" * 64, expected)
         with self.assertRaises(ValueError):
             HOST_ENV.parse_executable_digests(["o3kd=" + "a" * 64])
 
