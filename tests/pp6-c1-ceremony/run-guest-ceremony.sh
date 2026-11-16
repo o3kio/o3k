@@ -276,9 +276,10 @@ assert_denied_after_tamper tampered-policy
 assert_recovers tampered-policy
 
 log "negative: missing state high-water must deny startup"
-"${SSH[@]}" 'sudo cp -a /var/lib/o3k-recovery-state/*/state.json /tmp/o3k-c1-state.bak && sudo rm -f /var/lib/o3k-recovery-state/*/state.json'
+"${SSH[@]}" 'sudo ls -la /var/lib/o3k-recovery-state /var/lib/o3k-recovery-state/*/' >"$EVIDENCE/recovery-state-layout.txt" 2>&1
+"${SSH[@]}" "sudo bash -c 'cp -a /var/lib/o3k-recovery-state/*/state.json /tmp/o3k-c1-state.bak && rm -f /var/lib/o3k-recovery-state/*/state.json'"
 assert_denied_after_tamper missing-state
-"${SSH[@]}" 'sudo cp -a /tmp/o3k-c1-state.bak /var/lib/o3k-recovery-state/*/state.json && sudo rm -f /tmp/o3k-c1-state.bak'
+"${SSH[@]}" "sudo bash -c 'cp -a /tmp/o3k-c1-state.bak /var/lib/o3k-recovery-state/*/state.json && rm -f /tmp/o3k-c1-state.bak'"
 assert_recovers missing-state
 
 log "negative: tampered installed trust bundle must deny startup"
