@@ -8,8 +8,8 @@ use crate::{
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
     CanonicalNetworkRecord, CanonicalRealmBindingRecord, FabricHostTransportIdentityRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
-    PortRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
-    StoreError, SubnetRecord,
+    OperationState, PortRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
+    SecurityGroupRuleRecord, StoreError, SubnetRecord,
 };
 
 use super::{
@@ -1093,27 +1093,126 @@ impl PostgresStore {
             .ok_or(StoreError::ResourceNotFound)
     }
 
-    pub async fn finalize_canonical_realm_deletion(
+    pub async fn finalize_realm_cleanup(
         &self,
         project_id: &str,
         realm_id: &Uuid,
         expected_generation: u64,
+        operation_id: Uuid,
+        lifecycle: &crate::CanonicalOperationLifecycleUpdate,
     ) -> Result<(), StoreError> {
-        let result = sqlx::query(
+        crate::validate_canonical_lifecycle_update(lifecycle)?;
+        let generation = crate::checked_generation(expected_generation)?;
+        let attempt = i32::try_from(lifecycle.attempt).map_err(|_| {
+            StoreError::Corrupt("canonical operation attempt exceeds PostgreSQL INT4".into())
+        })?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let operation = sqlx::query("SELECT state FROM operations WHERE id = $1 FOR UPDATE")
+            .bind(operation_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        let current_state: String = operation.try_get("state").map_err(StoreError::Database)?;
+        if current_state == OperationState::Succeeded.as_str()
+            || current_state == OperationState::Failed.as_str()
+        {
+            if current_state != lifecycle.state.as_str() {
+                return Err(StoreError::Corrupt(
+                    "terminal operation state cannot conflict with durable state".to_owned(),
+                ));
+            }
+            // Equivalent replay: the first finalization committed the realm
+            // DELETE and the tombstone in this same transaction, so
+            // re-applying could only double-bump the projection or clobber a
+            // newer legitimate write. Refresh the metadata exactly like
+            // `update_canonical_operation_lifecycle` terminal replay and
+            // leave the projection untouched.
+            sqlx::query(
+                "UPDATE canonical_operation_metadata SET attempt = $1, started_at = $2, finished_at = $3, error = $4 WHERE operation_id = $5",
+            )
+            .bind(attempt)
+            .bind(&lifecycle.started_at)
+            .bind(&lifecycle.finished_at)
+            .bind(&lifecycle.public_error)
+            .bind(operation_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            tx.commit().await.map_err(StoreError::Database)?;
+            return Ok(());
+        }
+        let metadata = sqlx::query(
+            "SELECT operation_id FROM canonical_operation_metadata WHERE operation_id = $1 FOR UPDATE",
+        )
+        .bind(operation_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or_else(|| StoreError::Corrupt("canonical lifecycle metadata is missing".into()))?;
+        let _ = metadata;
+        let deleted = sqlx::query(
             "DELETE FROM canonical_address_realms WHERE id = $1 AND project_id = $2 AND generation = $3 AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
-        .bind(crate::checked_generation(expected_generation)?)
-        .execute(&self.pool)
+        .bind(generation)
+        .execute(&mut *tx)
         .await
         .map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            return match self.get_canonical_realm(project_id, realm_id).await? {
+        if deleted.rows_affected() == 0 {
+            return match sqlx::query(
+                "SELECT id FROM canonical_address_realms WHERE id = $1 AND project_id = $2",
+            )
+            .bind(realm_id.to_string())
+            .bind(project_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            {
                 Some(_) => Err(StoreError::NetworkInUse),
                 None => Err(StoreError::ResourceNotFound),
             };
         }
+        let tombstone = sqlx::query(
+            "UPDATE resources SET generation = generation + 1, desired_state = 'deleted', observed_state = 'deleted', observed_generation = $1, provider_id = NULL WHERE id = $2 AND generation = $3",
+        )
+        .bind(generation)
+        .bind(realm_id.to_string())
+        .bind(generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if tombstone.rows_affected() == 0 {
+            let exists = sqlx::query("SELECT id FROM resources WHERE id = $1")
+                .bind(realm_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+            if exists.is_some() {
+                return Err(StoreError::StaleGeneration);
+            }
+            // No projection row: Neutron-compatible Subnets do not have one,
+            // so the terminal cleanup finishes without a tombstone.
+        }
+        sqlx::query("UPDATE operations SET state = $1 WHERE id = $2")
+            .bind(lifecycle.state.as_str())
+            .bind(operation_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            "UPDATE canonical_operation_metadata SET attempt = $1, started_at = $2, finished_at = $3, error = $4 WHERE operation_id = $5",
+        )
+        .bind(attempt)
+        .bind(&lifecycle.started_at)
+        .bind(&lifecycle.finished_at)
+        .bind(&lifecycle.public_error)
+        .bind(operation_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
         Ok(())
     }
 
@@ -1737,14 +1836,23 @@ impl NetworkRepository for PostgresStore {
         self.advance_canonical_realm_generation(project_id, realm_id, expected_generation)
             .await
     }
-    async fn finalize_canonical_realm_deletion(
+
+    async fn finalize_realm_cleanup(
         &self,
         project_id: &str,
         realm_id: &Uuid,
         expected_generation: u64,
+        operation_id: Uuid,
+        lifecycle: &crate::CanonicalOperationLifecycleUpdate,
     ) -> Result<(), StoreError> {
-        self.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
-            .await
+        self.finalize_realm_cleanup(
+            project_id,
+            realm_id,
+            expected_generation,
+            operation_id,
+            lifecycle,
+        )
+        .await
     }
     async fn list_canonical_realm_bindings(
         &self,
