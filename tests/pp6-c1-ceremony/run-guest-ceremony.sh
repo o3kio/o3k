@@ -185,10 +185,11 @@ for doc in policy state trust; do
 done
 
 stage_docs() { # stage_docs <dir>: copy doc set into the guest as root-owned inputs
+  local staged  # bash loop variables are global by default; never clobber the caller
   "${SSH[@]}" 'sudo rm -rf /var/lib/o3k-c1-inputs && sudo mkdir -m 0700 /var/lib/o3k-c1-inputs'
-  for doc in policy state trust; do
-    "${SCP[@]}" -q "$1/$doc.json" "$SSH_USER@$GUEST_IP:/tmp/$doc.json"
-    "${SSH[@]}" "sudo install -o root -g root -m 0600 /tmp/$doc.json /var/lib/o3k-c1-inputs/$doc.json && rm -f /tmp/$doc.json"
+  for staged in policy state trust; do
+    "${SCP[@]}" -q "$1/$staged.json" "$SSH_USER@$GUEST_IP:/tmp/$staged.json"
+    "${SSH[@]}" "sudo install -o root -g root -m 0600 /tmp/$staged.json /var/lib/o3k-c1-inputs/$staged.json && rm -f /tmp/$staged.json"
   done
 }
 
@@ -218,6 +219,9 @@ for doc in policy state trust; do
     echo "tampered $doc was accepted" >&2
     exit 1
   fi
+  # The negative only counts when the run reached and failed the C1
+  # provisioning step, not when it failed earlier for an unrelated reason.
+  grep -Fq 'installation provisioning failed' "$EVIDENCE/negative-tampered-$doc.log"     || { echo "tampered $doc negative did not reach provisioning verification" >&2; exit 1; }
   if "${SSH[@]}" 'systemctl is-active o3kd.service 2>/dev/null' | grep -qx active; then
     echo "o3kd became active under a tampered $doc" >&2
     exit 1
@@ -231,9 +235,15 @@ run_install_with_docs "$EVIDENCE/install.log" \
   || { echo "authentic C1 install failed; see $EVIDENCE/install.log" >&2; exit 1; }
 
 log "asserting healthy services"
-"${SSH[@]}" 'systemctl is-active o3kd.service && systemctl is-active o3k-compute.service' \
-  | tee "$EVIDENCE/services-active.txt"
-[[ "$(head -n1 "$EVIDENCE/services-active.txt")" == active ]]
+# o3k-compute can still be converging right after enablement; wait fail-closed.
+for _ in $(seq 1 24); do
+  services_state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service')"
+  [[ "$(sed -n 1p <<<"$services_state")" == active \
+    && "$(sed -n 2p <<<"$services_state")" == active ]] && break
+  sleep 5
+done
+printf '%s\n' "$services_state" | tee "$EVIDENCE/services-active.txt"
+[[ "$(sed -n 1p "$EVIDENCE/services-active.txt")" == active ]]
 [[ "$(sed -n 2p "$EVIDENCE/services-active.txt")" == active ]]
 "${SSH[@]}" 'curl -fsS http://127.0.0.1:18080/healthz' | tee "$EVIDENCE/o3kd-healthz.json"
 "${SSH[@]}" 'systemctl status o3kd.service --no-pager -l | head -30; echo ---; sudo journalctl -u o3kd.service -n 30 --no-pager' \
