@@ -1279,15 +1279,18 @@ impl InstalledRecovery {
                     identity::verify_initial_state_transition(None, &initial, &policy)
                         .map_err(|_| "installation state predecessor is invalid")?;
                     // A NEVER_RECOVERED state does not need trust to verify
-                    // its state signature, but A10 migration still has to
-                    // authenticate the installed trust and revocation
-                    // high-water before it can carry that authority forward.
+                    // its state signature, but startup still authenticates
+                    // the installed trust generation (policy digest binding,
+                    // scope, revocation freshness): missing, replaced, or
+                    // stale trust material must deny startup, not surface at
+                    // first designation or A10 migration (#1225).
                     fixed_bundle_bytes =
                         read_protected_config(Path::new(&policy.trust_bundle_path), gid)
                             .map_err(|_| "installed recovery trust is unsafe or unavailable")?;
                     trust_high_water_bytes = state_directory
                         .read_bounded("trust.json", 0, gid, 0o640, MAX_DOCUMENT)
                         .map_err(|_| "durable recovery trust high-water state is unavailable")?;
+                    load_trust(&policy, &state_directory, gid)?;
                     // The provisioned journal directory stays observed on a
                     // NEVER_RECOVERED tip: designation (and the C1.1 rotation
                     // driver) require it, and its identity is policy-bound.

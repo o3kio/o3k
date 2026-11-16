@@ -2800,3 +2800,33 @@ fn revocation_refresh_resumes_after_archive_and_is_repeatable() {
     );
     fs::remove_dir_all(&fixture).unwrap();
 }
+
+/// A tampered installed trust bundle must deny startup observation even on a
+/// NEVER_RECOVERED genesis installation (#1225): the signed policy binds the
+/// exact trust bytes, and startup must fail closed on replaced or stale trust
+/// material instead of deferring the failure to first designation.
+#[test]
+#[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
+fn tampered_trust_bundle_denies_startup_observation_on_never_recovered() {
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
+    let mut ctx = fresh_ctx();
+    let installation = setup_fixture(&mut ctx, &fixture, false);
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        !stdout.contains(DENIED_PREFIX),
+        "authentic never-recovered installation must pass startup observation: {stdout}"
+    );
+    let trust_path = installation.var.join("etc-fixture/o3k/recovery-trust.json");
+    let mut tampered = fs::read(&trust_path).unwrap();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    // Overwrite in place as root: owner, group, and mode stay intact so only
+    // the content change is exercised.
+    fs::write(&trust_path, &tampered).unwrap();
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        stdout.contains(DENIED_PREFIX),
+        "tampered trust bundle must deny startup observation: {stdout}"
+    );
+    fs::remove_dir_all(&fixture).unwrap();
+}
