@@ -76,6 +76,22 @@ artifact signing.
     packaging/make-release.sh 0.4.0-rc.5 libvirt
   ```
 
+- `installation_policy_format`, `installation_policy_path`,
+  `installation_policy_authority` — the C1 installation-policy authority
+  block (SPEC-0050 section 7.2, issue #1225). Present only when the build
+  sets `O3K_C1_INSTALLATION_POLICY_ENABLED=1` together with
+  `O3K_C1_INSTALLATION_POLICY_KEY_ID` and
+  `O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY` (64 lowercase hex chars); the
+  builder validates both and fails closed on a missing or malformed value.
+  Only **public** key material enters the build: the signing key stays in
+  offline custody and never touches CI or the repository. The protected
+  release workflow always builds with C1 enabled, sourcing the public key
+  from variables on the approval-gated `release` environment. A C1-bearing
+  release can only be installed through the offline signing ceremony (see
+  `docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md`); the packaged-path
+  startup guard denies service startup until authenticated policy, state,
+  and trust documents are provisioned.
+
 The fields are backward-compatible additions: `verify-release-bundle.sh`
 accepts bundles with or without them, and older bundle readers ignore unknown
 fields.
