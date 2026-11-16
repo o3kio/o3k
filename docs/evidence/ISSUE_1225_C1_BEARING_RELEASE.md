@@ -33,6 +33,19 @@ required (ADR-0185).
   `installation_policy_authority` manifest block, a negative assertion that
   the default build carries no C1 fields, and five fail-closed builder
   cases (unset/malformed key id or public key emit no manifest).
+- `packaging/install.sh` — fail-fast ceremony gate: a C1-bearing bundle
+  without the three signed inputs now refuses before any host mutation.
+  Previously the refusal happened at the post-install C1 block, after the
+  payload files were installed but before the ownership ledger was written,
+  so the documented recovery (`--c1-prepare-only`) failed on "foreign"
+  files. The post-install block keeps the authoritative check unchanged.
+- `tests/pp6_c1_install_journey.sh` — full-installer cases for the early
+  gate (fires without inputs, passes with named inputs, never fires under
+  `--c1-prepare-only`, leaves no host mutation).
+- Release prep to `0.4.0-rc.28` (workspace version/lock, installer pin,
+  worker asset, Helm/Docker defaults, qualification fixtures,
+  `docs/releases/v0.4.0-rc.28.md`), following the established pattern;
+  rc.27 is immutable and not retagged (ADR-0185).
 - `docs/RELEASE.md` — documents the C1 build inputs and custody constraint.
 - `docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md` — new operator runbook
   (previously a documented gap): custody roles, prepare → offline sign →
