@@ -255,8 +255,15 @@ the merge-queue commit for PR #1215. PR #1215 reviewed head was
 `2d2ebcc1fd5253727ba08581c8d5577efb8d7e7e`; its source implementation head
 was `3e9e53f867fd8b23bb629fd545e36443565ec4bd`. PRs #1212–#1215 are merged;
 their exact reviewed heads and protected merge identities are recorded below.
-The proposed successor is `v0.4.0-rc.27`; no tag or GitHub Release exists,
-so its authenticated release identity and installed qualification are NOT_RUN.
+The proposed successor is `v0.4.0-rc.28` (#1225 Option A, C1-bearing release
+with the operator offline-signing ceremony; branch
+`fix/1225-c1-bearing-release` under protected review at this writing); no
+rc.28 tag or GitHub Release exists yet, so its authenticated release identity
+and installed qualification are NOT_RUN. Immutable `v0.4.0-rc.27` (tag object
+`80cdab1568ef0972602214d0c4656ad70858c07e`, source
+`9427e7668afa76bf1f043c9adabe1d616cf5924a`) was published and then failed
+installed qualification exactly as #1225 records (non-C1 release cannot
+start); it is retained unchanged and must not be retagged.
 **Previously authenticated
 release:** immutable `v0.4.0-rc.26`, source
 `901af47b306aa779aed72ef61ef25184fabf24eb`, tag object
@@ -545,8 +552,8 @@ After B1/B2 are satisfied, choose a fresh lowercase run ID and export the exact
 values from the verified release; never copy them from an unverified manifest:
 
 ```bash
-export RUN_ID=pp6-rc27-run01
-export TAG=v0.4.0-rc.27
+export RUN_ID=pp6-rc28-run01
+export TAG=v0.4.0-rc.28
 export SOURCE_SHA=<exact-tag-commit>
 export ARTIFACT_SHA256=<archive-digest-from-verified-sigstore-manifest>
 gh release download "$TAG" --repo o3kio/o3k --dir release
