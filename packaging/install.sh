@@ -116,6 +116,34 @@ bundle_missing_binary() {
   echo "refusing to compile O3K on the installation target (contracts/installer-v1.yaml no_target_compilation)" >&2
   exit 1
 }
+# Ceremony preflight (issue #1225): on a C1-bearing bundle, an install that is
+# not --c1-prepare-only must name the offline-signed inputs BEFORE any host
+# mutation. The post-install C1 block below keeps the authoritative check;
+# without this early gate an aborted first attempt would leave payload files
+# installed but the ownership ledger unwritten, so the documented recovery
+# (re-running with --c1-prepare-only) would then fail on "foreign" files.
+if [[ "$C1_PREPARE_ONLY" != 1 && -f "$ROOT_DIR/manifest.json" ]] && python3 - "$ROOT_DIR/manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream: value = json.load(stream)
+sys.exit(0 if "installation_policy_authority" in value else 1)
+PY
+then
+  [[ -n "$C1_POLICY_INPUT" && -n "$C1_STATE_INPUT" && -n "$C1_TRUST_INPUT" ]] || {
+    cat >&2 <<'JOURNEY'
+C1 release requires offline-signed policy/state/trust inputs.
+Two-step journey:
+  1. Prepare:  sudo packaging/install.sh --c1-prepare-only [--c1-backend sqlite|postgresql]
+               creates the recovery parent and per-installation directories
+               and prints the unsigned provisioning descriptor for the
+               offline signer.
+  2. Sign:     take the descriptor to the disconnected offline signer and
+               produce the signed policy/state/trust documents bound to it.
+  3. Install:  sudo packaging/install.sh --c1-policy POLICY --c1-state STATE --c1-trust TRUST
+               (pre-C1 installations additionally pass --c1-migrate, which
+               runs the legacy-evidence absence check before NEVER_RECOVERED)
+JOURNEY
+    exit 2; }
+fi
 if [[ "$PROFILE" == libvirt ]]; then "$ROOT_DIR/packaging/preflight.sh" --profile libvirt --data-dir "$DATA_DIR"; fi
 if [[ -z "$BINARY" ]]; then
   if [[ -x "$ROOT_DIR/bin/o3kd" ]]; then

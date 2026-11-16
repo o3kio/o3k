@@ -219,5 +219,72 @@ if [[ -d "$ROOT_DIR/bins/o3k" && ! -f "$ROOT_DIR/bins/o3k" ]]; then
   fi
 fi
 
+# ---- case 6: early ceremony gate fires before any host mutation (issue #1225) ----
+# A C1-bearing bundle without signed inputs must stop at the journey message
+# BEFORE files are installed; otherwise the first aborted attempt leaves
+# payload files without an ownership ledger and the documented --c1-prepare-only
+# recovery then fails on "foreign" files. Drives the full installer (not an
+# extracted block) against a fixture bundle.
+GATE_BUNDLE="$WORK_DIR/gate-bundle"
+mkdir -p "$GATE_BUNDLE/packaging"
+cp "$ROOT_DIR/packaging/install.sh" "$GATE_BUNDLE/packaging/install.sh"
+cp "$ROOT_DIR/packaging/preflight.sh" "$GATE_BUNDLE/packaging/preflight.sh"
+cat >"$GATE_BUNDLE/manifest.json" <<'JSON'
+{"version":"v0.4.0-rc.5","profile_id":"o3k-demo-v1","source_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","release_artifact_sha256":"1111111111111111111111111111111111111111111111111111111111111111","schema_version":"1","installation_policy_authority":{"key_id":"policy-key-1","ed25519_public_key":"2222222222222222222222222222222222222222222222222222222222222222"}}
+JSON
+printf 'placeholder\n' >"$GATE_BUNDLE/SHA256SUMS"
+set +e
+bash "$GATE_BUNDLE/packaging/install.sh" --profile fake --noninteractive \
+  --prefix "$WORK_DIR/gate-prefix" --data-dir "$WORK_DIR/gate-data" \
+  --config-dir "$WORK_DIR/gate-config" --log-dir "$WORK_DIR/gate-log" \
+  2>"$WORK_DIR/case6.stderr"
+status=$?
+set -e
+[[ $status -eq 2 ]] && ok "early gate exits 2 without signed inputs" || bad "early gate exit=$status (want 2)"
+grep -q "C1 release requires offline-signed policy/state/trust inputs" "$WORK_DIR/case6.stderr" \
+  && ok "early gate prints the journey" || bad "early gate journey missing"
+if [[ -e "$WORK_DIR/gate-prefix" || -e "$WORK_DIR/gate-data" || -e "$WORK_DIR/gate-config" || -e "$WORK_DIR/gate-log" ]]; then
+  bad "early gate mutated the host before refusing"
+else
+  ok "early gate refused before any host mutation"
+fi
+# Control: with the three inputs named, the gate passes and the run fails
+# later (missing fixture binaries), not at the gate.
+mkdir -p "$WORK_DIR/gate-inputs"
+printf 'signed-policy' >"$WORK_DIR/gate-inputs/policy.json"
+printf 'signed-state' >"$WORK_DIR/gate-inputs/state.json"
+printf 'signed-trust' >"$WORK_DIR/gate-inputs/trust.json"
+set +e
+bash "$GATE_BUNDLE/packaging/install.sh" --profile fake --noninteractive \
+  --prefix "$WORK_DIR/gate-prefix" --data-dir "$WORK_DIR/gate-data" \
+  --config-dir "$WORK_DIR/gate-config" --log-dir "$WORK_DIR/gate-log" \
+  --c1-policy "$WORK_DIR/gate-inputs/policy.json" \
+  --c1-state "$WORK_DIR/gate-inputs/state.json" \
+  --c1-trust "$WORK_DIR/gate-inputs/trust.json" \
+  2>"$WORK_DIR/case6b.stderr"
+status=$?
+set -e
+if grep -q "C1 release requires offline-signed policy/state/trust inputs" "$WORK_DIR/case6b.stderr"; then
+  bad "gate fired despite named inputs"
+else
+  ok "gate passes with named inputs"
+fi
+[[ $status -ne 2 ]] && ok "named-input run does not stop at the gate" || bad "named-input run exit=2"
+# Control: --c1-prepare-only never trips the gate.
+set +e
+bash "$GATE_BUNDLE/packaging/install.sh" --profile fake --noninteractive \
+  --prefix "$WORK_DIR/gate-prefix" --data-dir "$WORK_DIR/gate-data" \
+  --config-dir "$WORK_DIR/gate-config" --log-dir "$WORK_DIR/gate-log" \
+  --c1-prepare-only \
+  2>"$WORK_DIR/case6c.stderr"
+status=$?
+set -e
+if grep -q "C1 release requires offline-signed policy/state/trust inputs" "$WORK_DIR/case6c.stderr"; then
+  bad "gate fired under --c1-prepare-only"
+else
+  ok "--c1-prepare-only bypasses the gate"
+fi
+[[ $status -ne 2 ]] && ok "prepare-only run does not stop at the gate" || bad "prepare-only run exit=2"
+
 echo "pp6_c1_install_journey: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
