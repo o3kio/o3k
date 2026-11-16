@@ -234,25 +234,36 @@ stage_docs "$WORK/signed"
 run_install_with_docs "$EVIDENCE/install.log" \
   || { echo "authentic C1 install failed; see $EVIDENCE/install.log" >&2; exit 1; }
 
-log "asserting healthy services"
-# o3k-compute can still be converging right after enablement; wait fail-closed.
-# is-active exits 3 for non-active units and ssh propagates that, so the
-# probe must never run bare under set -e/pipefail.
-for _ in $(seq 1 24); do
-  services_state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service; true')"
-  [[ "$(sed -n 1p <<<"$services_state")" == active \
-    && "$(sed -n 2p <<<"$services_state")" == active ]] && break
-  sleep 5
-done
-printf '%s\n' "$services_state" | tee "$EVIDENCE/services-active.txt"
-if [[ "$(sed -n 1p "$EVIDENCE/services-active.txt")" != active \
-  || "$(sed -n 2p "$EVIDENCE/services-active.txt")" != active ]]; then
-  # Capture the failure for diagnosis before failing the run.
+# wait_for_services <evidence-file>: poll o3kd/o3k-compute until both are
+# active. is-active exits 3 for non-active units and ssh propagates that, so
+# the probe never runs bare under set -e/pipefail. A unit in the failed state
+# (e.g. systemd burst-limit exhaustion) never recovers by waiting: capture
+# the journals and fail immediately instead.
+wait_for_services() {
+  local outfile="$1" state
+  local i
+  for i in $(seq 1 24); do
+    state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service; true')"
+    if [[ "$(sed -n 1p <<<"$state")" == active \
+      && "$(sed -n 2p <<<"$state")" == active ]]; then
+      printf '%s\n' "$state" | tee "$outfile"
+      return 0
+    fi
+    if [[ "$state" == *failed* ]]; then
+      break
+    fi
+    sleep 5
+  done
+  printf '%s\n' "$state" | tee "$outfile"
   "${SSH[@]}" 'sudo journalctl -u o3kd.service -u o3k-compute.service --no-pager -n 80' \
     >"$EVIDENCE/service-failure-journal.txt" 2>&1 || true
   echo "services did not both become active; see service-failure-journal.txt" >&2
   exit 1
-fi
+}
+
+log "asserting healthy services"
+# o3k-compute can still be converging right after enablement; wait fail-closed.
+wait_for_services "$EVIDENCE/services-active.txt"
 "${SSH[@]}" 'curl -fsS http://127.0.0.1:18080/healthz' | tee "$EVIDENCE/o3kd-healthz.json"
 "${SSH[@]}" 'systemctl status o3kd.service --no-pager -l | head -30; echo ---; sudo journalctl -u o3kd.service -n 30 --no-pager' \
   >"$EVIDENCE/o3kd-status.txt" 2>&1
@@ -308,10 +319,7 @@ assert_denied_after_tamper tampered-trust
 assert_recovers tampered-trust
 
 "${SSH[@]}" 'sudo systemctl start o3k-compute.service'
-final_state="$("${SSH[@]}" 'systemctl is-active o3kd.service; systemctl is-active o3k-compute.service; true')"
-printf '%s\n' "$final_state" | tee "$EVIDENCE/services-final.txt"
-[[ "$(sed -n 1p "$EVIDENCE/services-final.txt")" == active ]]
-[[ "$(sed -n 2p "$EVIDENCE/services-final.txt")" == active ]]
+wait_for_services "$EVIDENCE/services-final.txt"
 
 # ---- evidence --------------------------------------------------------------
 "${SSH[@]}" 'sudo tar -C / -czf - etc/o3k/installation-policy.json etc/o3k/recovery-trust.json 2>/dev/null' \
