@@ -452,6 +452,8 @@ printf '[Unit]\\nRequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal\\nBin
 printf '[Unit]\\nRequiresMountsFor=/var/lib/o3k/state /var/lib/o3k/journal\\nBindsTo=var-lib-o3k-state.mount var-lib-o3k-journal.mount\\n' > /etc/systemd/system/o3k-compute.service.d/pp6-storage.conf
 mount /var/lib/o3k/state
 mount /var/lib/o3k/journal
+chown root:o3k "$STATE" "$JOURNAL"
+chmod 0750 "$STATE" "$JOURNAL"
 [[ "$(findmnt -n -o FSTYPE --target "$STATE")" == ext4 ]]
 [[ "$(findmnt -n -o FSTYPE --target "$JOURNAL")" == ext4 ]]
 [[ "$(findmnt -n -o SOURCE --target "$STATE")" != "$(findmnt -n -o SOURCE --target "$JOURNAL")" ]]
