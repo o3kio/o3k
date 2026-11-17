@@ -9,10 +9,10 @@ protected-harness Q1/Q2, physical edge hardware).
 
 ## Exact source and artifacts
 
-- Fix branch: `fix/1225-c1-bearing-release`, PR #1229, head at this writing
-  `970cdd27` (the branch is stacked on PR #1231's exception commit; the
+- Fix branch: `fix/1225-c1-bearing-release`, PR #1229 (the branch is stacked
+  on PR #1231's exception commit; see the PR for the current head). The
   ceremony-tested bundle was built from pre-rebase `5d763e20`, whose tree is
-  content-identical to the rebased equivalent).
+  content-identical to the rebased equivalent on the branch.
 - Blocked release: `v0.4.0-rc.27`, tag object
   `80cdab1568ef0972602214d0c4656ad70858c07e`, source
   `9427e7668afa76bf1f043c9adabe1d616cf5924a` — immutable, not retagged;
