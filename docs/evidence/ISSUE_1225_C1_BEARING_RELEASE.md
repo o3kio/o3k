@@ -15,9 +15,9 @@ o3k-compute `inactive`).
 
 Per the 2026-11-16 decision request on #1225, this change implements
 **Option A**: C1-bearing releases with operator-controlled offline signing.
-Option B (relaxing the guard) is not taken; the fail-closed startup guard
-is byte-untouched. rc.27 is not retagged or mutated; a successor tag is
-required (ADR-0185).
+Option B (relaxing the guard) is not taken. rc.27 is not retagged or mutated; a successor tag is
+required (ADR-0185). The startup guard is strengthened, not relaxed: see
+the two guard fixes below.
 
 ## Exact change set (branch fix/1225-c1-bearing-release, base fb15c27d)
 
@@ -32,7 +32,8 @@ required (ADR-0185).
   `installation_policy_format` / `installation_policy_path` /
   `installation_policy_authority` manifest block, a negative assertion that
   the default build carries no C1 fields, and five fail-closed builder
-  cases (unset/malformed key id or public key emit no manifest).
+  cases (unset/malformed key id or public key, and a flag value other than
+0/1, emit no manifest).
 - `packaging/install.sh` — fail-fast ceremony gate: a C1-bearing bundle
   without the three signed inputs now refuses before any host mutation.
   Previously the refusal happened at the post-install C1 block, after the
@@ -69,8 +70,8 @@ required (ADR-0185).
   already used. Fail-before/pass-after: the new root+namespace test
   `tampered_trust_bundle_denies_startup_observation_on_never_recovered`
   fails without the fix and passes with it; the full
-  `pp6_c1_reanchor_realfs` suite (the six pre-existing tests plus the new
-  one) passes with it.
+  `pp6_c1_reanchor_realfs` suite (the six pre-existing tests plus the two
+  added here) passes with it.
 - `bins/o3k/src/recovery_installation.rs` + `recovery_files.rs` —
   observer-identity gap found by the same guest matrix: the guard opened
   the `o3k:o3k 0700` journal directory and the `o3k:o3k-compute 0711` data

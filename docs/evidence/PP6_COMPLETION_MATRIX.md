@@ -23,8 +23,9 @@ offline signing ceremony); its decision record, change set, and
 disposable-guest ceremony evidence are in
 [`ISSUE_1225_C1_BEARING_RELEASE.md`](ISSUE_1225_C1_BEARING_RELEASE.md). rc.28
 is unpublished at this writing: its authenticated release identity, protected
-Q1/Q2 re-run, and PG16 restart/reconciliation lane remain NOT_RUN. PP.6
-remains **BLOCKED**; #975 remains OPEN.
+Q1/Q2 re-run remains NOT_RUN, and the PG16 restart/reconciliation scenario
+is not yet defined in the harness (to be added and run as part of the rc.28
+qualification). PP.6 remains **BLOCKED**; #975 remains OPEN.
 
 ## Current rc.27 E4 status (2026-11-07 after PR #1222)
 

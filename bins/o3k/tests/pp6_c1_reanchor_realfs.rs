@@ -2847,13 +2847,18 @@ fn genesis_startup_observation_supports_the_compute_identity() {
     let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
     let mut ctx = fresh_ctx();
     let installation = setup_fixture(&mut ctx, &fixture, false);
-    // o3k-compute (901:901) with the o3k group (900), matching the packaged
-    // unit's SupplementaryGroups. `doctor` runs the same startup selector the
-    // compute agent's guard uses.
+    // o3k-compute (901:901) with the o3k group (900) — the gate-relevant
+    // subset of the packaged unit's SupplementaryGroups (libvirt/kvm do not
+    // bear on it). `doctor` runs the same startup selector the compute
+    // agent's guard uses. A guard denial renders as a check summary of
+    // "canonical store access denied: installation authority: <reason>"
+    // (main.rs doctor_access_denied); a store-lock failure uses the same
+    // prefix without "installation authority:", so the assertions key on the
+    // guard-denial marker, not the prefix alone.
     let as_compute = "setpriv --reuid=901 --regid=901 --groups=900 {binary} doctor --json";
     let (stdout, stderr, _) = run_in_namespace(&fixture, as_compute, &[]);
     assert!(
-        stdout.contains("\"checks\""),
+        stdout.contains("\"checks\"") && !stdout.contains("installation authority:"),
         "compute identity must pass genesis startup observation: {stdout} {stderr}"
     );
 
@@ -2868,8 +2873,8 @@ fn genesis_startup_observation_supports_the_compute_identity() {
     fs::write(&trust_path, &tampered).unwrap();
     let (stdout, _, _) = run_in_namespace(&fixture, as_compute, &[]);
     assert!(
-        stdout.contains(DENIED_PREFIX),
-        "tampered trust must deny the compute identity: {stdout}"
+        stdout.contains("installation authority:"),
+        "tampered trust must deny the compute identity at the guard: {stdout}"
     );
     assert!(
         doctor_denial(&stdout).contains("trust"),
@@ -2890,8 +2895,8 @@ fn genesis_startup_observation_supports_the_compute_identity() {
     fs::set_permissions(&journal, fs::Permissions::from_mode(0o700)).unwrap();
     let (stdout, _, _) = run_in_namespace(&fixture, as_compute, &[]);
     assert!(
-        stdout.contains(DENIED_PREFIX),
-        "substituted journal directory must deny the compute identity: {stdout}"
+        stdout.contains("installation authority:"),
+        "substituted journal directory must deny the compute identity at the guard: {stdout}"
     );
     assert!(
         doctor_denial(&stdout).contains("journal"),

@@ -2052,12 +2052,16 @@ fn open_data_root(
         policy.target_inode,
     ) {
         Ok(directory) => Ok(Some(directory)),
-        Err(_) => {
+        Err(crate::recovery_files::RecoveryFileError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
             // Observer identities (e.g. the compute service user) cannot open
             // the o3k:o3k-compute 0711 data root for reading; they may only
             // traverse it. The startup guard only needs the policy-bound
             // identity, so fall back to metadata-only observation — still
-            // fail-closed on any identity change.
+            // fail-closed on any identity change. Only permission denials
+            // fall back: every other error (including identity mismatches)
+            // stays fatal.
             observe_directory_identity(
                 data_dir,
                 &postures,
@@ -2066,6 +2070,7 @@ fn open_data_root(
             )?;
             Ok(None)
         }
+        Err(error) => Err(error),
     }
 }
 
