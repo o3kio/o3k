@@ -111,9 +111,12 @@ guard and all C1 verifiers are unchanged.
   `/healthz` returned `{"status":"ok"}`; every negative was rejected —
   tampered policy/state/trust at install (provisioning rejection), and
   tampered installed policy, missing state high-water, and tampered
-  installed trust at startup, with recovery after each restore. Two
-  consecutive full runs passed after the guard fix; one earlier run exposed
-  and fixed the genesis-startup trust-authentication gap above. This is
+  installed trust at startup, with recovery after each restore. The matrix
+  exposed and fixed two further real defects during development (the
+  installer mid-abort foreign-file trap and the observer-identity startup
+  gap). On the final bundle (source `3f096a36`, archive SHA-256
+  `c9c59ec3c3917b5e7e8ddd8c759c131a5e2cf7e52ac034aadc06c2124e9c7430`) two
+  consecutive full ceremony runs passed every assertion. This is
   disposable-guest qualification evidence, not the protected-harness
   installed Q1/Q2 (which remains NOT_RUN until rc.28 is published).
 
