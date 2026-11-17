@@ -10,8 +10,9 @@ protected-harness Q1/Q2, physical edge hardware).
 ## Exact source and artifacts
 
 - Fix branch: `fix/1225-c1-bearing-release`, PR #1229, head at this writing
-  `fd0b724a` (code-identical to `5d763e20`, the ceremony-tested head; later
-  commits are docs-only).
+  `970cdd27` (the branch is stacked on PR #1231's exception commit; the
+  ceremony-tested bundle was built from pre-rebase `5d763e20`, whose tree is
+  content-identical to the rebased equivalent).
 - Blocked release: `v0.4.0-rc.27`, tag object
   `80cdab1568ef0972602214d0c4656ad70858c07e`, source
   `9427e7668afa76bf1f043c9adabe1d616cf5924a` — immutable, not retagged;
@@ -23,8 +24,9 @@ protected-harness Q1/Q2, physical edge hardware).
   throwaway qualification authority `c1qual-policy-2026-11`.
 - Companion: PR #1231 (`fix/supply-chain-rustsec-2026-0543`) — reviewed
   exception for the new chrono unmaintained advisory that otherwise fails
-  every CI run since 2026-11-17. #1229 needs it merged (or an equivalent)
-  before its CI can go green.
+  every CI run since 2026-11-17. #1229 is stacked on #1231's commit so its
+  CI is green now; after #1231 merges, #1229 rebases onto main with no
+  content change.
 
 ## What is proven (local, disposable-guest, qualification-only keys)
 
