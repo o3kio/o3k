@@ -141,9 +141,12 @@ expected_exceptions = [
             "The advisory marks chrono unmaintained; it carries no vulnerability. "
             "The workspace uses chrono only for UTC timestamps, RFC 3339 "
             "formatting/parsing of O3K's own generated documents, and SQLx date/time "
-            "mapping (sqlite/postgres); no untrusted input is parsed. No maintained "
-            "drop-in replacement covers the sqlx 0.8 chrono feature today, so an "
-            "upgrade cannot clear the advisory."
+            "mapping (sqlite/postgres); the only caller-supplied parsing is "
+            "safe-Rust RFC 3339 validation of metering window bounds on the "
+            "authenticated metering usage endpoint. No maintained drop-in "
+            "replacement covers the sqlx 0.8 chrono feature today (sqlx's `time` "
+            "feature would be a non-drop-in migration), so an upgrade cannot clear "
+            "the advisory."
         ),
         "review_trigger": (
             "Remove when the workspace migrates off chrono or sqlx no longer "
