@@ -117,9 +117,11 @@ observer-identity metadata verification), never relaxed.
   installed trust at startup, with recovery after each restore. The matrix
   exposed and fixed two further real defects during development (the
   installer mid-abort foreign-file trap and the observer-identity startup
-  gap). On the final bundle (source `3f096a36`, archive SHA-256
-  `c9c59ec3c3917b5e7e8ddd8c759c131a5e2cf7e52ac034aadc06c2124e9c7430`) two
-  consecutive full ceremony runs passed every assertion. This is
+  gap). On the final bundle (source `5d763e20`, archive SHA-256
+  `1ccde68861b38753fad438d25c9a8a6ae98abc8192db5c42a9c3c08d814c0235`) a full
+  ceremony run passed every assertion, and two further consecutive full
+  passes were recorded on the intermediate head that differed only in the
+  journal fallback's error-class restriction. This is
   disposable-guest qualification evidence, not the protected-harness
   installed Q1/Q2 (which remains NOT_RUN until rc.28 is published).
 
