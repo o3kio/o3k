@@ -71,6 +71,19 @@ required (ADR-0185).
   fails without the fix and passes with it; the full
   `pp6_c1_reanchor_realfs` suite (the six pre-existing tests plus the new
   one) passes with it.
+- `bins/o3k/src/recovery_installation.rs` + `recovery_files.rs` —
+  observer-identity gap found by the same guest matrix: the guard opened
+  the `o3k:o3k 0700` journal directory and the `o3k:o3k-compute 0711` data
+  root with fd-anchored reads for every consumer, so the compute service
+  identity (traverse-only) could never start on a provisioned C1
+  installation. SPEC-0050 §7.2.1 gives a NEVER_RECOVERED installation no
+  recovery-journal dependency, so the guard now falls back to fail-closed
+  metadata-only identity verification for callers that cannot open those
+  directories; content access still requires the authority to open them.
+  Fail-before/pass-after:
+  `genesis_startup_observation_supports_the_compute_identity` fails before
+  and passes after, including tampered-trust and substituted-journal-dir
+  negatives for the compute identity.
 
 ## Security/architecture acceptance request
 
