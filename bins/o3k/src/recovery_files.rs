@@ -21,6 +21,45 @@ use sha2::{Digest, Sha256};
 
 const EXT4_MAGIC: u64 = 0xef53;
 
+/// Metadata-only identity observation for a protected directory the caller
+/// may not open (for example the `o3k:o3k 0700` journal directory observed by
+/// the compute service identity at genesis startup; SPEC-0050 §7.2.1 gives a
+/// NEVER_RECOVERED installation no recovery-journal dependency). Performs the
+/// same path, ancestor, filesystem, posture, and device/inode binding checks
+/// as `ProtectedDirectory::open` without opening the directory. The fallback
+/// is fail-closed: any identity mismatch is an error; processes that later
+/// need the contents must open the directory with the authority to do so.
+pub(crate) fn observe_directory_identity(
+    path: &Path,
+    postures: &[DirectoryPosture],
+    device: u64,
+    inode: u64,
+) -> Result<(), RecoveryFileError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(RecoveryFileError::Unsafe("directory path"));
+    }
+    check_ancestors(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    let fsstat = rustix::fs::statfs(path)?;
+    if metadata.file_type().is_symlink()
+        || fsstat.f_type != EXT4_MAGIC as i64
+        || !is_dev_ext4(metadata.dev())
+        || !metadata.is_dir()
+        || !postures.iter().any(|p| {
+            p.uid == metadata.uid() && p.gid == metadata.gid() && p.mode == metadata.mode() & 0o7777
+        })
+        || metadata.dev() != device
+        || metadata.ino() != inode
+    {
+        return Err(RecoveryFileError::Unsafe("directory identity"));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum RecoveryFileError {
     Io(io::Error),

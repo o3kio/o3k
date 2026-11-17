@@ -6,7 +6,7 @@ use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    recovery_files::{DirectoryPosture, ProtectedDirectory},
+    recovery_files::{DirectoryPosture, ProtectedDirectory, observe_directory_identity},
     recovery_identity::{self as identity, InstallationPolicy, InstallationState, RecoveryState},
     recovery_reanchor as reanchor,
     recovery_reanchor::{GenerationView, ReanchorError, RotationArea, RotationStore},
@@ -1089,17 +1089,40 @@ impl InstalledRecovery {
         )
         .map_err(|_| "protected recovery state directory is unsafe")?;
         let journal_directory = match fs::symlink_metadata(&policy.journal_directory) {
-            Ok(_) => Some(
-                ProtectedDirectory::open(
-                    Path::new(&policy.journal_directory),
-                    uid,
-                    gid,
-                    0o700,
-                    policy.journal_device,
-                    policy.journal_inode,
-                )
-                .map_err(|_| "recovery journal identity or protection changed")?,
-            ),
+            Ok(_) => match ProtectedDirectory::open(
+                Path::new(&policy.journal_directory),
+                uid,
+                gid,
+                0o700,
+                policy.journal_device,
+                policy.journal_inode,
+            ) {
+                Ok(directory) => Some(directory),
+                Err(_) => {
+                    // The compute service identity cannot open the o3k:o3k
+                    // 0700 journal directory, and a NEVER_RECOVERED
+                    // installation has no recovery-journal dependency
+                    // (SPEC-0050 §7.2.1). Fall back to metadata-only identity
+                    // verification — still fail-closed on any identity
+                    // change — and leave the handle absent; designation,
+                    // rotation, and migration re-open the directory in
+                    // processes with the authority to do so, and a designated
+                    // or re-anchored generation still requires the handle
+                    // below.
+                    observe_directory_identity(
+                        Path::new(&policy.journal_directory),
+                        &[DirectoryPosture {
+                            uid,
+                            gid,
+                            mode: 0o700,
+                        }],
+                        policy.journal_device,
+                        policy.journal_inode,
+                    )
+                    .map_err(|_| "recovery journal identity or protection changed")?;
+                    None
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err("recovery journal identity cannot be observed"),
         };
@@ -1249,7 +1272,7 @@ impl InstalledRecovery {
                     .ok(),
                 tip_is_reanchor: tip_format == reanchor::REANCHOR_FORMAT,
                 state_directory,
-                _data_directory: Some(data_directory),
+                _data_directory: data_directory,
                 journal_directory,
             });
         }
@@ -1551,10 +1574,8 @@ impl InstalledRecovery {
         {
             return Err("installation policy does not match canonical identity");
         }
-        installed._data_directory = Some(
-            open_data_root(data_dir, uid, gid, &installed.policy)
-                .map_err(|_| "recovery target identity or protection changed")?,
-        );
+        installed._data_directory = open_data_root(data_dir, uid, gid, &installed.policy)
+            .map_err(|_| "recovery target identity or protection changed")?;
         Ok(installed)
     }
 
@@ -2022,13 +2043,30 @@ fn open_data_root(
     uid: u32,
     gid: u32,
     policy: &InstallationPolicy,
-) -> std::result::Result<ProtectedDirectory, crate::recovery_files::RecoveryFileError> {
-    ProtectedDirectory::open_accepted(
+) -> std::result::Result<Option<ProtectedDirectory>, crate::recovery_files::RecoveryFileError> {
+    let postures = data_root_postures(uid, gid, compute_group_gid().ok());
+    match ProtectedDirectory::open_accepted(
         data_dir,
-        &data_root_postures(uid, gid, compute_group_gid().ok()),
+        &postures,
         policy.target_device,
         policy.target_inode,
-    )
+    ) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(_) => {
+            // Observer identities (e.g. the compute service user) cannot open
+            // the o3k:o3k-compute 0711 data root for reading; they may only
+            // traverse it. The startup guard only needs the policy-bound
+            // identity, so fall back to metadata-only observation — still
+            // fail-closed on any identity change.
+            observe_directory_identity(
+                data_dir,
+                &postures,
+                policy.target_device,
+                policy.target_inode,
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 /// The closed set of accepted data-root postures.  Without a resolvable
