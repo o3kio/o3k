@@ -11,7 +11,7 @@ ignore = [
   # Reviewed exception; see docs/supply-chain/advisory-exceptions.yaml. The
   # governance test tests/supply-chain-governance.sh ties this suppression to
   # the locked chrono 0.4.45 package and fails closed on drift.
-  { id = "RUSTSEC-2026-0543", reason = "chrono is flagged unmaintained, not vulnerable; O3K uses it only for UTC timestamps, RFC 3339 formatting/parsing of its own documents, and SQLx date/time mapping, with the only caller-supplied parsing is safe-Rust RFC 3339 validation of metering window bounds on the authenticated metering usage endpoint; no maintained drop-in replacement covers the sqlx 0.8 chrono feature" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono is flagged unmaintained, not vulnerable; O3K uses it only for UTC timestamps, RFC 3339 formatting/parsing of its own documents, and SQLx date/time mapping; the only caller-supplied parsing is safe-Rust RFC 3339 validation of metering window bounds on the authenticated metering usage endpoint; no maintained drop-in replacement covers the sqlx 0.8 chrono feature" },
 ]
 
 [licenses]
