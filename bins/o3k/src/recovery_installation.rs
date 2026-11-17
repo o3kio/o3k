@@ -1098,7 +1098,9 @@ impl InstalledRecovery {
                 policy.journal_inode,
             ) {
                 Ok(directory) => Some(directory),
-                Err(_) => {
+                Err(crate::recovery_files::RecoveryFileError::Io(error))
+                    if error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
                     // The compute service identity cannot open the o3k:o3k
                     // 0700 journal directory, and a NEVER_RECOVERED
                     // installation has no recovery-journal dependency
@@ -1108,7 +1110,8 @@ impl InstalledRecovery {
                     // rotation, and migration re-open the directory in
                     // processes with the authority to do so, and a designated
                     // or re-anchored generation still requires the handle
-                    // below.
+                    // below. Only permission denials fall back: every other
+                    // error (including identity mismatches) stays fatal.
                     observe_directory_identity(
                         Path::new(&policy.journal_directory),
                         &[DirectoryPosture {
@@ -1122,6 +1125,7 @@ impl InstalledRecovery {
                     .map_err(|_| "recovery journal identity or protection changed")?;
                     None
                 }
+                Err(_) => return Err("recovery journal identity or protection changed"),
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err("recovery journal identity cannot be observed"),

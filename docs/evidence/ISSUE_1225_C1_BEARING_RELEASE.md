@@ -31,7 +31,7 @@ the two guard fixes below.
 - `tests/packaging-bundle.sh` — positive test asserting the exact
   `installation_policy_format` / `installation_policy_path` /
   `installation_policy_authority` manifest block, a negative assertion that
-  the default build carries no C1 fields, and five fail-closed builder
+  the default build carries no C1 fields, and six fail-closed builder
   cases (unset/malformed key id or public key, and a flag value other than
 0/1, emit no manifest).
 - `packaging/install.sh` — fail-fast ceremony gate: a C1-bearing bundle
@@ -93,8 +93,10 @@ this PR's head commit. Acceptance per ADR-0190 is constituted by the named
 reviewer's approval of this PR at its exact head plus the protected merge
 SHA; the plan was recorded on #1225 before implementation
 (comment 2026-11-16). No private key material is introduced anywhere; no
-policy, state, or trust document is synthesized by CI; the packaged-path
-guard and all C1 verifiers are unchanged.
+policy, state, or trust document is synthesized by CI; the C1 verifiers
+(`recovery_identity.rs`, `recovery_trust.rs`) are unchanged, and the
+packaged-path guard is strengthened (trust authentication at genesis;
+observer-identity metadata verification), never relaxed.
 
 ## Evidence
 
