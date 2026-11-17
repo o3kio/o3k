@@ -21,7 +21,11 @@ not retagged. The successor is `v0.4.0-rc.28` via branch
 `fix/1225-c1-bearing-release` (Option A: C1-bearing release + operator
 offline signing ceremony); its decision record, change set, and
 disposable-guest ceremony evidence are in
-[`ISSUE_1225_C1_BEARING_RELEASE.md`](ISSUE_1225_C1_BEARING_RELEASE.md). rc.28
+[`ISSUE_1225_C1_BEARING_RELEASE.md`](ISSUE_1225_C1_BEARING_RELEASE.md); the
+disposable-edge-pilot gate status is in
+[`ISSUE_1225_RC28_EDGE_PILOT_GO_NOGO.md`](ISSUE_1225_RC28_EDGE_PILOT_GO_NOGO.md)
+(current verdict: NO-GO until the published rc.28 exists and protected Q1/Q2
+passes). rc.28
 is unpublished at this writing: its authenticated release identity, protected
 Q1/Q2 re-run remains NOT_RUN, and the PG16 restart/reconciliation scenario
 is not yet defined in the harness (to be added and run as part of the rc.28
