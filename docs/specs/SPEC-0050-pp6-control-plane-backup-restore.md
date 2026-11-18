@@ -1045,6 +1045,18 @@ startup. All store-opening maintenance commands apply the same check. The
 lifetime store-access lock remains held from before the check through process
 shutdown.
 
+Accepted clarification by owner decision
+[on #1225](https://github.com/o3kio/o3k/issues/1225) (2026-11-18): genesis
+(`NEVER_RECOVERED`) startup additionally authenticates the installed trust
+material digest-only — the policy-bound installed trust-bundle digest and the
+durable high-water generation's signatures, installation scope, trust roots,
+signer certificates, and revocation monotonicity must verify, so missing,
+substituted, or tampered trust material denies startup — but it must not
+require journal revocation freshness, certificate liveness, or
+active-signer revocation before recovery has been designated. All freshness,
+revocation, and anti-rollback requirements remain mandatory for designated
+or previously recovered installations.
+
 For an installation upgraded from a release that lacks this record, an
 installer migration runs before systemd can start `o3kd`. It may initialize
 `NEVER_RECOVERED` only after the installation identity and release verify and

@@ -120,11 +120,16 @@ Envelope shape for signed documents: `{"payload": {...}, "envelope":
 the signature covers the canonical payload bytes only. Signed files must be
 byte-exact canonical JSON with no trailing whitespace.
 
-**Freshness is operational, not ceremonial:** startup re-verifies the trust
+**Freshness is operational from first designation, not ceremonial:** a
+`NEVER_RECOVERED` genesis installation authenticates the installed trust
+bundle digest-only at startup (policy-bound digest, durable high-water
+signatures, scope, and monotonicity — tamper detection without freshness
+gating, per SPEC-0050 §7.2.1 and the 2026-11-18 owner decision on #1225).
+Once recovery has been designated, every service start re-verifies the trust
 bundle's revocation freshness (`now < next_update`, at most 24 hours) and
-certificate validity (at most 90 days) on every service start. Plan the
-24-hour revocation refresh (`o3k recovery-trust-update --policy …
---trust …`) and certificate rotation before relying on an installation.
+certificate validity (at most 90 days). Plan the 24-hour revocation refresh
+(`o3k recovery-trust-update --policy … --trust …`) and certificate rotation
+before designating recovery on an installation.
 
 ## Step 3 — install (on the target host)
 
@@ -166,9 +171,12 @@ curl -fsS http://127.0.0.1:18080/healthz               # {"status":"ok"}
 
 Expected fail-closed behavior (all must deny startup): missing or tampered
 `/etc/o3k/installation-policy.json` or `/etc/o3k/recovery-trust.json`,
-missing or tampered checkpoints under `/var/lib/o3k-recovery-state/`, a
-policy whose release identity does not match the installed release, or a
-stale (older than 24 hours) revocation document.
+missing or tampered checkpoints under `/var/lib/o3k-recovery-state/`, or a
+policy whose release identity does not match the installed release. On a
+designated or previously recovered installation, a stale (older than 24
+hours) revocation document also denies startup; a `NEVER_RECOVERED`
+installation is not freshness-gated but still denies tampered trust
+material.
 
 ## Reference implementation for qualification
 

@@ -81,13 +81,14 @@ installation.
 
 ## Residual risks
 
-- **SPEC-0050 §7.2.1 tension (reviewer decision pending)**: genesis startup
-  now authenticates installed trust (24 h revocation freshness); the spec
-  text says a NEVER_RECOVERED installation has no journal-trust dependency.
-  The PR records the digest-only smallest alternative. If the reviewer
-  chooses the alternative, rc.28 needs one more respin.
-- **24 h trust refresh cadence**: any installation that outlives a day needs
-  `o3k recovery-trust-update` operations; documented in
+- **SPEC-0050 §7.2.1 tension RESOLVED (owner decision on #1225, 2026-11-18)**:
+  the digest-only variant was requested. Genesis startup authenticates
+  installed trust digest-only (tamper detection without freshness gating);
+  designated or previously recovered installations keep the full freshness/
+  revocation gate. The correction PR implements exactly that scope, so rc.28
+  carries it from the protected merge.
+- **24 h trust refresh cadence**: any installation that enters recovery
+  designation needs `o3k recovery-trust-update` operations; documented in
   `docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md`.
 - **v2 selector observer gap**: #1230 (unreachable in rc.28).
 - **One-line installer**: by design it stops at the C1 journey message on

@@ -2801,10 +2801,140 @@ fn revocation_refresh_resumes_after_archive_and_is_repeatable() {
     fs::remove_dir_all(&fixture).unwrap();
 }
 
+/// Returns the era1 bundle bytes with the journal revocation document
+/// advanced to `sequence` at `issued_at`, re-signed by the era1 journal root
+/// and re-bound through the bundle sequence/digest fields — the same shape an
+/// accepted `recovery-trust-update` refresh publishes to the durable
+/// high-water.
+fn refreshed_trust_bytes(
+    installation: &Installation,
+    sequence: u64,
+    issued_at: i64,
+    revoked_key_ids: Vec<String>,
+) -> Vec<u8> {
+    let mut bundle = installation.era1_bundle.bundle.clone();
+    let mut revocations = bundle.journal_revocations.payload.clone();
+    revocations.sequence = sequence;
+    revocations.issued_at = issued_at;
+    revocations.next_update = issued_at + 86_400;
+    revocations.revoked_key_ids = revoked_key_ids;
+    bundle.journal_revocations = signed_revocations(
+        &revocations,
+        &installation.era1.journal_root,
+        &installation.era1.journal_root_id,
+    );
+    bundle.journal_revocation_sequence = revocations.sequence;
+    bundle.journal_revocation_digest =
+        o3k::recovery_identity::digest(&bundle.journal_revocations).expect("digest");
+    o3k::recovery_identity::canonical(&bundle).expect("canonical bundle")
+}
+
+/// Digest-only genesis trust semantics (SPEC-0050 §7.2.1; owner decision on
+/// #1225, 2026-11-18): a NEVER_RECOVERED installation whose durable trust
+/// high-water has advanced to a properly root-signed but freshness-stale
+/// revocation generation must still pass startup observation — revocation
+/// freshness gates startup only once recovery has been designated. Tampered
+/// (unsigned) durable trust material must still deny startup, and restoring
+/// the authenticated bytes must observe startup again.
+#[test]
+#[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
+fn stale_trust_freshness_does_not_deny_never_recovered_genesis() {
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
+    let mut ctx = fresh_ctx();
+    let installation = setup_fixture(&mut ctx, &fixture, false);
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        !stdout.contains(DENIED_PREFIX),
+        "authentic never-recovered installation must pass startup observation: {stdout}"
+    );
+
+    // Durable trust refreshed to a signed generation whose revocation
+    // freshness deadline has passed (issued three days ago, refresh due two
+    // days ago). Monotonicity anchors still hold (sequence 2 > installed
+    // sequence 1); only the freshness clock is stale.
+    let trust_high_water = installation.state_root.join("trust.json");
+    let fresh = fs::read(&trust_high_water).unwrap();
+    let stale = refreshed_trust_bytes(&installation, 2, ctx.now - 3 * 86_400, vec![]);
+    fs::write(&trust_high_water, &stale).unwrap();
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        !stdout.contains(DENIED_PREFIX),
+        "freshness-stale but authenticated trust must not deny genesis startup: {stdout}"
+    );
+
+    // Tampered durable trust still denies genesis startup and names the
+    // trust material: digest-only authentication is not trust-blind.
+    let mut tampered = stale.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    fs::write(&trust_high_water, &tampered).unwrap();
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        stdout.contains(DENIED_PREFIX),
+        "tampered durable trust must deny genesis startup: {stdout}"
+    );
+    assert!(
+        doctor_denial(&stdout).contains("trust"),
+        "the denial must name the trust material: {stdout}"
+    );
+
+    // Restoring the authenticated stale generation observes startup again;
+    // restoring the original generation does too.
+    fs::write(&trust_high_water, &stale).unwrap();
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        !stdout.contains(DENIED_PREFIX),
+        "restored authenticated trust must observe genesis startup: {stdout}"
+    );
+    fs::write(&trust_high_water, &fresh).unwrap();
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        !stdout.contains(DENIED_PREFIX),
+        "original trust generation must observe genesis startup: {stdout}"
+    );
+    fs::remove_dir_all(&fixture).unwrap();
+}
+
+/// The digest-only relaxation is genesis-only: on a designated installation
+/// the same freshness-stale durable trust generation must still deny startup
+/// with the staleness reason, and refreshing to a live generation must
+/// restore the ordinary designation denial (proving freshness was the only
+/// blocker).
+#[test]
+#[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
+fn stale_trust_freshness_still_denies_designated_startup() {
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
+    let mut ctx = fresh_ctx();
+    let installation = setup_fixture(&mut ctx, &fixture, true);
+    let trust_high_water = installation.state_root.join("trust.json");
+
+    let stale = refreshed_trust_bytes(&installation, 2, ctx.now - 3 * 86_400, vec![]);
+    fs::write(&trust_high_water, &stale).unwrap();
+    let (stdout, status) = doctor(&fixture, false);
+    assert!(!status.success());
+    assert!(
+        doctor_denial(&stdout).contains("stale, expired, revoked or conflicting"),
+        "designated startup must keep the revocation-freshness gate: {stdout}"
+    );
+
+    let live = refreshed_trust_bytes(&installation, 3, ctx.now - 100, vec![]);
+    fs::write(&trust_high_water, &live).unwrap();
+    let (stdout, status) = doctor(&fixture, false);
+    assert!(!status.success());
+    assert!(
+        doctor_denial(&stdout).contains(DENIAL),
+        "fresh trust on a designated installation must deny for designation, not staleness: {stdout}"
+    );
+    fs::remove_dir_all(&fixture).unwrap();
+}
+
 /// A tampered installed trust bundle must deny startup observation even on a
 /// NEVER_RECOVERED genesis installation (#1225): the signed policy binds the
-/// exact trust bytes, and startup must fail closed on replaced or stale trust
-/// material instead of deferring the failure to first designation.
+/// exact trust bytes, and startup must fail closed on replaced trust material
+/// instead of deferring the failure to first designation. Freshness staleness
+/// alone does not deny genesis startup (SPEC-0050 §7.2.1 digest-only genesis
+/// semantics, owner decision 2026-11-18); that is covered by
+/// `stale_trust_freshness_does_not_deny_never_recovered_genesis`.
 #[test]
 #[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
 fn tampered_trust_bundle_denies_startup_observation_on_never_recovered() {

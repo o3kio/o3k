@@ -137,15 +137,26 @@ observer-identity metadata verification), never relaxed.
   replacement/revocation).
 - PP.5/PP.6/PP.7 umbrella issues remain open; this change claims no
   certification.
-- Normative tension recorded for the reviewer: SPEC-0050 §7.2.1 says a
+- Normative tension RESOLVED by owner decision on #1225 (2026-11-18,
+  senolcolak): the digest-only variant is requested. SPEC-0050 §7.2.1 says a
   NEVER_RECOVERED installation "has no recovery-journal or installed
-  journal-trust dependency"; the genesis-startup `load_trust` call makes
-  startup authenticate trust (including 24 h revocation freshness) before
-  any designation. This branch treats that as a fail-closed tightening
-  required by the #1225 successor acceptance ("negative tests for
-  missing/tampered C1 policy and stale identities"); the reviewer must
-  ACCEPT the tightening, or ask for the digest-only variant (tamper
-  detection without freshness gating) recorded as the smallest alternative.
+  journal-trust dependency"; genesis startup therefore authenticates the
+  installed trust generation digest-only (policy-bound bundle digest, durable
+  high-water signatures, scope, and monotonicity — tamper detection without
+  freshness gating) and must not require journal revocation freshness before
+  recovery has been designated. Strict freshness, revocation, and
+  anti-rollback checks remain mandatory for designated or previously
+  recovered installations (`load_trust` is unchanged on those paths).
+  Implemented in `bins/o3k/src/recovery_installation.rs`
+  (`authenticate_genesis_trust` vs `load_trust`) with fail-before/pass-after
+  realfs evidence:
+  `stale_trust_freshness_does_not_deny_never_recovered_genesis` fails on the
+  pre-correction head (denied with "stale, expired, revoked or conflicting")
+  and passes with the correction;
+  `stale_trust_freshness_still_denies_designated_startup` proves the
+  designated path keeps the freshness gate; the pre-existing
+  `tampered_trust_bundle_denies_startup_observation_on_never_recovered` and
+  `genesis_startup_observation_supports_the_compute_identity` still pass.
 - Operators must budget the 24 h revocation refresh cadence
-  (`o3k recovery-trust-update`) for any installation that outlives a day
-  (docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md).
+  (`o3k recovery-trust-update`) for any installation that enters recovery
+  designation (docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md).
