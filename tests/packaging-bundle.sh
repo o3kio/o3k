@@ -263,8 +263,81 @@ assert manifest.get("installer_asset") == "install.sh", manifest
 assert manifest.get("installer_sha256") == sys.argv[2], manifest
 assert manifest.get("schema_version") == sys.argv[3], manifest
 assert manifest.get("upgrade_from", {}).get("min_version") == "0.0.1-prev", manifest
+# Without O3K_C1_INSTALLATION_POLICY_ENABLED the manifest must not carry any
+# C1 installation-policy field (issue #1225: the flag is the only source).
+for key in ("installation_policy_format", "installation_policy_path", "installation_policy_authority"):
+    assert key not in manifest, manifest
 PY
   echo "install.sh release asset contract passed (byte-identity + manifest installer_sha256 + schema_version + upgrade_from.min_version)"
+
+  # ---- C1 installation policy manifest emission (issue #1225, Option A) ----
+  # The protected release workflow sets O3K_C1_INSTALLATION_POLICY_ENABLED=1
+  # with the operator-held public key; the builder must then emit exactly the
+  # authority block the startup guard authenticates, and fail closed on any
+  # missing or malformed input.
+  C1_KEY_ID="qualification-policy-key-2026-11"
+  C1_PUBKEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  C1_DIST="$WORK_DIR/c1-dist"
+  O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
+  O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID" \
+  O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="$C1_PUBKEY" \
+  O3K_UPGRADE_FROM_MIN_VERSION=0.0.1-prev \
+  O3K_RELEASE_DIST_DIR="$C1_DIST" \
+  O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
+    bash "$ROOT_DIR/packaging/make-release.sh" "$ASSET_VERSION" fake
+  python3 - "$C1_DIST/o3k-$ASSET_VERSION/manifest.json" "$C1_KEY_ID" "$C1_PUBKEY" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+assert manifest.get("installation_policy_format") == "o3k-installation-policy-v1", manifest
+assert manifest.get("installation_policy_path") == "/etc/o3k/installation-policy.json", manifest
+authority = manifest.get("installation_policy_authority")
+assert authority == {"key_id": sys.argv[2], "ed25519_public_key": sys.argv[3]}, manifest
+PY
+  echo "C1 manifest emission passed (format + path + authority key_id/public key)"
+
+  c1_expect_refusal() {
+    local name="$1" expect="$2"
+    shift 2
+    if env "$@" O3K_UPGRADE_FROM_MIN_VERSION=0.0.1-prev \
+        O3K_RELEASE_DIST_DIR="$WORK_DIR/c1-bad-$name" \
+        O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
+        bash "$ROOT_DIR/packaging/make-release.sh" "$ASSET_VERSION" fake \
+        2>"$WORK_DIR/c1-bad-$name.err"; then
+      echo "release builder accepted $name" >&2
+      exit 1
+    fi
+    grep -Fq "$expect" "$WORK_DIR/c1-bad-$name.err" \
+      || { echo "missing fail-closed message for $name" >&2; exit 1; }
+    [[ ! -e "$WORK_DIR/c1-bad-$name/o3k-$ASSET_VERSION/manifest.json" ]] \
+      || { echo "release builder emitted a manifest for $name" >&2; exit 1; }
+  }
+  c1_expect_refusal unset-key-id "invalid C1 policy key id" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
+    O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="$C1_PUBKEY"
+  c1_expect_refusal unset-public-key "invalid C1 policy public key" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
+    O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID"
+  c1_expect_refusal unsafe-key-id "invalid C1 policy key id" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
+    O3K_C1_INSTALLATION_POLICY_KEY_ID='bad"key' \
+    O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="$C1_PUBKEY"
+  c1_expect_refusal short-public-key "invalid C1 policy public key" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
+    O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID" \
+    O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="0123abcd"
+  c1_expect_refusal uppercase-public-key "invalid C1 policy public key" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=1 \
+    O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID" \
+    O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+  # A flag value other than exactly 0/1 must fail closed, never silently
+  # produce a non-C1 release (#1225 review).
+  c1_expect_refusal flag-typo "O3K_C1_INSTALLATION_POLICY_ENABLED must be 0 or 1" \
+    O3K_C1_INSTALLATION_POLICY_ENABLED=yes \
+    O3K_C1_INSTALLATION_POLICY_KEY_ID="$C1_KEY_ID" \
+    O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY="$C1_PUBKEY"
+  echo "C1 fail-closed builder cases passed (unset/malformed key id and public key)"
 else
   echo "skipping install.sh asset build assertions: source tree is not clean"
 fi

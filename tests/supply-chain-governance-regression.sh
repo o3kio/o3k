@@ -77,3 +77,39 @@ if ! grep -Fq \
 fi
 
 echo "supply-chain libsqlite3-sys exception regression passed"
+
+cp "${ROOT_DIR}/Cargo.lock" "${temporary_dir}/Cargo.lock"
+
+python3 - "${temporary_dir}/Cargo.lock" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+contents = path.read_text(encoding="utf-8")
+updated, replacements = re.subn(
+    r'(\[\[package\]\]\nname = "chrono"\nversion = ")0\.4\.45(")',
+    r"\g<1>0.4.46\g<2>",
+    contents,
+    count=1,
+)
+if replacements != 1:
+    raise SystemExit("could not construct the chrono drift lockfile regression")
+path.write_text(updated, encoding="utf-8")
+PY
+
+if O3K_SUPPLY_CHAIN_CARGO_LOCK="${temporary_dir}/Cargo.lock" \
+    bash "${ROOT_DIR}/tests/supply-chain-governance.sh" \
+    >"${temporary_dir}/validator-chrono.log" 2>&1; then
+    echo "supply-chain governance accepted a drifted chrono under the exception" >&2
+    exit 1
+fi
+if ! grep -Fq \
+    "RUSTSEC-2026-0543 exception requires exactly one locked chrono 0.4.45" \
+    "${temporary_dir}/validator-chrono.log"; then
+    cat "${temporary_dir}/validator-chrono.log" >&2
+    echo "supply-chain governance rejected the drifted lockfile for an unexpected reason" >&2
+    exit 1
+fi
+
+echo "supply-chain chrono exception regression passed"

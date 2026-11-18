@@ -10,6 +10,27 @@ new tests. Historical Debian 12 runs and dated snapshot evidence below are
 preserved as recorded; they are not Debian 13 evidence. This does not claim
 Debian 13 installed-platform support.
 
+## Superseding status (2026-11-16, issue #1225)
+
+The "Current rc.27 E4 status" section below is historical. On 2026-11-15 the
+first E4 run to complete installation (`pp6-e4-20261115-ubuntu02`) proved the
+installed rc.27 cannot start: the packaged-path startup guard requires C1
+policy material that non-C1 releases never provision (issue #1225; Q2
+services FAIL: o3kd `failed`, o3k-compute `inactive`). rc.27 is immutable and
+not retagged. The successor is `v0.4.0-rc.28` via branch
+`fix/1225-c1-bearing-release` (Option A: C1-bearing release + operator
+offline signing ceremony); its decision record, change set, and
+disposable-guest ceremony evidence are in
+[`ISSUE_1225_C1_BEARING_RELEASE.md`](ISSUE_1225_C1_BEARING_RELEASE.md); the
+disposable-edge-pilot gate status is in
+[`ISSUE_1225_RC28_EDGE_PILOT_GO_NOGO.md`](ISSUE_1225_RC28_EDGE_PILOT_GO_NOGO.md)
+(current verdict: NO-GO until the published rc.28 exists and protected Q1/Q2
+passes). rc.28
+is unpublished at this writing: its authenticated release identity, protected
+Q1/Q2 re-run remains NOT_RUN, and the PG16 restart/reconciliation scenario
+is not yet defined in the harness (to be added and run as part of the rc.28
+qualification). PP.6 remains **BLOCKED**; #975 remains OPEN.
+
 ## Current rc.27 E4 status (2026-11-07 after PR #1222)
 
 **Status: PP.6 BLOCKED; #975 remains OPEN.** Protected `main` is

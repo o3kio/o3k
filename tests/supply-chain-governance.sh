@@ -132,6 +132,28 @@ expected_exceptions = [
             "externally supplied SQLite files."
         ),
     },
+    {
+        "id": "RUSTSEC-2026-0543",
+        "package": "chrono",
+        "affected_version": "0.4.45",
+        "owner": "O3K maintainers",
+        "rationale": (
+            "The advisory marks chrono unmaintained; it carries no vulnerability. "
+            "The workspace uses chrono only for UTC timestamps, RFC 3339 "
+            "formatting/parsing of O3K's own generated documents, and SQLx date/time "
+            "mapping (sqlite/postgres); the only caller-supplied parsing is "
+            "safe-Rust RFC 3339 validation of metering window bounds on the "
+            "authenticated metering usage endpoint. No maintained drop-in "
+            "replacement covers the sqlx 0.8 chrono feature today (sqlx's `time` "
+            "feature would be a non-drop-in migration), so an upgrade cannot clear "
+            "the advisory."
+        ),
+        "review_trigger": (
+            "Remove when the workspace migrates off chrono or sqlx no longer "
+            "requires the chrono feature, or if a vulnerability is published for "
+            "chrono 0.4.45."
+        ),
+    },
 ]
 if type(exceptions) is not list or len(exceptions) != len(expected_exceptions):
     fail("policy.exceptions must contain exactly the reviewed exceptions")
@@ -206,13 +228,26 @@ if not any(
         "libsqlite3-sys to the waived 0.30.1 package"
     )
 
+# RUSTSEC-2026-0543 is ignored only as an unmaintained notice pinned to the
+# locked chrono version; a version change or a duplicate package invalidates
+# the waiver.
+chrono_exception = expected_exceptions[3]
+chrono_packages = [
+    package
+    for package in cargo_lock.get("package", [])
+    if package.get("name") == chrono_exception["package"]
+    and package.get("version") == chrono_exception["affected_version"]
+]
+if len(chrono_packages) != 1:
+    fail("RUSTSEC-2026-0543 exception requires exactly one locked chrono 0.4.45")
+
 deny = deny_path.read_text(encoding="utf-8")
 deny_ids = re.findall(r'\bid\s*=\s*"(RUSTSEC-[0-9-]+)"', deny)
-expected_ids = {"RUSTSEC-2026-0459"}
+expected_ids = {"RUSTSEC-2026-0459", "RUSTSEC-2026-0543"}
 if set(deny_ids) != expected_ids or len(deny_ids) != len(expected_ids):
     fail(
-        "deny.toml must suppress exactly the reviewed RUSTSEC-2026-0459 exception "
-        "and no other advisory"
+        "deny.toml must suppress exactly the reviewed RUSTSEC-2026-0459 and "
+        "RUSTSEC-2026-0543 exceptions and no other advisory"
     )
 
 workflow = workflow_path.read_text(encoding="utf-8")
@@ -227,6 +262,8 @@ if ignore_occurrences(workflow, "RUSTSEC-2023-0071") != 1:
     fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2023-0071")
 if ignore_occurrences(workflow, "RUSTSEC-2026-0459") != 1:
     fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2026-0459")
+if ignore_occurrences(workflow, "RUSTSEC-2026-0543") != 1:
+    fail("CI must ignore exactly one machine-readable exception for RUSTSEC-2026-0543")
 if ignore_occurrences(workflow, "RUSTSEC-2026-0381"):
     fail("CI must not suppress RUSTSEC-2026-0381 for the unaffected locked package")
 if workflow.count("cargo audit") != 1:

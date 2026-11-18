@@ -60,6 +60,17 @@ jobs:
           O3K_RELEASE_SIGNATURE_SCHEME: sigstore
           O3K_UPGRADE_FROM_MIN_VERSION: v0.4.0-rc.5
           GITHUB_WORKFLOW: O3K protected release workflow
+          # C1 installation policy (SPEC-0050 section 7.2, issue #1225 Option
+          # A): every protected release carries the installation-policy
+          # authority so installed services can satisfy the fail-closed
+          # startup guard. Only PUBLIC key material is configured here, via
+          # variables on the approval-gated `release` environment; the
+          # signing key never leaves offline custody and is never present in
+          # CI. make-release.sh fails closed (exit 2) when these are unset
+          # or malformed.
+          O3K_C1_INSTALLATION_POLICY_ENABLED: "1"
+          O3K_C1_INSTALLATION_POLICY_KEY_ID: ${{ vars.O3K_C1_INSTALLATION_POLICY_KEY_ID }}
+          O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY: ${{ vars.O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
@@ -111,10 +122,14 @@ jobs:
           production-ready and not PP.6-certified. No PP.7 or Araf
           certification is claimed.
 
-          This candidate carries the PP.6 source and qualification fixes merged
-          after rc.26 (#1212-#1214), including signed journal restart tests,
-          reliable isolated guest provisioning/cleanup, and a self-contained
-          extracted-archive A10 verifier. Its explicit limits:
+          This candidate carries a C1 installation-policy authority in its
+          release manifest (#1225): installation on the packaged path
+          (/usr/local + /var/lib/o3k) requires the operator-controlled
+          offline C1 signing ceremony (prepare -> offline sign -> install
+          with --c1-policy/--c1-state/--c1-trust; see
+          docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md). The ceremony key
+          remains in offline custody; this workflow publishes only its
+          public key. Its explicit limits:
 
           - the production bundle intentionally excludes the
             o3k recovery-migrate-v2 command; publisher process evidence is

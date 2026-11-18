@@ -2800,3 +2800,107 @@ fn revocation_refresh_resumes_after_archive_and_is_repeatable() {
     );
     fs::remove_dir_all(&fixture).unwrap();
 }
+
+/// A tampered installed trust bundle must deny startup observation even on a
+/// NEVER_RECOVERED genesis installation (#1225): the signed policy binds the
+/// exact trust bytes, and startup must fail closed on replaced or stale trust
+/// material instead of deferring the failure to first designation.
+#[test]
+#[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
+fn tampered_trust_bundle_denies_startup_observation_on_never_recovered() {
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
+    let mut ctx = fresh_ctx();
+    let installation = setup_fixture(&mut ctx, &fixture, false);
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        !stdout.contains(DENIED_PREFIX),
+        "authentic never-recovered installation must pass startup observation: {stdout}"
+    );
+    let trust_path = installation.var.join("etc-fixture/o3k/recovery-trust.json");
+    let mut tampered = fs::read(&trust_path).unwrap();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    // Overwrite in place as root: owner, group, and mode stay intact so only
+    // the content change is exercised.
+    fs::write(&trust_path, &tampered).unwrap();
+    let (stdout, _) = doctor(&fixture, true);
+    assert!(
+        stdout.contains(DENIED_PREFIX),
+        "tampered trust bundle must deny startup observation: {stdout}"
+    );
+    assert!(
+        doctor_denial(&stdout).contains("trust"),
+        "the denial must name the trust material, not an incidental cause: {stdout}"
+    );
+    fs::remove_dir_all(&fixture).unwrap();
+}
+
+/// The compute service identity (uid/gid 901, o3k group 900 only) cannot open
+/// the o3k:o3k 0700 journal directory or read the o3k:o3k-compute 0711 data
+/// root. Genesis startup observation must still pass for it — a
+/// NEVER_RECOVERED installation has no recovery-journal dependency
+/// (SPEC-0050 §7.2.1) — while tampered trust material or a substituted
+/// journal directory identity must still deny it (#1225).
+#[test]
+#[ignore = "requires root, unshare(1), setpriv(1), and a source-built o3k binary"]
+fn genesis_startup_observation_supports_the_compute_identity() {
+    let fixture = root_fixture().unwrap_or_else(|reason| panic!("{reason}"));
+    let mut ctx = fresh_ctx();
+    let installation = setup_fixture(&mut ctx, &fixture, false);
+    // o3k-compute (901:901) with the o3k group (900) — the gate-relevant
+    // subset of the packaged unit's SupplementaryGroups (libvirt/kvm do not
+    // bear on it). `doctor` runs the same startup selector the compute
+    // agent's guard uses. A guard denial renders as a check summary of
+    // "canonical store access denied: installation authority: <reason>"
+    // (main.rs doctor_access_denied); a store-lock failure uses the same
+    // prefix without "installation authority:", so the assertions key on the
+    // guard-denial marker, not the prefix alone.
+    let as_compute = "setpriv --reuid=901 --regid=901 --groups=900 {binary} doctor --json";
+    let (stdout, stderr, _) = run_in_namespace(&fixture, as_compute, &[]);
+    assert!(
+        stdout.contains("\"checks\"") && !stdout.contains("installation authority:"),
+        "compute identity must pass genesis startup observation: {stdout} {stderr}"
+    );
+
+    // Tampered installed trust bundle denies the compute identity too. The
+    // doctor gate reports the denial as a guarded check result, like every
+    // other startup denial in this suite.
+    let trust_path = installation.var.join("etc-fixture/o3k/recovery-trust.json");
+    let authentic = fs::read(&trust_path).unwrap();
+    let mut tampered = authentic.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    fs::write(&trust_path, &tampered).unwrap();
+    let (stdout, _, _) = run_in_namespace(&fixture, as_compute, &[]);
+    assert!(
+        stdout.contains("installation authority:"),
+        "tampered trust must deny the compute identity at the guard: {stdout}"
+    );
+    assert!(
+        doctor_denial(&stdout).contains("trust"),
+        "the denial must name the trust material: {stdout}"
+    );
+    fs::write(&trust_path, &authentic).unwrap();
+
+    // A substituted journal directory (new inode) denies the compute identity
+    // through the metadata-only observation binding.
+    let journal = installation
+        .var
+        .join("o3k-recovery")
+        .join(&ctx.target.installation_id);
+    let moved = installation.var.join("o3k-recovery-moved");
+    fs::rename(&journal, &moved).unwrap();
+    fs::create_dir(&journal).unwrap();
+    std::os::unix::fs::chown(&journal, Some(900), Some(900)).unwrap();
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o700)).unwrap();
+    let (stdout, _, _) = run_in_namespace(&fixture, as_compute, &[]);
+    assert!(
+        stdout.contains("installation authority:"),
+        "substituted journal directory must deny the compute identity at the guard: {stdout}"
+    );
+    assert!(
+        doctor_denial(&stdout).contains("journal"),
+        "the denial must name the journal identity: {stdout}"
+    );
+    fs::remove_dir_all(&fixture).unwrap();
+}

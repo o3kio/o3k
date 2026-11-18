@@ -69,7 +69,7 @@ already authenticated/extracted release bundle:
 
 ```sh
 python3 tests/pp6-qualification/test_rc27_installer_guard.py \
-  --release-root /srv/qualification/o3k-0.4.0-rc.27 \
+  --release-root /srv/qualification/o3k-0.4.0-rc.28 \
   --evidence-dir /srv/qualification/evidence/rc27-installer-guard
 ```
 

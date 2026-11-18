@@ -39,3 +39,18 @@ exceptions:
       accepts the fixed libsqlite3-sys >= 0.39 (0.8.6 caps at 0.30.x, 0.9.0
       caps below 0.38), so an upgrade cannot clear the advisory today.
     review_trigger: Remove as soon as SQLx resolves libsqlite3-sys >= 0.39 (bundled SQLite >= 3.54.0) and the workspace upgrades, or if any code path opens externally supplied SQLite files.
+  - id: RUSTSEC-2026-0543
+    package: chrono
+    affected_version: 0.4.45
+    owner: O3K maintainers
+    rationale: >-
+      The advisory marks chrono unmaintained; it carries no vulnerability.
+      The workspace uses chrono only for UTC timestamps, RFC 3339
+      formatting/parsing of O3K's own generated documents, and SQLx date/time
+      mapping (sqlite/postgres); the only caller-supplied parsing is
+      safe-Rust RFC 3339 validation of metering window bounds on the
+      authenticated metering usage endpoint. No maintained drop-in
+      replacement covers the sqlx 0.8 chrono feature today (sqlx's `time`
+      feature would be a non-drop-in migration), so an upgrade cannot clear
+      the advisory.
+    review_trigger: Remove when the workspace migrates off chrono or sqlx no longer requires the chrono feature, or if a vulnerability is published for chrono 0.4.45.
