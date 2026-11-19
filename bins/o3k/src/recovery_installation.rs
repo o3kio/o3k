@@ -1306,18 +1306,24 @@ impl InstalledRecovery {
                     identity::verify_initial_state_transition(None, &initial, &policy)
                         .map_err(|_| "installation state predecessor is invalid")?;
                     // A NEVER_RECOVERED state does not need trust to verify
-                    // its state signature, but startup still authenticates
-                    // the installed trust generation (policy digest binding,
-                    // scope, revocation freshness): missing, replaced, or
-                    // stale trust material must deny startup, not surface at
-                    // first designation or A10 migration (#1225).
+                    // its state signature, and it has no recovery-journal or
+                    // installed journal-trust freshness dependency
+                    // (SPEC-0050 §7.2.1). Startup still authenticates the
+                    // installed trust generation digest-only (owner decision
+                    // on #1225, 2026-11-18): the policy-bound trust-bundle
+                    // digest, durable high-water signatures, scope, and
+                    // monotonicity must verify, so missing, replaced, or
+                    // tampered trust material denies startup instead of
+                    // surfacing at first designation or A10 migration.
+                    // Revocation freshness and active-signer revocation gate
+                    // only designated or previously recovered installations.
                     fixed_bundle_bytes =
                         read_protected_config(Path::new(&policy.trust_bundle_path), gid)
                             .map_err(|_| "installed recovery trust is unsafe or unavailable")?;
                     trust_high_water_bytes = state_directory
                         .read_bounded("trust.json", 0, gid, 0o640, MAX_DOCUMENT)
                         .map_err(|_| "durable recovery trust high-water state is unavailable")?;
-                    load_trust(&policy, &state_directory, gid)?;
+                    authenticate_genesis_trust(&policy, &state_directory, gid)?;
                     // The provisioned journal directory stays observed on a
                     // NEVER_RECOVERED tip: designation (and the C1.1 rotation
                     // driver) require it, and its identity is policy-bound.
@@ -2234,6 +2240,65 @@ fn load_trust(
     state_directory: &ProtectedDirectory,
     gid: u32,
 ) -> Result<crate::recovery_trust::VerifiedTrust> {
+    let (initial, bundle) = read_trust_generation(policy, state_directory, gid)?;
+    let now = chrono::Utc::now().timestamp();
+    crate::recovery_trust::verify_trust_bundle(
+        bundle,
+        &key(&policy.journal_trust_root_public_key)?,
+        &key(&policy.evidence_trust_root_public_key)?,
+        now,
+        Some((
+            initial.journal_revocations.payload.sequence,
+            &initial.journal_revocation_digest,
+        )),
+        Some((
+            initial.evidence_revocations.payload.sequence,
+            &initial.evidence_revocation_digest,
+        )),
+    )
+    .map_err(|_| "installed recovery authority is stale, expired, revoked or conflicting")
+}
+
+/// Digest-only genesis trust authentication for a `NEVER_RECOVERED`
+/// installation (SPEC-0050 §7.2.1; owner decision on #1225, 2026-11-18).
+/// Applies the same policy digest binding, scope, and monotonicity checks as
+/// `load_trust`, but verifies the durable generation as history: certificate
+/// expiry, revocation freshness, and active-signer revocation gate startup
+/// only once recovery has been designated.
+fn authenticate_genesis_trust(
+    policy: &InstallationPolicy,
+    state_directory: &ProtectedDirectory,
+    gid: u32,
+) -> Result<()> {
+    let (initial, bundle) = read_trust_generation(policy, state_directory, gid)?;
+    crate::recovery_trust::verify_historical_trust(
+        bundle,
+        &key(&policy.journal_trust_root_public_key)?,
+        &key(&policy.evidence_trust_root_public_key)?,
+        Some((
+            initial.journal_revocations.payload.sequence,
+            &initial.journal_revocation_digest,
+        )),
+        Some((
+            initial.evidence_revocations.payload.sequence,
+            &initial.evidence_revocation_digest,
+        )),
+    )
+    .map_err(|_| "installed recovery trust is invalid or conflicting")?;
+    Ok(())
+}
+
+/// Reads the policy-bound installed trust bundle and the durable high-water
+/// generation and enforces their shared bindings: the installed bundle digest
+/// must equal the signed policy's `trust_bundle_digest`, and the durable
+/// generation must carry the same installation scope, trust roots, and signer
+/// certificates. Freshness and revocation are left to the caller's
+/// verification mode.
+fn read_trust_generation(
+    policy: &InstallationPolicy,
+    state_directory: &ProtectedDirectory,
+    gid: u32,
+) -> Result<(identity::TrustBundle, identity::TrustBundle)> {
     let bytes = read_protected_config(Path::new(&policy.trust_bundle_path), gid)
         .map_err(|_| "installed recovery trust is unsafe or unavailable")?;
     let initial_digest = hex::encode(Sha256::digest(&bytes));
@@ -2251,7 +2316,8 @@ fn load_trust(
     // `policy.trust_bundle_digest`: an accepted revocation refresh advances
     // it past the initial digest.  Its integrity and monotonicity are
     // enforced by the scope/certificate comparison below and by
-    // `verify_trust_bundle` against the initial sequence/digest anchors.
+    // the caller's bundle verification against the initial
+    // sequence/digest anchors.
     if bundle.installation_id != policy.installation_id
         || bundle.site_id != policy.site_id
         || bundle.profile != policy.profile
@@ -2265,22 +2331,7 @@ fn load_trust(
     {
         return Err("installed recovery trust scope is invalid");
     }
-    let now = chrono::Utc::now().timestamp();
-    crate::recovery_trust::verify_trust_bundle(
-        bundle,
-        &key(&policy.journal_trust_root_public_key)?,
-        &key(&policy.evidence_trust_root_public_key)?,
-        now,
-        Some((
-            initial.journal_revocations.payload.sequence,
-            &initial.journal_revocation_digest,
-        )),
-        Some((
-            initial.evidence_revocations.payload.sequence,
-            &initial.evidence_revocation_digest,
-        )),
-    )
-    .map_err(|_| "installed recovery authority is stale, expired, revoked or conflicting")
+    Ok((initial, bundle))
 }
 
 /// Archive lookup over the protected recovery directories. Only the
