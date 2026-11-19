@@ -2027,9 +2027,15 @@ PY
   REPLAY_JOIN_BY_AGENT["$id"]="$WORK_ROOT/$id-join-request.json"
   BLOCK_IDS[$id]="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("building_block_id", ""))' "$WORK_ROOT/$1-join.json")"; [[ "${BLOCK_IDS[$id]}" =~ ^[0-9a-fA-F-]{36}$ ]] || die "canonical BuildingBlock missing: $id"
 }
+testlab_agent_bin_path() {
+  printf '/var/lib/o3k-testlab/%s/agents/%s/o3k-compute' "$1" "$2"
+}
+
 install_agent() {
   local id="$1" ip="$2" c="$TLS_ROOT/agents/$1" bin="${O3K_REAL_HOST_COMPUTE_BINARY:-$STATE_ROOT/bin/o3k-compute}"
   local remote_stage="/tmp/o3k-p15-7-agent-$RUN_ID-$id"
+  local remote_agent_bin
+  remote_agent_bin="$(testlab_agent_bin_path "$RUN_ID" "$id")"
   [[ -x "$bin" ]] || die "real compute-agent binary unavailable"
   sudo -n test -f "$c/agent-id" || die "canonical agent identity file unavailable: $id"
   sudo -n test ! -L "$c/agent-id" || die "canonical agent identity file is a symlink: $id"
@@ -2051,7 +2057,7 @@ install_agent() {
     || { remote_agent_cleanup; die "certificate transfer failed: $id"; }
   scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-key.pem" "$VM_USER@$ip:$remote_stage/agent-key.pem" \
     || { remote_agent_cleanup; die "private key transfer failed: $id"; }
-  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls; sudo install -d -o root -g libvirt-qemu -m 02750 /var/lib/o3k-compute; sudo chown root:libvirt-qemu /var/lib/o3k-compute; sudo chmod 02750 /var/lib/o3k-compute; sudo install -m 0755 '$remote_stage/o3k-compute' /usr/local/bin/o3k-compute; sudo install -m 0644 '$remote_stage/ca.pem' /etc/o3k/tls/ca.pem; sudo install -m 0644 '$remote_stage/agent.pem' /etc/o3k/tls/agent.pem; sudo install -m 0600 '$remote_stage/agent-key.pem' /etc/o3k/tls/agent-key.pem; sudo install -m 0644 '$remote_stage/agent-id' /var/lib/o3k-compute/agent-id; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
+  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls; sudo install -d -o root -g libvirt-qemu -m 02750 /var/lib/o3k-compute; sudo chown root:libvirt-qemu /var/lib/o3k-compute; sudo chmod 02750 /var/lib/o3k-compute; sudo install -d -o root -g root -m 0755 '/var/lib/o3k-testlab/$RUN_ID/agents/$id'; sudo install -o root -g root -m 0755 '$remote_stage/o3k-compute' '$remote_agent_bin'; sudo install -m 0644 '$remote_stage/ca.pem' /etc/o3k/tls/ca.pem; sudo install -m 0644 '$remote_stage/agent.pem' /etc/o3k/tls/agent.pem; sudo install -m 0600 '$remote_stage/agent-key.pem' /etc/o3k/tls/agent-key.pem; sudo install -m 0644 '$remote_stage/agent-id' /var/lib/o3k-compute/agent-id; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup '$remote_agent_bin' >/var/log/o3k-compute.log 2>&1 &'" \
     || { remote_agent_cleanup; die "agent start failed: $id"; }
   remote_agent_cleanup
   for _ in $(seq 1 90); do ssh_vm "$ip" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && return; sleep 2; done
@@ -4484,7 +4490,8 @@ ssh_vm "$MAINT_IP_AFTER" "sudo cloud-init status --wait" >/dev/null 2>&1 || true
 # host shutdown posture — see docs/operations/pp5-host-maintenance.md), so the
 # journey models the operator restarting the host service after maintenance:
 # same agent id, same TLS identity, same data directory.
-ssh_vm "$MAINT_IP_AFTER" "sudo pkill -x o3k-compute || true; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=block-e-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
+maintenance_agent_bin="$(testlab_agent_bin_path "$RUN_ID" block-e)"
+ssh_vm "$MAINT_IP_AFTER" "sudo pkill -x o3k-compute || true; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=block-e-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup '$maintenance_agent_bin' >/var/log/o3k-compute.log 2>&1 &'" \
   || die "maintenance agent restart failed"
 for _ in $(seq 1 90); do ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && break; sleep 2; done
 ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 || die "maintenance agent did not become ready after reboot"
