@@ -73,6 +73,10 @@ assert 'O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH:-}"' in bootstrap
 assert 'sudo -n rm -rf -- "$STATE_ROOT"' not in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
+install_block = bootstrap.split('if [[ ! -x "$OPENSTACK_VENV/bin/openstack" ]]; then', 1)[1].split("\nfi", 1)[0]
+assert '"python-openstackclient==10.2.1" "openstacksdk==4.22.0"' in install_block
+assert bootstrap.index("tests/openstack_cli_smoke.py") > bootstrap.index("if [[ ! -x \"$OPENSTACK_VENV/bin/openstack\" ]]; then")
+assert 'tests/openstack_cli_smoke.py' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'ps -o user:32=' in bootstrap
 assert 'ps -o user:32=' in cleanup

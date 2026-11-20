@@ -915,8 +915,11 @@ fi
 if [[ ! -x "$OPENSTACK_VENV/bin/openstack" ]]; then
   python3 -m venv "$OPENSTACK_VENV"
   PIP_CONFIG_FILE=/dev/null PIP_NO_CACHE_DIR=1 "$OPENSTACK_VENV/bin/python" -m pip install \
-    --isolated --disable-pip-version-check --no-input "python-openstackclient==10.2.1"
+    --isolated --disable-pip-version-check --no-input \
+    "python-openstackclient==10.2.1" "openstacksdk==4.22.0"
 fi
+"$OPENSTACK_VENV/bin/python" "$ROOT_DIR/tests/openstack_cli_smoke.py" "$OPENSTACK_VENV/bin/openstack" \
+  || fail "OpenStack CLI SDK resources or entry point are unusable"
 if [[ ! -f "$OPENSTACK_VENV/.o3k-venv-owned" ]]; then
   printf 'o3k-disposable-venv-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" \
     >"$OPENSTACK_VENV/.o3k-venv-owned"
