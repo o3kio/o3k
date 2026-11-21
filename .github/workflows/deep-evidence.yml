@@ -60,7 +60,7 @@ jobs:
               "toolchain_file_sha256": digest("rust-toolchain.toml"),
               "lockfile_sha256": digest("Cargo.lock"),
               "cargo_llvm_cov_version": os.environ["CARGO_LLVM_COV_VERSION"],
-              "command": "cargo llvm-cov --workspace --all-features --lcov --output-path target/deep-evidence/coverage/lcov.info",
+              "command": "cargo llvm-cov --workspace --features o3k/backup-test-hooks --lcov --output-path target/deep-evidence/coverage/lcov.info",
               "redaction": "logs contain no credentials or provider payloads",
           }
           pathlib.Path("target/deep-evidence/coverage/metadata.json").write_text(
@@ -74,7 +74,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          cargo llvm-cov --workspace --all-features --lcov \
+          cargo llvm-cov --workspace --features o3k/backup-test-hooks --lcov \
             --output-path target/deep-evidence/coverage/lcov.info \
             2>&1 | tee target/deep-evidence/coverage/coverage.log
           status=${PIPESTATUS[0]}
