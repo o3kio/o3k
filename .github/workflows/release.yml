@@ -123,7 +123,8 @@ jobs:
           production-ready and not PP.6-certified. No PP.7 or Araf
           certification is claimed.
 
-          This candidate carries the lab-origin C1 installation-policy
+          This immutable prerelease is not PP.6 final acceptance, a production
+          release, or release-gate approved. It carries the lab-origin C1 installation-policy
           authority authorized for this non-production rc.28 qualification
           and disposable edge-pilot only (#1225; SPEC-0050 §9.1). The existing
           role-separated Ed25519 keys were generated on the online development
@@ -133,7 +134,10 @@ jobs:
           environment; private key material is never published. C1 signature,
           installation identity, revocation, and fail-closed startup checks
           remain required. Rotate the authority and establish production
-          custody before any production or persistent use. Its explicit limits:
+          custody before any production or persistent use. The installed
+          candidate still requires valid C1-signed policy, state, and trust
+          materials, signed using the authorized lab-origin keys for this
+          pilot. Its explicit limits:
 
           - the production bundle intentionally excludes the
             o3k recovery-migrate-v2 command; publisher process evidence is
