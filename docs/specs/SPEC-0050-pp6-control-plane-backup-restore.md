@@ -2021,4 +2021,30 @@ private keys, enrollment secrets, raw provider payloads, sensitive filesystem
 paths, key-provider exception text and unfiltered exception chains. Secret
 scans cover successful and failing backup/restore paths.
 
+### 9.1 rc.28 lab-origin C1 pilot exception
+
+The owner decision recorded on #1225 in comments
+[7086722099](https://github.com/o3kio/o3k/issues/1225#issuecomment-7086722099)
+and [7086771492](https://github.com/o3kio/o3k/issues/1225#issuecomment-7086771492)
+accepts a time-bounded exception for `v0.4.0-rc.28` qualification and
+disposable edge-pilot workloads only. The five existing role-separated Ed25519
+key pairs are lab-origin and were generated on the online development host.
+They do not meet this specification's offline two-of-three custody
+requirements. No K1–K4 custody completion, offline-generation, two-of-three
+attestation, production-custody compliance, or independent custody verification
+is claimed for this exception. The release environment may contain only the
+public installation-policy key ID `c1-policy-o3kio-lab-2026-11` and public
+verifier; private key material must not be uploaded to GitHub or included in
+the repository, logs, or release assets.
+
+This exception changes no C1/C1.1 cryptographic or fail-closed requirement.
+The immutable protected signed release, source and installation identity
+binding, signature and revocation verification, fail-closed startup, installed
+Q1/Q2, signed-artifact qualification, and disposable edge validation remain
+required. Published notes and qualification evidence must identify the
+lab-origin authority and state that the result is non-production. The exception
+does not authorize persistent workloads, production deployment, or a PP.5,
+PP.6, or PP.7 certification claim. The authority must be rotated and a separate
+production custody model established before any production or persistent use.
+
 See `docs/pp/PP6_GAP_ANALYSIS.md` for the ordered executable matrix.

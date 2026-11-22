@@ -63,11 +63,12 @@ jobs:
           # C1 installation policy (SPEC-0050 section 7.2, issue #1225 Option
           # A): every protected release carries the installation-policy
           # authority so installed services can satisfy the fail-closed
-          # startup guard. Only PUBLIC key material is configured here, via
-          # variables on the approval-gated `release` environment; the
-          # signing key never leaves offline custody and is never present in
-          # CI. make-release.sh fails closed (exit 2) when these are unset
-          # or malformed.
+          # startup guard. For rc.28 only, SPEC-0050 §9.1 records the owner's
+          # lab-origin, non-production pilot exception. Only PUBLIC key
+          # material is configured here, via variables on the approval-gated
+          # `release` environment; private material must never enter CI.
+          # make-release.sh fails closed (exit 2) when these are unset or
+          # malformed.
           O3K_C1_INSTALLATION_POLICY_ENABLED: "1"
           O3K_C1_INSTALLATION_POLICY_KEY_ID: ${{ vars.O3K_C1_INSTALLATION_POLICY_KEY_ID }}
           O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY: ${{ vars.O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY }}
@@ -122,14 +123,17 @@ jobs:
           production-ready and not PP.6-certified. No PP.7 or Araf
           certification is claimed.
 
-          This candidate carries a C1 installation-policy authority in its
-          release manifest (#1225): installation on the packaged path
-          (/usr/local + /var/lib/o3k) requires the operator-controlled
-          offline C1 signing ceremony (prepare -> offline sign -> install
-          with --c1-policy/--c1-state/--c1-trust; see
-          docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md). The ceremony key
-          remains in offline custody; this workflow publishes only its
-          public key. Its explicit limits:
+          This candidate carries the lab-origin C1 installation-policy
+          authority authorized for this non-production rc.28 qualification
+          and disposable edge-pilot only (#1225; SPEC-0050 §9.1). The existing
+          role-separated Ed25519 keys were generated on the online development
+          host and do not satisfy offline two-of-three production custody. No
+          offline-custody or production-compliance claim is made. Only the
+          public authority is configured in the approval-gated release
+          environment; private key material is never published. C1 signature,
+          installation identity, revocation, and fail-closed startup checks
+          remain required. Rotate the authority and establish production
+          custody before any production or persistent use. Its explicit limits:
 
           - the production bundle intentionally excludes the
             o3k recovery-migrate-v2 command; publisher process evidence is
