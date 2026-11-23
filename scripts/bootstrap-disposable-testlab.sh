@@ -510,14 +510,19 @@ python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable afte
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after dependency setup"
 pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
 command -v protoc >/dev/null 2>&1 || fail "protobuf compiler is unavailable after dependency setup"
-cargo build --locked --release --bin o3kd --bin o3k
-# virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
-# make the runtime link explicit after the host preflight proves libvirt exists.
-RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
-  cargo build --locked --release --features libvirt --bin o3k-compute-bin
-sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
-sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
-sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+if [[ "${O3K_PP5_SIGNED_ARTIFACT_MODE:-false}" == true ]]; then
+  [[ -n "${O3K_PP5_RELEASE_DIST_DIR:-}" ]] || fail "signed PP.5 mode requires O3K_PP5_RELEASE_DIST_DIR"
+  [[ "${O3K_PP5_RELEASE_SOURCE_SHA:-}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "signed PP.5 mode requires O3K_PP5_RELEASE_SOURCE_SHA"
+  bash "$ROOT_DIR/scripts/install-pp5-signed-artifact.sh" "$O3K_PP5_RELEASE_DIST_DIR" "$STATE_ROOT" "$O3K_PP5_RELEASE_SOURCE_SHA"
+else
+  cargo build --locked --release --bin o3kd --bin o3k
+  # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
+  # make the runtime link explicit after the host preflight proves libvirt exists.
+  RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" cargo build --locked --release --features libvirt --bin o3k-compute-bin
+  sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
+  sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
+  sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+fi
 extra_agent_ids=()
 extra_agent_ids_csv=
 if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
