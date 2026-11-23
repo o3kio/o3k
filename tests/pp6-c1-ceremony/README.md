@@ -28,7 +28,9 @@ with custodian-held keys (SPEC-0050 §2).
   matrix (tampered policy/state/trust at install time; tampered installed
   policy, missing state high-water, and tampered installed trust after
   install), restoring and re-verifying after each. All output lands in the
-  evidence directory with a `SHA256SUMS` manifest.
+  evidence directory with a `SHA256SUMS` manifest; the transient `work/`
+  directory is removed after guest teardown (or excluded from the manifest
+  with `--keep-guest`). The finalizer does not change ownership or permissions.
 
 The signer is pinned against the canonical Rust verifiers by
 `bins/o3k/tests/pp6_c1_ceremony_signer.rs` (`cargo test -p o3k --test
