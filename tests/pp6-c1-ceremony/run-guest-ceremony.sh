@@ -63,13 +63,28 @@ if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
   exit 1
 fi
 
+cleanup_guest() {
+  [[ "$KEEP_GUEST" != 1 ]] || return 0
+  virsh uri >/dev/null
+  if virsh list --all --name | grep -Fxq "$VM_NAME"; then
+    virsh destroy "$VM_NAME" >/dev/null 2>&1 || {
+      echo "could not stop qualification guest $VM_NAME; retaining scratch files" >&2
+      return 1
+    }
+    virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 || {
+      echo "could not undefine qualification guest $VM_NAME; retaining scratch files" >&2
+      return 1
+    }
+  fi
+  # QEMU may own the overlay and seed image. Remove only this run's private
+  # scratch tree after the guest is gone; never chown evidence or hash these
+  # transient files as qualification evidence.
+  rm -rf -- "$WORK"
+}
+
 cleanup() {
   local rc=$?
-  if [[ "$KEEP_GUEST" != 1 ]]; then
-    virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-    virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 || true
-    rm -rf -- "$WORK/overlay.qcow2" "$WORK/seed.iso"
-  fi
+  cleanup_guest || rc=1
   exit "$rc"
 }
 trap cleanup EXIT
@@ -328,5 +343,10 @@ wait_for_services "$EVIDENCE/services-final.txt"
   echo "guest: $VM_NAME ($GUEST_IP)"
   virsh dominfo "$VM_NAME" | sed -n '1,8p'
 } >"$EVIDENCE/guest-identity.txt"
-(cd "$EVIDENCE" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
-log "ceremony journey complete: all positive and negative assertions passed"
+# Stop and undefine the guest before scratch cleanup. Keep-guest is a debug
+# mode; its live QEMU-owned scratch files are deliberately outside the evidence
+# manifest. The retained evidence records are hashed with their original owner
+# and mode intact.
+log "ceremony journey assertions passed; finalizing evidence"
+cleanup_guest
+"$SCRIPT_DIR/finalize-evidence.sh" "$EVIDENCE"
