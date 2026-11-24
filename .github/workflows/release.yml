@@ -63,8 +63,9 @@ jobs:
           # C1 installation policy (SPEC-0050 section 7.2, issue #1225 Option
           # A): every protected release carries the installation-policy
           # authority so installed services can satisfy the fail-closed
-          # startup guard. For rc.28 only, SPEC-0050 §9.1 records the owner's
-          # lab-origin, non-production pilot exception. Only PUBLIC key
+          # startup guard. For rc.28 and the exact v0.4.0 test-use release,
+          # SPEC-0050 §9.1 records the owner's lab-origin, non-production
+          # exception. Only PUBLIC key
           # material is configured here, via variables on the approval-gated
           # `release` environment; private material must never enter CI.
           # make-release.sh fails closed (exit 2) when these are unset or
@@ -75,6 +76,15 @@ jobs:
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
+          if [[ "$RELEASE_TAG" == "v0.4.0" ]]; then
+            expected_key_sha256="25d82fd79fd0245d97b58a42b0bb11d486920df31455961ffaf140c36c0464f5"
+            actual_key_sha256="$(printf '%s' "$O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY" | sha256sum | cut -d ' ' -f1)"
+            if [[ "$O3K_C1_INSTALLATION_POLICY_KEY_ID" != "c1-policy-o3kio-lab-2026-11" \
+              || "$actual_key_sha256" != "$expected_key_sha256" ]]; then
+              echo "v0.4.0 is authorized only for the reviewed lab-origin test-use authority" >&2
+              exit 1
+            fi
+          fi
           packaging/make-release.sh "$version" libvirt
           packaging/make-release-archive.sh "$version"
           packaging/verify-release-bundle.sh "dist/o3k-$version"
@@ -105,9 +115,11 @@ jobs:
           set -euo pipefail
           packaging/verify-release-sigstore.sh "$RELEASE_TAG" dist
 
-      - name: Publish immutable GitHub prerelease
+      - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          O3K_C1_INSTALLATION_POLICY_KEY_ID: ${{ vars.O3K_C1_INSTALLATION_POLICY_KEY_ID }}
+          O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY: ${{ vars.O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
@@ -116,6 +128,25 @@ jobs:
             echo "release already exists: $tag" >&2
             exit 1
           fi
+          if [[ "$tag" == "v0.4.0" ]]; then
+            expected_key_sha256="25d82fd79fd0245d97b58a42b0bb11d486920df31455961ffaf140c36c0464f5"
+            actual_key_sha256="$(printf '%s' "$O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY" | sha256sum | cut -d ' ' -f1)"
+            if [[ "$O3K_C1_INSTALLATION_POLICY_KEY_ID" != "c1-policy-o3kio-lab-2026-11" \
+              || "$actual_key_sha256" != "$expected_key_sha256" ]]; then
+              echo "v0.4.0 test-use release requires the reviewed lab-origin C1 authority" >&2
+              exit 1
+            fi
+            gh release create "$tag" \
+              dist/install.sh \
+              "dist/o3k-$version-linux-x86_64.tar.gz" \
+              "dist/o3k-$version-linux-x86_64.tar.gz.sha256" \
+              dist/release-digests.txt \
+              dist/release-digests.sigstore.json \
+              dist/provenance.json \
+              --title "O3K v0.4.0 (TEST USE ONLY)" \
+              --notes-file docs/releases/v0.4.0.md \
+              --latest
+          elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*$ ]]; then
           cat > release-notes.md <<EOF
           ## O3K $tag
 
@@ -164,3 +195,7 @@ jobs:
             dist/release-digests.sigstore.json \
             dist/provenance.json \
             --prerelease --title "$tag" --notes-file release-notes.md
+          else
+            echo "stable releases require an explicit, reviewed release-scope rule" >&2
+            exit 1
+          fi
