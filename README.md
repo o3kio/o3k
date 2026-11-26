@@ -61,7 +61,17 @@ Core principles:
   O3K control plane, but it does not become O3K's VM scheduler, tenant-resource
   database, or Cloud Kernel.
 
-> **Current engineering status:** alpha. P9 (routed fabric), P10 (native
+> **Current engineering status:** Early Access profile and security/install
+> work are in progress; no customer deployment is authorized before the
+> SPEC-0052 bounded acceptance gate passes on an exact authenticated release.
+> The owner-directed target is O3K v0.4.1 — Early Access for Ubuntu 24.04,
+> one active controller, PostgreSQL 16, KVM/libvirt and one to three
+> hypervisors. This profile allows selected development, test and replaceable
+> non-critical semi-production workloads. It claims no HA, automatic
+> evacuation, live migration, enterprise SLA, general disaster recovery, or
+> full production certification. See [ADR-0191](docs/adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
+> and [SPEC-0052](docs/specs/SPEC-0052-early-access-profile-and-acceptance.md).
+> Existing Cloud Kernel milestones include P9 (routed fabric), P10 (native
 > persistent storage), and P11 (bounded multi-hypervisor edge cloud) established
 > the first real edge-scale IaaS path. P12 added the native resource API/service
 > framework, P12-IAM production federation is complete, P13 passed its bounded
@@ -79,7 +89,7 @@ Core principles:
 > These are strong implementation milestones, not a blanket production, full
 > OpenStack parity, multi-region, live-migration, or datacenter-scale claim.
 
-> **PP.4 Core status (2026-09-22):** immutable `v0.4.0-rc.21`,
+> **Historical PP.4 record (2026-09-22):** immutable `v0.4.0-rc.21`,
 > `v0.4.0-rc.22` and `v0.4.0-rc.23` are preserved as historical PP.4
 > candidates, not as certification. rc.21 proves native replay convergence
 > plus a fresh-Ubuntu native/KVM smoke; rc.22 proves the fresh-Ubuntu native
@@ -98,8 +108,11 @@ Core principles:
 > witness and full cross-interface lifecycle remain unproven. O3K is not
 > production-ready by this evidence.
 
-Next program: **P15 — Scale & Composition Foundation** (issue #929,
-ADR-0184 (accepted), prompts in `docs/prompts/p15/`).
+PP.5, PP.6 and PP.7 remain historical certification tracks and are not Early
+Access release prerequisites. Their open requirements are being reclassified
+and transferred under the Early Access adoption epic; no unexecuted result is
+marked passed. Araf development and integration planning will use the accepted
+Early Access API baseline after its gate, without a PP.7 dependency.
 
 ## One Cloud OS from edge to datacenter
 

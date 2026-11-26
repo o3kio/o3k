@@ -82,6 +82,13 @@ Before editing code, read:
    contract;
 8. the assigned issue.
 
+For work governed by the owner-directed Early Access roadmap, also read
+`docs/adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md`
+and `docs/specs/SPEC-0052-early-access-profile-and-acceptance.md`. ADR-0191 is
+the accepted owner decision that PP.5/PP.6/PP.7 are not EA release prerequisites;
+it does not waive evidence, protected review, focused independent security
+review, or owner release GO.
+
 For product scope, IAM, topology, provider boundaries, cross-service workflows,
 hosted services, or runner changes, also read:
 
@@ -239,8 +246,13 @@ Before code changes, record:
   work-ownership/fencing evidence.
 - Approximately 50 MB is a target, not a guarantee.
 - Architecture examples of database/Kubernetes/AI/etc. are not support claims.
-- The current `v0.2.0-alpha.1` libvirt TestLab gate must not be expanded by
-  Cloud Kernel work unless a human-approved release replan explicitly says so.
+- The `v0.2.0-alpha.1` libvirt TestLab gate was the prior bounded release
+  objective. ADR-0191 is the explicit owner-approved roadmap replan for the
+  `v0.4.1` Early Access objective; EA work must follow SPEC-0052 and must not
+  turn its bounded profile into a broader edge or production claim.
+- The EA profile explicitly selects PostgreSQL 16 and Ubuntu 24.04 under
+  SPEC-0052. This profile-specific selection does not change SQLite's supported
+  minimal TestLab/portable default or establish PostgreSQL HA/production claims.
 
 ## Service and process rules
 

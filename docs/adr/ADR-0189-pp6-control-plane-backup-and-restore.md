@@ -1,11 +1,10 @@
 # ADR-0189 — PP.6 control-plane backup and restore
 
-Status: Accepted technical contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`;
-implementation and release evidence remain gated
+Status: Accepted recovery technical contract; Early Access fresh-install trust is separately governed by ADR-0191
 Date: 2026-10-15
 Affected-services: cloud-kernel, deployment, identity, governance
 Parent: PP.6 #975; general rollback/backup authority #640
-Related: ADR-0163, ADR-0167, ADR-0182, SPEC-0008, SPEC-0024, SPEC-0047
+Related: ADR-0163, ADR-0167, ADR-0182, ADR-0191, SPEC-0008, SPEC-0024, SPEC-0047, SPEC-0052
 
 ## Context
 
@@ -623,3 +622,21 @@ follows from this contract decision.
 See [PP.6 gap analysis and executable plan](../pp/PP6_GAP_ANALYSIS.md) and
 [SPEC-0050](../specs/SPEC-0050-pp6-control-plane-backup-restore.md). This
 proposal is architecture intent, not runtime evidence.
+
+## Amendment — profile scope after the Early Access decision (2026-11-25)
+
+ADR-0191 establishes a separate `o3k-early-access-v1` profile with
+installation-local trust for explicitly authenticated fresh installs. This
+ADR continues to govern only the `recovery-qualified-v1` installation
+authority and advanced backup/restore/recovery design. Its offline recovery
+signers, custody requirements, journal authority, restore designation,
+activation, fencing and evidence requirements do not gate ordinary EA fresh
+installation because those recovery operations are unavailable in EA.
+
+This amendment does not weaken any C1 rule for an existing recovery-qualified
+installation and does not authorize EA restore activation. A C1 state problem
+is a fail-closed recovery condition, never an EA selection signal. The
+installation-profile transition and anti-downgrade requirements are defined
+by ADR-0191 and SPEC-0052. PP.6 implementation/evidence work is transferred
+to the advanced disaster-recovery milestone; no PP.6 test result is changed
+by this roadmap decision.

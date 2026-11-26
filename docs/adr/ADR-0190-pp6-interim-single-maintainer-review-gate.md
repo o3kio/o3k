@@ -1,10 +1,10 @@
 # ADR-0190 — PP.6 interim single-maintainer review gate
 
-Status: Accepted — interim PP.6 governance decision; contract implementation and evidence remain gated
+Status: Accepted historical PP.6 governance decision; superseded for Early Access governance by ADR-0191
 Date: 2026-10-18
 Affected-services: governance, deployment, identity
 Parent: PP.6 #975; ADR-0189; SPEC-0050; SPEC-0051
-Supersedes: none
+Supersedes: none; superseded-by ADR-0191 for Early Access
 
 ## Context
 
@@ -175,3 +175,17 @@ D13 inventory, and all failure and real-backend evidence remain mandatory.
 - [ADR-0154](ADR-0154-engineering-governance-lifecycle.md) governance proposal,
   consulted as proposed guidance and not treated as an accepted authority
 - PP.6 issue [#975 comment 6242789269](https://github.com/o3kio/o3k/issues/975#issuecomment-6242789269)
+
+## Supersession note — Early Access approval model (2026-11-25)
+
+ADR-0191 replaces the interim PP.6 single-maintainer review route as the
+governance model for the Early Access profile. EA security architecture
+changes require focused independent technical/security review; an agent,
+automated review, or the prior PP.6 risk acceptance does not satisfy that
+requirement. Protected PR review and required CI remain in force, and release
+publication still requires the accepted EA evidence gate and owner approval.
+
+This supersession does not erase this ADR's historical PP.6 decision record,
+retroactively convert its non-independent review to independent review, or
+accept SPEC-0051/backup-restore implementation. PP.6 advanced recovery work is
+transferred out of the EA release gate under ADR-0191/SPEC-0052.

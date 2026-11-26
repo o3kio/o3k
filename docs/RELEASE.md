@@ -1,5 +1,23 @@
 # Release verification
 
+## Early Access release policy
+
+The owner-directed target is `v0.4.1 — Early Access`, governed by
+[ADR-0191](adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
+and [SPEC-0052](specs/SPEC-0052-early-access-profile-and-acceptance.md). It is
+not currently publishable: the repository's current release workflow and
+runtime still require C1 installation authority, and the EA installation-local
+trust profile is not implemented. A bundle without C1 must not be produced as
+an attempted workaround; it currently fails closed at installed startup.
+
+Before the EA workflow can publish, it must carry an explicit authenticated
+`early-access-v1` / `installation-local` selector, preserve the existing C1
+release path including immutable v0.4.0, pass focused independent security
+review, and bind all SPEC-0052 §8 results to the exact artifact. The command in
+SPEC-0052 is a target URL only until then. Release publication also requires
+the protected workflow and explicit owner GO; this policy does not bypass
+branch protections or the release environment.
+
 Release bundles are built by `packaging/make-release.sh [version] [profile]`.
 The bundle contains `o3kd`, optionally `o3k-compute` for the libvirt profile,
 an SPDX 2.3 SBOM, a manifest, and `SHA256SUMS`. The SBOM

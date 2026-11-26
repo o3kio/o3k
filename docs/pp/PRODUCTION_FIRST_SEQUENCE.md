@@ -1,6 +1,14 @@
-# Production-first sequencing
+# Historical production-first sequencing
 
-Status: Accepted program sequencing
+Status: Historical accepted PP sequencing; superseded for the Early Access release objective by ADR-0191/SPEC-0052
+
+> PP.5/PP.6/PP.7 remain incomplete and their evidence is preserved. Their
+> acceptance is not a prerequisite for the bounded Early Access objective.
+> The current adoption gate is [SPEC-0052](../specs/SPEC-0052-early-access-profile-and-acceptance.md), tracked by
+> [#1241](https://github.com/o3kio/o3k/issues/1241) with dispositions in the
+> [traceability matrix](../roadmap/early-access-traceability.md). This document
+> remains historical reference for the former PP evidence program; it does not
+> certify unexecuted work.
 
 ## Goal
 
