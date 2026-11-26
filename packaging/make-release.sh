@@ -3,6 +3,8 @@
 # export the one-line installer as the dist/install.sh GitHub Release asset.
 #
 # Usage: packaging/make-release.sh [VERSION] [PROFILE=fake]
+# Early Access: O3K_INSTALLATION_SECURITY_PROFILE=early-access-v1 \
+#   O3K_PRODUCT_PROFILE_ID=o3k-early-access-v1 packaging/make-release.sh 0.4.1 libvirt
 #
 # Release asset contract for the GitHub Release (see docs/RELEASE.md):
 #   dist/install.sh                            byte-identical export of
@@ -22,6 +24,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)}"
 PROFILE="${2:-fake}"
+INSTALLATION_SECURITY_PROFILE="${O3K_INSTALLATION_SECURITY_PROFILE:-}"
 VERSION_RE='^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
 if [[ ! "$VERSION" =~ $VERSION_RE ]]; then
   echo "version must be a numeric release version with an optional prerelease suffix" >&2
@@ -144,7 +147,7 @@ bash "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$OUT_DIR/bin/o3k" "$
 # release is self-describing (the wrapper and its advisory channel table
 # travel with the artifacts they download; the wrapper itself never consults
 # the channel table).
-cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$ROOT_DIR/packaging/bootstrap-testlab.sh" "$ROOT_DIR/packaging/get-o3k.sh" "$ROOT_DIR/packaging/o3k-araf-demo.sh" "$ROOT_DIR/packaging/channels.yaml" "$ROOT_DIR/packaging/release-gate.sh" "$ROOT_DIR/packaging/validate-human-review.sh" "$ROOT_DIR/packaging/scan-release-evidence.sh" "$ROOT_DIR/packaging/generate-candidate-evidence-manifest.py" "$ROOT_DIR/packaging/verify-release-bundle.sh" "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/packaging/o3k-compute.service" "$ROOT_DIR/packaging/o3k-network.service" "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$ROOT_DIR/packaging/backup-trust.example.json" "$OUT_DIR/packaging/"
+cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/ea-preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$ROOT_DIR/packaging/bootstrap-testlab.sh" "$ROOT_DIR/packaging/get-o3k.sh" "$ROOT_DIR/packaging/o3k-araf-demo.sh" "$ROOT_DIR/packaging/channels.yaml" "$ROOT_DIR/packaging/release-gate.sh" "$ROOT_DIR/packaging/validate-human-review.sh" "$ROOT_DIR/packaging/scan-release-evidence.sh" "$ROOT_DIR/packaging/generate-candidate-evidence-manifest.py" "$ROOT_DIR/packaging/verify-release-bundle.sh" "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/packaging/o3k-compute.service" "$ROOT_DIR/packaging/o3k-network.service" "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$ROOT_DIR/packaging/backup-trust.example.json" "$OUT_DIR/packaging/"
 cp -r "$ROOT_DIR/packaging/araf-demo" "$OUT_DIR/packaging/araf-demo"
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/scripts/validate-release-e2e-evidence.py" "$OUT_DIR/scripts/"
@@ -175,7 +178,7 @@ WORKFLOW="${GITHUB_WORKFLOW:-local}"
 # profile explicitly (default: the public single-host demo profile).
 PROFILE_ID="${O3K_PRODUCT_PROFILE_ID:-o3k-demo-v1}"
 case "$PROFILE_ID" in
-  o3k-demo-v1|o3k-small-edge-v1) ;;
+  o3k-demo-v1|o3k-small-edge-v1|o3k-early-access-v1) ;;
   *)
     echo "O3K_PRODUCT_PROFILE_ID must be o3k-demo-v1 or o3k-small-edge-v1: $PROFILE_ID" >&2
     exit 2
@@ -198,6 +201,22 @@ C1_POLICY_PATH="/etc/o3k/installation-policy.json"
 C1_POLICY_FORMAT="o3k-installation-policy-v1"
 if [[ "$C1_INSTALLATION_POLICY_ENABLED" != 0 && "$C1_INSTALLATION_POLICY_ENABLED" != 1 ]]; then
   echo "O3K_C1_INSTALLATION_POLICY_ENABLED must be 0 or 1" >&2; exit 2
+fi
+EA_MANIFEST_FIELDS=
+if [[ "$INSTALLATION_SECURITY_PROFILE" == early-access-v1 ]]; then
+  [[ "$VERSION" == 0.4.1 && "$PROFILE" == libvirt \
+    && "$PROFILE_ID" == o3k-early-access-v1 \
+    && "$C1_INSTALLATION_POLICY_ENABLED" == 0 ]] || {
+    echo "Early Access release requires v0.4.1, libvirt and the EA product profile, with C1 disabled" >&2
+    exit 2
+  }
+  EA_MANIFEST_FIELDS=',"installation_security_profile":"early-access-v1","installation_authority":"installation-local"'
+elif [[ -n "$INSTALLATION_SECURITY_PROFILE" ]]; then
+  echo "unsupported O3K_INSTALLATION_SECURITY_PROFILE: $INSTALLATION_SECURITY_PROFILE" >&2
+  exit 2
+elif [[ "$PROFILE_ID" == o3k-early-access-v1 ]]; then
+  echo "o3k-early-access-v1 requires O3K_INSTALLATION_SECURITY_PROFILE=early-access-v1" >&2
+  exit 2
 fi
 if [[ "$C1_INSTALLATION_POLICY_ENABLED" == 1 ]]; then
   [[ "$C1_POLICY_KEY_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "invalid C1 policy key id" >&2; exit 2; }
@@ -225,13 +244,13 @@ fi
 # covers the installer record too. schema_version is the max migration prefix
 # computed above; upgrade_from.min_version is the operator-declared fence.
 if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
-  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","release_artifact_sha256":"%s","schema_version":"%s","upgrade_from":{"min_version":"%s"}%s}\n' \
+  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","release_artifact_sha256":"%s","schema_version":"%s","upgrade_from":{"min_version":"%s"}%s%s}\n' \
     "$VERSION" "$PROFILE" "$PROFILE_ID" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
-    "$RELEASE_ARTIFACT_SHA256" "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" "$C1_MANIFEST_FIELDS" >"$OUT_DIR/manifest.json"
+    "$RELEASE_ARTIFACT_SHA256" "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" "$C1_MANIFEST_FIELDS" "$EA_MANIFEST_FIELDS" >"$OUT_DIR/manifest.json"
 else
-  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}%s}\n' \
+  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}%s%s}\n' \
     "$VERSION" "$PROFILE" "$PROFILE_ID" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
-    "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" "$C1_MANIFEST_FIELDS" >"$OUT_DIR/manifest.json"
+    "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" "$C1_MANIFEST_FIELDS" "$EA_MANIFEST_FIELDS" >"$OUT_DIR/manifest.json"
 fi
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$OUT_DIR"

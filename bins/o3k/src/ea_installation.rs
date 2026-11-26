@@ -6,19 +6,23 @@
 //! weakens the recovery-qualified selector.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{MapAccess, Visitor},
+};
 use std::{
-    fs,
+    collections::BTreeMap,
+    fmt, fs,
     io::{Read, Write},
-    os::{
-        fd::AsFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::{fd::AsFd, unix::fs::MetadataExt},
     path::Path,
 };
 
 use rustix::{
-    fs::{Mode, OFlags, fstat, open},
+    fs::{
+        AtFlags, Mode, OFlags, RenameFlags, fchmod, fstat, open, openat, renameat_with, statat,
+        unlinkat,
+    },
     process::geteuid,
 };
 
@@ -27,6 +31,121 @@ pub const EA_IDENTITY_PATH: &str = "/etc/o3k/installation-identity.json";
 const EA_KEY_PATH: &str = "/etc/o3k/installation-local.key";
 const C1_POLICY_PATH: &str = "/etc/o3k/installation-policy.json";
 const C1_TRUST_PATH: &str = "/etc/o3k/recovery-trust.json";
+
+struct UniqueManifest(BTreeMap<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for UniqueManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ManifestVisitor;
+        impl<'de> Visitor<'de> for ManifestVisitor {
+            type Value = UniqueManifest;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object with unique manifest keys")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut values = BTreeMap::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if values.insert(key, value).is_some() {
+                        return Err(serde::de::Error::custom("duplicate manifest key"));
+                    }
+                }
+                Ok(UniqueManifest(values))
+            }
+        }
+        deserializer.deserialize_map(ManifestVisitor)
+    }
+}
+
+fn publish_new_file(
+    directory: &fs::File,
+    name: &str,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), &'static str> {
+    let temporary = format!(".{name}.{}.tmp", uuid::Uuid::new_v4());
+    let result = (|| {
+        let fd = openat(
+            directory.as_fd(),
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| "cannot create installation-local trust staging file")?;
+        let mut file = fs::File::from(fd);
+        fchmod(file.as_fd(), Mode::from_raw_mode(mode))
+            .map_err(|_| "cannot set installation-local trust file mode")?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "cannot inspect installation-local trust staging file")?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o7777 != mode
+            || metadata.nlink() != 1
+        {
+            return Err("installation-local trust staging file is unsafe");
+        }
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "cannot persist installation-local trust staging file")?;
+        renameat_with(
+            directory.as_fd(),
+            temporary.as_str(),
+            directory.as_fd(),
+            name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|_| "cannot safely publish installation-local trust file")?;
+        directory
+            .sync_all()
+            .map_err(|_| "cannot persist installation-local trust directory")?;
+        let published = statat(directory.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| "cannot verify published installation-local trust file")?;
+        if published.st_dev != metadata.dev() || published.st_ino != metadata.ino() {
+            return Err("published installation-local trust file changed identity");
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = unlinkat(directory.as_fd(), temporary.as_str(), AtFlags::empty());
+    }
+    result
+}
+
+fn service_uid() -> Result<u32, &'static str> {
+    let passwd_path = Path::new("/etc/passwd");
+    let metadata = fs::symlink_metadata(passwd_path)
+        .map_err(|_| "Early Access service identity cannot be observed")?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err("Early Access service identity database is unsafe");
+    }
+    let contents = fs::read_to_string(passwd_path)
+        .map_err(|_| "Early Access service identity cannot be read")?;
+    let mut matches = contents.lines().filter_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == "o3k")
+            .then(|| fields.nth(1)?.parse::<u32>().ok())
+            .flatten()
+    });
+    let uid = matches
+        .next()
+        .ok_or("Early Access service identity is missing")?;
+    if matches.next().is_some() {
+        return Err("Early Access service identity is ambiguous");
+    }
+    Ok(uid)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Selector {
@@ -100,6 +219,7 @@ pub fn verify_startup(
     }
 
     let identity = read_identity(Path::new(EA_IDENTITY_PATH))?;
+    verify_private_key_posture()?;
     let payload = &identity.payload;
     if payload.format != "o3k-installation-identity-v1"
         || payload.profile != "early-access-v1"
@@ -121,11 +241,12 @@ pub fn verify_startup(
     }
     let data_metadata =
         fs::symlink_metadata(data_root).map_err(|_| "Early Access state root is unavailable")?;
+    let o3k_uid = service_uid()?;
     let config_metadata =
         fs::symlink_metadata("/etc/o3k").map_err(|_| "Early Access config root is unavailable")?;
     if data_metadata.file_type().is_symlink()
         || !data_metadata.is_dir()
-        || data_metadata.uid() != 0
+        || (data_metadata.uid() != 0 && data_metadata.uid() != o3k_uid)
         || data_metadata.mode() & 0o022 != 0
         || config_metadata.file_type().is_symlink()
         || !config_metadata.is_dir()
@@ -147,11 +268,13 @@ pub fn verify_startup(
 fn selector_from_manifest(
     bytes: &[u8],
 ) -> Result<(serde_json::Map<String, serde_json::Value>, Selector), &'static str> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| "installed release manifest is malformed")?;
-    let object = value
-        .as_object()
-        .ok_or("installed release manifest is malformed")?;
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let UniqueManifest(values) = UniqueManifest::deserialize(&mut deserializer)
+        .map_err(|_| "installed release manifest is malformed")?;
+    deserializer
+        .end()
+        .map_err(|_| "installed release manifest is malformed")?;
+    let object = serde_json::Map::from_iter(values);
     let has_c1 = [
         "installation_policy_format",
         "installation_policy_path",
@@ -166,10 +289,10 @@ fn selector_from_manifest(
         return Err("release manifest contains conflicting installation authorities");
     }
     if has_c1 {
-        return Ok((object.clone(), Selector::C1));
+        return Ok((object, Selector::C1));
     }
     if !has_ea_selector {
-        return Ok((object.clone(), Selector::Legacy));
+        return Ok((object, Selector::Legacy));
     }
     if object
         .get("installation_security_profile")
@@ -183,7 +306,7 @@ fn selector_from_manifest(
     {
         return Err("release manifest installation profile or authority is unsupported");
     }
-    Ok((object.clone(), Selector::EarlyAccess))
+    Ok((object, Selector::EarlyAccess))
 }
 
 fn read_identity(path: &Path) -> Result<IdentityEnvelope, &'static str> {
@@ -215,6 +338,21 @@ fn read_identity(path: &Path) -> Result<IdentityEnvelope, &'static str> {
         .map_err(|_| "Early Access installation identity is malformed")?;
     verify_envelope(&envelope)?;
     Ok(envelope)
+}
+
+fn verify_private_key_posture() -> Result<(), &'static str> {
+    let metadata = fs::symlink_metadata(EA_KEY_PATH)
+        .map_err(|_| "Early Access installation-local trust key is unavailable")?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+        || metadata.len() != 32
+    {
+        return Err("Early Access installation-local trust key is unsafe");
+    }
+    Ok(())
 }
 
 fn verify_envelope(envelope: &IdentityEnvelope) -> Result<(), &'static str> {
@@ -279,6 +417,19 @@ pub fn provision(data_root: &Path) -> Result<(), &'static str> {
     {
         return Err("Early Access installation directories are unsafe");
     }
+    let config_fd = open(
+        "/etc/o3k",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|_| "Early Access config root is unavailable")?;
+    let config_directory = fs::File::from(config_fd);
+    let opened_config = config_directory
+        .metadata()
+        .map_err(|_| "Early Access config root is unsafe")?;
+    if opened_config.dev() != config.dev() || opened_config.ino() != config.ino() {
+        return Err("Early Access config root changed during provisioning");
+    }
     let manifest_value: serde_json::Value = serde_json::from_slice(&manifest)
         .map_err(|_| "authenticated Early Access release manifest is malformed")?;
     let version = manifest_value
@@ -324,47 +475,28 @@ pub fn provision(data_root: &Path) -> Result<(), &'static str> {
     };
     let serialized = serde_json::to_vec(&envelope)
         .map_err(|_| "Early Access installation identity cannot be serialized")?;
-    let mut options = fs::OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-    let mut key_file = options
-        .open(EA_KEY_PATH)
-        .map_err(|_| "cannot safely publish installation-local trust material")?;
     let mut signing_key_bytes = key.to_bytes();
-    let key_write = key_file
-        .write_all(&signing_key_bytes)
-        .and_then(|_| key_file.sync_all());
+    let key_result = publish_new_file(
+        &config_directory,
+        "installation-local.key",
+        &signing_key_bytes,
+        0o600,
+    );
     signing_key_bytes.fill(0);
-    if key_write.is_err() {
-        let _ = fs::remove_file(EA_KEY_PATH);
-        return Err("cannot persist installation-local trust material");
-    }
-    let write_result = (|| {
-        let mut options = fs::OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-        let mut identity_file = options
-            .open(EA_IDENTITY_PATH)
-            .map_err(|_| "cannot safely publish Early Access installation identity")?;
-        identity_file
-            .write_all(&serialized)
-            .and_then(|_| identity_file.sync_all())
-            .map_err(|_| "cannot persist Early Access installation identity")?;
-        Ok(())
-    })();
+    key_result?;
+    let write_result = publish_new_file(
+        &config_directory,
+        "installation-identity.json",
+        &serialized,
+        0o644,
+    );
     if write_result.is_err() {
-        let _ = fs::remove_file(EA_KEY_PATH);
-    }
-    if write_result.is_ok() {
-        fs::File::open("/etc/o3k")
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| "cannot persist Early Access installation identity directory")?;
+        let _ = unlinkat(
+            config_directory.as_fd(),
+            "installation-local.key",
+            AtFlags::empty(),
+        );
+        let _ = config_directory.sync_all();
     }
     write_result
 }
@@ -376,6 +508,12 @@ fn is_uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_release_manifest_keys_fail_closed() {
+        let manifest = br#"{"profile_id":"o3k-early-access-v1","profile_id":"legacy","installation_security_profile":"early-access-v1","installation_authority":"installation-local"}"#;
+        assert!(selector_from_manifest(manifest).is_err());
+    }
 
     #[test]
     fn uuid_requires_canonical_spelling() {
@@ -447,5 +585,12 @@ mod tests {
             verify_envelope(&changed),
             Err("Early Access installation identity signature is invalid")
         );
+    }
+
+    #[test]
+    fn postgres_url_uses_the_local_socket_without_a_password() {
+        let options = "postgresql://o3k@%2Fvar%2Frun%2Fpostgresql/o3k"
+            .parse::<sqlx::postgres::PgConnectOptions>();
+        assert!(options.is_ok());
     }
 }

@@ -13,6 +13,7 @@ C1_TRUST_INPUT=
 C1_PREPARE_ONLY=0
 C1_MIGRATE=0
 C1_BACKEND=sqlite
+EA_INSTALL=0
 NETWORK_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
@@ -50,6 +51,9 @@ while (($#)); do
     --c1-prepare-only) C1_PREPARE_ONLY=1; shift;;
     --c1-migrate) C1_MIGRATE=1; shift;;
     --c1-backend) C1_BACKEND="$2"; shift 2;;
+    --installation-security-profile)
+      [[ "$2" == early-access-v1 ]] || { echo "unsupported installation security profile: $2" >&2; exit 2; }
+      EA_INSTALL=1; shift 2;;
     --network-binary) NETWORK_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --release-artifact-sha256) RELEASE_ARTIFACT_SHA256="$2"; shift 2;;
@@ -110,6 +114,87 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_BUNDLE=0
 if [[ -f "$ROOT_DIR/manifest.json" && -f "$ROOT_DIR/SHA256SUMS" ]]; then
   RELEASE_BUNDLE=1
+fi
+if [[ "$EA_INSTALL" == 1 ]]; then
+  [[ "$RELEASE_BUNDLE" == 1 && "$PROFILE" == libvirt && "$NONINTERACTIVE" == 1 \
+    && "$SYSTEM_INSTALL" == 1 && $EUID -eq 0 ]] || {
+    echo "Early Access installation requires an authenticated system libvirt bundle and noninteractive root install" >&2
+    exit 2
+  }
+  python3 - "$ROOT_DIR/manifest.json" <<'PY'
+import json, sys
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate manifest key")
+        result[key] = value
+    return result
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        value = json.load(stream, object_pairs_hook=unique_object)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"O3K installer: EA release manifest is malformed: {error}")
+if (value.get("profile_id"), value.get("installation_security_profile"),
+    value.get("installation_authority")) != (
+        "o3k-early-access-v1", "early-access-v1", "installation-local"):
+    raise SystemExit("O3K installer: requested Early Access profile does not match the release manifest")
+if any(key in value for key in ("installation_policy_authority", "installation_policy_v2_authority",
+                                  "installation_policy_format", "installation_policy_path")):
+    raise SystemExit("O3K installer: EA release contains conflicting C1 authority")
+PY
+  EA_EXISTING=0
+  INSTALLED_RELEASE="$PREFIX/share/o3k/release-manifest.json"
+  INSTALLED_LEDGER="$PREFIX/share/o3k/.o3k-installed"
+  if [[ -e "$INSTALLED_RELEASE" || -e "$INSTALLED_LEDGER" ]]; then
+    [[ -f "$INSTALLED_RELEASE" && ! -L "$INSTALLED_RELEASE" \
+      && -f "$INSTALLED_LEDGER" && ! -L "$INSTALLED_LEDGER" \
+      && -x "$PREFIX/bin/o3k" && -n "$RELEASE_ARTIFACT_SHA256" ]] || {
+      echo "incomplete or foreign installation state blocks Early Access admission" >&2
+      exit 1
+    }
+    python3 - "$INSTALLED_RELEASE" "$RELEASE_ARTIFACT_SHA256" <<'PY'
+import json, sys
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate installed manifest key")
+        result[key] = value
+    return result
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        value = json.load(stream, object_pairs_hook=unique_object)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"O3K installer: installed release manifest is malformed: {error}")
+if (value.get("profile_id"), value.get("installation_security_profile"),
+    value.get("installation_authority"), value.get("release_artifact_sha256")) != (
+        "o3k-early-access-v1", "early-access-v1", "installation-local", sys.argv[2]):
+    raise SystemExit("O3K installer: existing installation is not this exact Early Access artifact")
+PY
+    "$PREFIX/bin/o3k" installation-local-verify --data-root "$DATA_DIR" \
+      || { echo "existing Early Access installation identity is invalid" >&2; exit 1; }
+    EA_EXISTING=1
+  fi
+  if [[ "$EA_EXISTING" == 0 ]]; then
+    for path in "$PREFIX/share/o3k/release-manifest.json" "$PREFIX/share/o3k/.o3k-installed" \
+      "$CONFIG_DIR/installation-policy.json" "$CONFIG_DIR/recovery-trust.json" \
+      "$CONFIG_DIR/installation-identity.json" "$CONFIG_DIR/installation-local.key" \
+      "$CONFIG_DIR/o3k-compute.env" "$CONFIG_DIR/o3k-network.env" \
+      "$PREFIX/bin/o3k-compute" "$PREFIX/bin/o3k-network" \
+      /etc/systemd/system/o3kd.service /etc/systemd/system/o3k-compute.service \
+      /etc/systemd/system/o3k-network.service \
+      /var/lib/o3k-recovery /var/lib/o3k-recovery-state; do
+      if [[ -e "$path" || -L "$path" ]]; then
+        echo "Early Access requires a fresh target; existing installation/recovery state blocks admission: $path" >&2
+        exit 1
+      fi
+    done
+    if [[ -e "$DATA_DIR" ]] && find "$DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      echo "Early Access requires an empty fresh state directory: $DATA_DIR" >&2
+      exit 1
+    fi
+  fi
 fi
 bundle_missing_binary() {
   echo "release bundle is missing required prebuilt binary: $1" >&2
@@ -610,6 +695,75 @@ if ! grep -q '^O3K_DATA_DIR=' "$ENV_FILE"; then
   printf 'O3K_DATA_DIR=%q\n' "$DATA_DIR" >>"$ENV_FILE"
   chmod 0600 "$ENV_FILE"
 fi
+if [[ "$EA_INSTALL" == 1 ]]; then
+  command -v pg_lsclusters >/dev/null 2>&1 \
+    || { echo "pg_lsclusters is required for Early Access PostgreSQL admission" >&2; exit 1; }
+  if ! command -v psql >/dev/null 2>&1 || ! command -v pg_isready >/dev/null 2>&1; then
+    echo "PostgreSQL 16 client tools are required for Early Access" >&2
+    exit 1
+  fi
+  clusters="$(pg_lsclusters --no-header 2>/dev/null)" \
+    || { echo "cannot inspect PostgreSQL cluster inventory" >&2; exit 1; }
+  cluster_count=0
+  while read -r version name _port status owner _data_dir _log_file _extra; do
+    [[ -n "${version:-}" ]] || continue
+    cluster_count=$((cluster_count + 1))
+    [[ "$version" == 16 && "$name" == main && "$status" == online \
+      && "$owner" == postgres && -z "${extra:-}" ]] || {
+      echo "Early Access requires exactly the installer-managed PostgreSQL 16 main cluster" >&2
+      exit 1
+    }
+  done <<<"$clusters"
+  [[ "$cluster_count" == 1 ]] || {
+    echo "Early Access requires exactly one PostgreSQL cluster; found $cluster_count" >&2
+    exit 1
+  }
+  role_exists="$(runuser -u postgres -- psql -X -d postgres -Atqc \
+    "SELECT 1 FROM pg_roles WHERE rolname = 'o3k'")" \
+    || { echo "cannot inspect PostgreSQL roles" >&2; exit 1; }
+  database_owner="$(runuser -u postgres -- psql -X -d postgres -Atqc \
+    "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'o3k'")" \
+    || { echo "cannot inspect PostgreSQL databases" >&2; exit 1; }
+  if [[ -z "$role_exists" && -z "$database_owner" ]]; then
+    runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres \
+      -c 'CREATE ROLE o3k LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION' \
+      -c 'CREATE DATABASE o3k OWNER o3k' >/dev/null \
+      || { echo "could not create the Early Access PostgreSQL role and database" >&2; exit 1; }
+  elif [[ "$role_exists" == 1 && "$database_owner" == o3k ]]; then
+    role_flags="$(runuser -u postgres -- psql -X -d postgres -Atqc \
+      "SELECT rolsuper::int || ':' || rolcreatedb::int || ':' || rolcreaterole::int FROM pg_roles WHERE rolname = 'o3k'")" \
+      || { echo "cannot inspect the O3K PostgreSQL role" >&2; exit 1; }
+    [[ "$role_flags" == 0:0:0 ]] || {
+      echo "existing O3K PostgreSQL role exceeds the least-privilege contract" >&2
+      exit 1
+    }
+  else
+    echo "partial or foreign PostgreSQL O3K role/database state blocks installation" >&2
+    exit 1
+  fi
+  runuser -u o3k -- pg_isready -h /var/run/postgresql -U o3k -d o3k >/dev/null \
+    || { echo "the O3K PostgreSQL database is not ready for the service identity" >&2; exit 1; }
+  if grep -q '^O3K_DATABASE_BACKEND=' "$ENV_FILE"; then
+    grep -qx 'O3K_DATABASE_BACKEND=postgres' "$ENV_FILE" \
+      || { echo "existing database backend conflicts with the Early Access profile" >&2; exit 1; }
+  else
+    printf 'O3K_DATABASE_BACKEND=postgres\n' >>"$ENV_FILE"
+  fi
+  if grep -q '^O3K_DATABASE_URL=' "$ENV_FILE"; then
+    grep -Fqx 'O3K_DATABASE_URL=postgresql://o3k@%2Fvar%2Frun%2Fpostgresql/o3k' "$ENV_FILE" \
+      || { echo "existing database URL conflicts with the Early Access profile" >&2; exit 1; }
+  else
+    printf 'O3K_DATABASE_URL=postgresql://o3k@%%2Fvar%%2Frun%%2Fpostgresql/o3k\n' >>"$ENV_FILE"
+  fi
+  chmod 0600 "$ENV_FILE"
+  if [[ "$EA_EXISTING" == 1 ]]; then
+    "$PREFIX/bin/o3k" installation-local-verify --data-root "$DATA_DIR" \
+      || { echo "existing Early Access installation-local trust verification failed" >&2; exit 1; }
+  else
+    "$PREFIX/bin/o3k" installation-local-provision --data-root "$DATA_DIR" \
+      || { echo "Early Access installation-local trust provisioning failed" >&2; exit 1; }
+  fi
+fi
 if [[ "$PROFILE" == libvirt ]]; then
   for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
     [[ -s "$TLS_DIR/$file" ]] || { echo "libvirt TLS bootstrap is incomplete: $TLS_DIR/$file" >&2; exit 2; }
@@ -719,6 +873,9 @@ fi
 # preserved rather than treated as O3K-owned state.
 CONFIG_FILE_LEDGER="$CONFIG_DIR/.o3k-config-files"
 config_file_specs=(o3kd.env admin-openrc clouds.yaml)
+if [[ "$EA_INSTALL" == 1 ]]; then
+  config_file_specs+=(installation-identity.json installation-local.key)
+fi
 [[ -e "$CONFIG_DIR/o3kd.env.lock" ]] && config_file_specs+=(o3kd.env.lock)
 if [[ "$PROFILE" == libvirt ]]; then
   config_file_specs+=(o3k-compute.env tls/ca.pem tls/server.pem tls/server-key.pem \

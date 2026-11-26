@@ -622,29 +622,6 @@ fetch "$METADATA_BASE/provenance.json" "$METADATA_DIR/provenance.json"
 verify_release_metadata "$METADATA_DIR" "$VERSION"
 step 'release authenticity verified (Sigstore identity/transparency)'
 
-# ---- host dependencies (the one place apt is allowed) -------------------------
-# Mirror the proven clean-VM set (asr-021-cd15263/vm-run.sh cloud-init):
-# ca-certificates curl libvirt-daemon-system libvirt-clients qemu-utils
-# iproute2 dnsmasq-base polkitd genisoimage python3 python3-openstackclient,
-# with the distro-specific QEMU package (Ubuntu 24.04: qemu-kvm; Debian 12:
-# qemu-system-x86), plus openssl (bootstrap-certs.sh) and openssh-client
-# (ssh-keygen in bootstrap-testlab.sh), plus binutils (readelf for the bundled
-# verify-release-bundle.sh glibc floor check). libvirtd is enabled/started
-# exactly like the proven VM setup did. No netplan/NAT/sysctl/host-network
-# writes.
-printf 'installing host dependencies (apt)\n'
-APT_PACKAGES="ca-certificates curl openssl openssh-client binutils libvirt-daemon-system libvirt-clients qemu-utils iproute2 dnsmasq-base polkitd genisoimage python3 python3-openstackclient"
-case "$ID:$VERSION_CODENAME" in
-  ubuntu:noble) APT_PACKAGES="$APT_PACKAGES qemu-kvm" ;;
-  debian:bookworm) APT_PACKAGES="$APT_PACKAGES qemu-system-x86" ;;
-esac
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-# shellcheck disable=SC2086
-apt-get install -y $APT_PACKAGES
-systemctl enable --now libvirtd
-step 'dependencies ready'
-
 # ---- download the certified release bundle ------------------------------------
 ASSET="o3k-${VERSION_NO_V}-linux-x86_64.tar.gz"
 ASSET_URL="$O3K_RELEASE_BASE/v$VERSION_NO_V/$ASSET"
@@ -699,6 +676,85 @@ PY
 bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
   || die "release bundle verification failed for o3k-$VERSION_NO_V"
 step "O3K v$VERSION_NO_V verified"
+
+# The authenticated manifest selects the bounded EA installer explicitly.
+# Duplicate JSON keys and partial/conflicting authority selectors fail closed.
+EA_INSTALL=0
+EA_INSTALL="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
+import json, sys
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate release manifest key")
+        value[key] = item
+    return value
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        manifest = json.load(stream, object_pairs_hook=unique_object)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"O3K installer: release manifest is malformed: {error}")
+ea_fields = ("profile_id", "installation_security_profile", "installation_authority")
+present = [field in manifest for field in ea_fields]
+c1_fields = ("installation_policy_authority", "installation_policy_v2_authority",
+             "installation_policy_format", "installation_policy_path")
+has_ea = any(present)
+if has_ea and (present != [True, True, True] or any(field in manifest for field in c1_fields) or
+               tuple(manifest[field] for field in ea_fields) !=
+               ("o3k-early-access-v1", "early-access-v1", "installation-local")):
+    raise SystemExit("O3K installer: release manifest has unsupported or conflicting installation authority")
+print("1" if has_ea else "0")
+PY
+)" || die 'release manifest installation authority is malformed'
+if [ "$EA_INSTALL" = 1 ]; then
+  if [ -e /usr/local/share/o3k/release-manifest.json ]; then
+    python3 - /usr/local/share/o3k/release-manifest.json "$ARCHIVE_DIGEST" <<'PY'
+import json, sys
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate installed manifest key")
+        result[key] = value
+    return result
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        manifest = json.load(stream, object_pairs_hook=unique_object)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"O3K installer: installed release manifest is malformed: {error}")
+if (manifest.get("profile_id"), manifest.get("installation_security_profile"),
+    manifest.get("installation_authority"), manifest.get("release_artifact_sha256")) != (
+        "o3k-early-access-v1", "early-access-v1", "installation-local", sys.argv[2]):
+    raise SystemExit("O3K installer: existing host is not this exact Early Access installation")
+PY
+    /usr/local/bin/o3k installation-local-verify --data-root /var/lib/o3k \
+      || die 'existing Early Access installation identity is invalid'
+  else
+    bash "$BUNDLE_DIR/packaging/ea-preflight.sh" \
+      || die 'Early Access preflight failed; no host mutation was performed'
+  fi
+fi
+
+# ---- host dependencies (the one place apt is allowed) -------------------------
+# Run only after the exact artifact and bundle have been authenticated.
+printf 'installing host dependencies (apt)\n'
+APT_PACKAGES="ca-certificates curl openssl openssh-client binutils libvirt-daemon-system libvirt-clients qemu-utils iproute2 dnsmasq-base polkitd genisoimage python3 python3-openstackclient"
+case "$ID:$VERSION_CODENAME" in
+  ubuntu:noble) APT_PACKAGES="$APT_PACKAGES qemu-kvm" ;;
+  debian:bookworm) APT_PACKAGES="$APT_PACKAGES qemu-system-x86" ;;
+esac
+if [ "$EA_INSTALL" = 1 ]; then
+  [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || die 'Early Access supports Ubuntu 24.04 LTS only'
+  APT_PACKAGES="$APT_PACKAGES postgresql-16"
+fi
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+# shellcheck disable=SC2086
+apt-get install -y $APT_PACKAGES
+systemctl enable --now libvirtd
+if [ "$EA_INSTALL" = 1 ]; then systemctl enable --now postgresql; fi
+step 'dependencies ready'
+
 bash "$BUNDLE_DIR/packaging/preflight.sh" --profile libvirt --data-dir /var/lib/o3k \
   || die "preflight failed (--profile libvirt --data-dir /var/lib/o3k): the host does not meet the certified TestLab requirements"
 step 'KVM available'
@@ -732,8 +788,11 @@ fi
 # below wins the NodeRegistry epoch race (see the canonical bootstrap section).
 # --release-artifact-sha256: the tarball digest verified above is persisted in
 # the installed release manifest (backup artifacts bind the exact release).
+EA_SECURITY_ARG=
+if [ "$EA_INSTALL" = 1 ]; then EA_SECURITY_ARG='--installation-security-profile early-access-v1'; fi
+# shellcheck disable=SC2086
 bash "$BUNDLE_DIR/packaging/install.sh" --profile libvirt --noninteractive \
-  --defer-compute-start \
+  $EA_SECURITY_ARG --defer-compute-start \
   --release-artifact-sha256 "$ARCHIVE_DIGEST" \
   --binary "$BUNDLE_DIR/bin/o3kd" --compute-binary "$BUNDLE_DIR/bin/o3k-compute" \
   --o3k-binary "$BUNDLE_DIR/bin/o3k" \
@@ -958,7 +1017,11 @@ step 'o3k doctor healthy'
 # bounded flat network, keypair, test-vm) through the supported public CLI
 # after canonical bootstrap. The script fails closed unless the canonical
 # bootstrap state is durably ready; it fabricates nothing itself.
-bash "$BUNDLE_DIR/packaging/bootstrap-testlab.sh" || die 'TestLab bootstrap failed'
+if [ "$EA_INSTALL" = 0 ]; then
+  bash "$BUNDLE_DIR/packaging/bootstrap-testlab.sh" || die 'TestLab bootstrap failed'
+else
+  printf 'Early Access profile selected; disposable TestLab demo resources are not created\n'
+fi
 pp4_stamp T5
 O3K_MANIFEST_SOURCE="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
 import json
@@ -978,6 +1041,14 @@ PY
 # bounded OpenStack compatibility without downloading or starting a separately
 # versioned dashboard. The default remains the historical demo path so the
 # PP.3/PP.4A integration entrypoint and its contracts are preserved.
+if [ "$EA_INSTALL" = 1 ]; then
+  printf '\nO3K Early Access services ready\n'
+  printf '  version: %s\n' "$VERSION"
+  printf '  source: %s\n' "$O3K_MANIFEST_SOURCE"
+  printf '  BuildingBlock: %s\n' "$BUILDING_BLOCK_ID"
+  printf '  database: PostgreSQL 16 (installation-local)\n'
+  exit 0
+fi
 if [ "${O3K_SKIP_ARAF:-0}" = 1 ]; then
   printf 'Araf demo stage skipped by O3K_SKIP_ARAF=1 (PP.4 Core; PP.4A remains available separately)\n'
   printf '\nO3K Core demo ready\n\n'
