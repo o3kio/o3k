@@ -806,6 +806,47 @@ profiles:
       - live migration
       - arbitrary OpenStack parity
       - unsupported external services
+  o3k-early-access-v1:
+    implementation_state: >-
+      Owner-directed bounded EA contract is accepted in ADR-0191 and SPEC-0052.
+      Runtime admission and unattended PostgreSQL 16 installation are under
+      review in stacked implementation PRs; no exact-artifact host gate has
+      passed and customer deployment remains prohibited.
+    source_commit: 33cd6116bcd24b260ff81efe998e16c655ab67a7
+    portable_evidence:
+      - name: ea-profile-registry-and-status-contract
+        state: not-executed
+        note: >-
+          Governance CI validates the registry/status pairing; this is not
+          runtime or release evidence.
+      - name: ea-runtime-admission-and-c1-isolation
+        state: not-executed
+        note: Implementation PR is under review; portable regression results do not qualify the real-host profile gate.
+    protected_component_evidence:
+      - name: ea-ubuntu-24-04-postgresql-16-installation
+        state: not-executed
+        note: Requires the exact authenticated EA release artifact on a qualified host.
+    full_profile_evidence:
+      - name: spec-0052-section-8-early-access-gate
+        state: not-proven
+        note: All required profile-specific evidence remains a release blocker.
+    release_relevance: >-
+      Targeted for O3K v0.4.1 Early Access only after SPEC-0052 evidence,
+      independent security review, and explicit owner release GO.
+    blockers:
+      - exact-artifact fresh-install and PostgreSQL 16 host evidence
+      - complete SPEC-0052 section 8 lifecycle, failure, security, and rebuild evidence
+      - focused independent security review
+      - explicit owner release GO
+    next_evidence_action: >-
+      Complete the runtime and installer implementation reviews, then execute
+      every SPEC-0052 section 8 check against the exact authenticated artifact.
+    explicitly_unproven_claims:
+      - customer deployment readiness
+      - production certification or GA
+      - HA or automatic evacuation
+      - live migration or general disaster recovery
+      - support beyond the one-to-three-host initial profile
 
 # Fabric v3 current acceptance status for the Neutron port-status projection
 # candidate. A policy deferral is deliberately distinct from evidence PASS.
