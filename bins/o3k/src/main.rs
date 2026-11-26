@@ -39,6 +39,13 @@ enum Commands {
         #[arg(long, default_value = "new-install")]
         mode: String,
     },
+    /// Create installation-local trust for a fresh authenticated EA install
+    /// (root-only; never creates C1 recovery authority)
+    #[command(hide = true)]
+    InstallationLocalProvision {
+        #[arg(long)]
+        data_root: Option<std::path::PathBuf>,
+    },
     /// Create per-installation recovery directories and emit the unsigned,
     /// non-secret provisioning descriptor for the offline signer (root-only)
     #[command(hide = true)]
@@ -293,6 +300,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("installation provisioning failed: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::InstallationLocalProvision { data_root } => {
+            let data_root = data_root.unwrap_or_else(|| Path::new("/var/lib/o3k").to_path_buf());
+            match o3k::ea_installation::provision(&data_root) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(reason) => {
+                    eprintln!("Early Access installation trust provisioning failed: {reason}");
                     ExitCode::from(1)
                 }
             }
