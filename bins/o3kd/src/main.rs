@@ -18,8 +18,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the API listener, or opening canonical state. A custom TestLab data
     // directory remains accepted only when no installed release authority
     // claims this host.
-    o3k::recovery_installation::deny_control_plane_startup_access(&config.data_dir)
-        .map_err(std::io::Error::other)?;
+    let backend = match config.database_backend {
+        o3k_config::DatabaseBackend::Postgres => "postgresql",
+        o3k_config::DatabaseBackend::Sqlite => "sqlite",
+    };
+    o3k::recovery_installation::deny_control_plane_startup_access_for_backend(
+        &config.data_dir,
+        backend,
+    )
+    .map_err(std::io::Error::other)?;
     let subscriber =
         tracing_subscriber::fmt().with_env_filter(EnvFilter::try_new(&config.log_filter)?);
     match config.log_format {
