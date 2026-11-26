@@ -78,6 +78,16 @@ pub fn deny_control_plane_startup_access(configured_data_dir: &Path) -> Result<(
     deny_installed_executable_access(configured_data_dir, Path::new("/usr/local/bin/o3kd"))
 }
 
+/// Control-plane startup guard that also binds an EA identity to the selected
+/// database backend before composition opens durable state.
+pub fn deny_control_plane_startup_access_for_backend(
+    configured_data_dir: &Path,
+    expected_backend: &str,
+) -> Result<()> {
+    crate::ea_installation::verify_startup(configured_data_dir, Some(expected_backend))?;
+    deny_installed_executable_access(configured_data_dir, Path::new("/usr/local/bin/o3kd"))
+}
+
 /// Guards operator maintenance commands with the same fixed installation
 /// authority as the packaged CLI.
 pub fn deny_operator_startup_access(configured_data_dir: &Path) -> Result<()> {
@@ -189,6 +199,7 @@ pub fn deny_operational_access_for_backend(
     data_dir: &Path,
     expected_backend: Option<&str>,
 ) -> Result<()> {
+    crate::ea_installation::verify_startup(data_dir, expected_backend)?;
     // A source-built TestLab process uses a non-default data directory and
     // has no installed release manifest. It is not an installed O3K
     // installation: leave its existing startup lifecycle unchanged. The

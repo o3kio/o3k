@@ -69,6 +69,8 @@ pub mod output;
 #[cfg(target_os = "linux")]
 pub use backup_pg_dump::restore_pg_validation;
 #[cfg(target_os = "linux")]
+pub mod ea_installation;
+#[cfg(target_os = "linux")]
 pub mod recovery_files;
 #[cfg(target_os = "linux")]
 pub mod recovery_identity;
