@@ -46,6 +46,12 @@ enum Commands {
         #[arg(long)]
         data_root: Option<std::path::PathBuf>,
     },
+    /// Verify the existing installation-local identity (root-only installer check)
+    #[command(hide = true)]
+    InstallationLocalVerify {
+        #[arg(long)]
+        data_root: Option<std::path::PathBuf>,
+    },
     /// Create per-installation recovery directories and emit the unsigned,
     /// non-secret provisioning descriptor for the offline signer (root-only)
     #[command(hide = true)]
@@ -313,6 +319,20 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(reason) => {
                     eprintln!("Early Access installation trust provisioning failed: {reason}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::InstallationLocalVerify { data_root } => {
+            let data_root = data_root.unwrap_or_else(|| Path::new("/var/lib/o3k").to_path_buf());
+            match o3k::ea_installation::verify_startup(&data_root, Some("postgresql")) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => {
+                    eprintln!("Early Access installation identity is not selected");
+                    ExitCode::from(1)
+                }
+                Err(reason) => {
+                    eprintln!("Early Access installation identity verification failed: {reason}");
                     ExitCode::from(1)
                 }
             }
