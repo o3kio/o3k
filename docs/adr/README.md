@@ -200,6 +200,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0188](ADR-0188-stable-host-compute-and-network-agent-identity-separation.md) (accepted; separates canonical host identity from compute/network execution identities)
 - [ADR-0189](ADR-0189-pp6-control-plane-backup-and-restore.md) (technical contract accepted at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`; implementation and release evidence remain gated)
 - [ADR-0190](ADR-0190-pp6-interim-single-maintainer-review-gate.md) (human decision accepted; durable decision URL and protected integration pending; governance only)
+- [ADR-0191](ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md) (owner-directed EA profile accepted; implementation, security review and release evidence remain gated)
 
 ## Required audit
 

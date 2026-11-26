@@ -1,5 +1,7 @@
 # ADR-0191 — Owner-directed Early Access adoption and installation trust
 
+Affected-services: cloud-kernel, iam, compute, network, storage, installer, operations, governance
+
 Status: Accepted — owner-directed decision; implementation, independent security review and release evidence remain gated  
 Date: 2026-11-25  
 Human decision: O3K project owner, explicit decision supplied 2026-11-25  
