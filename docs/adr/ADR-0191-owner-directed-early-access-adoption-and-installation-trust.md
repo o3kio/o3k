@@ -2,11 +2,11 @@
 
 Affected-services: cloud-kernel, iam, compute, network, storage, installer, operations, governance
 
-Status: Accepted — owner-directed decision; implementation, independent security review and release evidence remain gated  
-Date: 2026-11-25  
-Human decision: O3K project owner, explicit decision supplied 2026-11-25  
-Supersedes: PP.5/PP.6/PP.7 as mandatory release prerequisites for the Early Access objective; supersedes only the C1 fresh-install requirement where this ADR explicitly defines the EA profile  
-Amends: ADR-0163, ADR-0189, ADR-0190, SPEC-0024, SPEC-0050  
+Status: Accepted — owner-directed decision; implementation, independent security review and release evidence remain gated
+Date: 2026-11-25
+Human decision: O3K project owner, explicit decision supplied 2026-11-25
+Supersedes: PP.5/PP.6/PP.7 as mandatory release prerequisites for the Early Access objective; supersedes only the C1 fresh-install requirement where this ADR explicitly defines the EA profile
+Amends: ADR-0163, ADR-0189, ADR-0190, SPEC-0024, SPEC-0050
 Related: ADR-0165, ADR-0166, ADR-0167, ADR-0160, ADR-0162, SPEC-0020, SPEC-0021, SPEC-0022, SPEC-0024, SPEC-0025
 
 ## Context

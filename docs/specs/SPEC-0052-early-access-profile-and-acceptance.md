@@ -1,9 +1,9 @@
 # SPEC-0052 — O3K Early Access profile and acceptance
 
-Status: Accepted owner-directed profile contract; implementation, independent security review, and release evidence remain gated  
-Authority: [ADR-0191](../adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)  
-Date: 2026-11-25  
-Release target: `v0.4.1` (subject to versioning conventions and protected release workflow)  
+Status: Accepted owner-directed profile contract; implementation, independent security review, and release evidence remain gated
+Authority: [ADR-0191](../adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
+Date: 2026-11-25
+Release target: `v0.4.1` (subject to versioning conventions and protected release workflow)
 Parent: new Early Access adoption epic replacing the PP release dependency
 
 ## 1. Purpose and claim boundary

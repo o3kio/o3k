@@ -1,9 +1,9 @@
 # Early Access roadmap traceability
 
-Date: 2026-11-25  
-Authority: [ADR-0191](../adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)  
-Acceptance contract: [SPEC-0052](../specs/SPEC-0052-early-access-profile-and-acceptance.md)  
-Adoption epic: [#1241](https://github.com/o3kio/o3k/issues/1241)  
+Date: 2026-11-25
+Authority: [ADR-0191](../adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
+Acceptance contract: [SPEC-0052](../specs/SPEC-0052-early-access-profile-and-acceptance.md)
+Adoption epic: [#1241](https://github.com/o3kio/o3k/issues/1241)
 Status: issue transfer plan; no acceptance result is implied
 
 This matrix replaces the PP.5/PP.6/PP.7 release dependency with the bounded EA

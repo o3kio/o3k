@@ -1,7 +1,7 @@
 # Owner-directed Early Access roadmap reset — implementation plan
 
-Date: 2026-11-25  
-Issue: replacement adoption epic for #968, #974, #975 and #976 (created after this plan)  
+Date: 2026-11-25
+Issue: replacement adoption epic for #968, #974, #975 and #976 (created after this plan)
 Owner direction: this task's explicit O3K project-owner decision, 2026-11-25
 
 ## Selected profile and authority
