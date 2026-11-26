@@ -98,6 +98,9 @@ pub fn deny_operator_startup_access(configured_data_dir: &Path) -> Result<()> {
 /// operate on an authenticated recovery-designated installation. This checks
 /// format and generation integrity without granting ordinary runtime access.
 pub fn verify_operator_installation_selector(configured_data_dir: &Path) -> Result<()> {
+    if crate::ea_installation::verify_startup(configured_data_dir, None)? {
+        return Err("C1 recovery commands are unsupported in Early Access");
+    }
     let executable =
         std::env::current_exe().map_err(|_| "installed executable identity is unavailable")?;
     if fixed_release_manifest_requires_selector()?
@@ -173,6 +176,8 @@ fn manifest_requires_selector(manifest: &[u8]) -> bool {
         "installation_policy_v2_authority",
         "installation_policy_format",
         "installation_policy_path",
+        "installation_security_profile",
+        "installation_authority",
     ]
     .iter()
     .any(|field| value.get(field).is_some())
@@ -199,7 +204,10 @@ pub fn deny_operational_access_for_backend(
     data_dir: &Path,
     expected_backend: Option<&str>,
 ) -> Result<()> {
-    crate::ea_installation::verify_startup(data_dir, expected_backend)?;
+    let ea_selected = crate::ea_installation::verify_startup(data_dir, expected_backend)?;
+    if ea_selected {
+        return Ok(());
+    }
     // A source-built TestLab process uses a non-default data directory and
     // has no installed release manifest. It is not an installed O3K
     // installation: leave its existing startup lifecycle unchanged. The
@@ -2754,6 +2762,9 @@ mod tests {
     fn v2_only_release_authority_requires_selector_for_every_consumer() {
         assert!(manifest_requires_selector(
             br#"{"installation_policy_v2_authority":{"key_id":"policy-v2"}}"#
+        ));
+        assert!(manifest_requires_selector(
+            br#"{"profile_id":"o3k-early-access-v1","installation_security_profile":"early-access-v1","installation_authority":"installation-local"}"#
         ));
         assert!(!manifest_requires_selector(
             br#"{"version":"0.4.0-rc.5","source_commit":"legacy-source-fixture"}"#

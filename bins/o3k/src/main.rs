@@ -668,6 +668,8 @@ fn require_selector_if_installed() -> bool {
                         || value.get("installation_policy_path").is_some()
                         || value.get("installation_policy_authority").is_some()
                         || value.get("installation_policy_v2_authority").is_some()
+                        || value.get("installation_security_profile").is_some()
+                        || value.get("installation_authority").is_some()
                 }
                 Err(_) => {
                     eprintln!("o3k maintenance: installed release manifest is malformed");

@@ -67,21 +67,21 @@ struct IdentityEnvelope {
 pub fn verify_startup(
     data_root: &Path,
     expected_backend: Option<&str>,
-) -> Result<(), &'static str> {
+) -> Result<bool, &'static str> {
     let manifest_path = Path::new("/usr/local/share/o3k/release-manifest.json");
     let manifest = match crate::upgrade::release_identity::read_fixed_installed_release_manifest() {
         Ok(bytes) => bytes,
         Err(_) => {
             return match fs::symlink_metadata(manifest_path) {
                 Ok(_) => Err("installed release manifest is unsafe or unavailable"),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(_) => Err("installed release manifest cannot be observed"),
             };
         }
     };
     let (object, selector) = selector_from_manifest(&manifest)?;
     match selector {
-        Selector::Legacy | Selector::C1 => return Ok(()),
+        Selector::Legacy | Selector::C1 => return Ok(false),
         Selector::EarlyAccess => {}
     }
 
@@ -141,7 +141,7 @@ pub fn verify_startup(
     if !is_uuid(&payload.installation_id) || !is_uuid(&payload.site_id) {
         return Err("Early Access installation identity is malformed");
     }
-    Ok(())
+    Ok(true)
 }
 
 fn selector_from_manifest(
