@@ -1,7 +1,6 @@
 # SPEC-0050 — PP.6 control-plane backup and restore
 
-Status: Accepted technical contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, with accepted C1 merge `ea4f705efba72421f368903be71a0e792851813f` and A10 merge `ca8fe3033ace09cf7b7a43286522dbd3e6ad326a`;
-implementation and release evidence remain gated
+Status: Accepted technical contract for recovery-qualified installs, amended by ADR-0191 for the separate Early Access trust profile; implementation and release evidence remain gated
 Authority proposal: ADR-0189
 Issue: #975, reusing #640
 Profile scope: `o3k-demo-v1` SQLite where retained; `o3k-small-edge-v1`
@@ -40,6 +39,31 @@ no independent security review is claimed. Acceptance does not cover later
 contract revisions, SPEC-0051, runtime correctness, release readiness, or
 production evidence. The implementation and evidence gates below remain
 mandatory.
+
+## 0.1 Early Access profile amendment (2026-11-25)
+
+ADR-0191 and SPEC-0052 add a separate `o3k-early-access-v1` installation
+profile with `installation-local` trust for an explicitly selected,
+authenticated fresh install. This specification's backup, restore, signing,
+restore-journal, recovery designation, fencing and activation authority now
+applies only to `recovery-qualified-v1` installations. C1 remains
+fail-closed and unchanged for those installations.
+
+EA is not a backup/restore profile. Advanced restore designation, restore
+activation, recovery journal transitions, and reanchor remain unavailable in
+EA until separately specified and qualified. C1 state that is absent,
+malformed, unreadable, corrupt, copied or otherwise ambiguous never enables
+EA admission. Profile selection must be authenticated by the release manifest
+and bound in the durable installation identity. C1-to-EA and EA-to-C1 in-place
+transitions are unsupported. These admission and denial requirements are
+normative in SPEC-0052 §§4.1–4.4.
+
+The EA profile does not inherit this specification's offline custodian
+ceremony as a prerequisite to fresh installation. It also does not inherit
+any restore capability: loss of controller state requires a documented clean
+rebuild, while operators independently protect guest disks and external
+storage data. This amendment changes profile scope and roadmap priority; it
+does not mark PP.6 work implemented, executed or passed.
 
 The consolidated D2/D4/D7/D8/D9/D10/D12/D13 decision request and
 exact-revision record are in

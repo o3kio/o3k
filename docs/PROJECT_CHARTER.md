@@ -29,18 +29,25 @@ The normative Cloud OS decision is
 
 ## Current release reality
 
-O3K remains alpha software.
+O3K is pursuing an owner-directed **Early Access** baseline for Ubuntu 24.04,
+one active controller, PostgreSQL 16, KVM/libvirt, and one to three
+hypervisors. The candidate profile is for development, test, and selected
+replaceable non-critical semi-production workloads. Customer deployment is
+not authorized until the SPEC-0052 bounded evidence gate passes on an exact
+authenticated release artifact and the owner approves publication.
 
-The immediate release target is:
+The target is `v0.4.1`, titled **O3K v0.4.1 — Early Access**, subject to
+repository versioning and protected release workflow. This is not GA or full
+production certification. No HA, automatic evacuation, live migration,
+enterprise SLA, general disaster-recovery, or broad OpenStack parity claim is
+made. PP.5, PP.6, and PP.7 are no longer mandatory predecessors for this
+objective; their remaining requirements are transferred to future milestones
+without changing any evidence state. The accepted owner decision is ADR-0191;
+the profile and gate are SPEC-0052.
 
-> **O3K v0.2.0-alpha.1 — Rust-native OpenStack-compatible libvirt TestLab
-> alpha.**
-
-The current release must not claim production readiness, HA, full OpenStack
-parity, PostgreSQL support, native Cinder support, broad federation, or fixed
-footprint without the required executable evidence.
-
-The Cloud OS architecture must not derail this bounded release.
+The immutable `v0.4.0` artifact remains test-use-only and retains its pinned
+C1 authority. It is not an Early Access release and must not be retagged or
+replaced.
 
 ## Product promises
 

@@ -1,7 +1,11 @@
-# PP.6 production operations gap analysis
+# Historical PP.6 production operations gap analysis
 
-Status: engineering audit for PP.6 #975; not acceptance evidence or a
-certification.
+Status: point-in-time engineering audit for PP.6 #975; PP.6 is superseded as
+an Early Access release prerequisite by ADR-0191/SPEC-0052. This is not
+acceptance evidence or certification. Reclassify outstanding requirements
+through [the EA traceability matrix](../roadmap/early-access-traceability.md);
+do not treat this audit's historical PP sequencing as the current release
+gate.
 
 Baseline: protected `main` `c5197f845b81058bc769b52a0c97329211ff9454`
 (2026-10-15). Profile scope is the PP.6 bounded O3K Demo/Small Edge profiles;
@@ -11,8 +15,9 @@ PP.6 completion.
 
 ## Summary
 
-PP.6 can proceed while the S3/S10/S20, K-min/K-full, and physical-deployment
-PP.5 acceptance campaigns remain deferred. The PP.5 gates remain mandatory.
+Historically, PP.6 could proceed while PP.5 scale/physical-deployment gates
+remained deferred. The owner-directed EA objective now uses its own bounded
+gate; neither this audit nor prior PP evidence substitutes for SPEC-0052.
 Several requested components already exist and should be extended at their
 current authority boundaries: store-level SQLite snapshots, upgrade rollback,
 native operator diagnostics, bootstrap enrollment, durable Operations, and

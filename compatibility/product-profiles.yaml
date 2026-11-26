@@ -363,6 +363,59 @@ profiles:
     normative_spec: docs/specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md
     contract: contracts/release-bundle-v1.yaml
 
+  # Owner-directed Early Access profile. It is explicitly separate from the
+  # deferred PP.5/PP.6/PP.7 certification envelope; the current evidence gate
+  # is not yet run and customer deployment remains prohibited until SPEC-0052
+  # passes on an exact authenticated release artifact.
+  - id: o3k-early-access-v1
+    maturity: accepted-contract-evidence-pending
+    parent_profile: o3k-small-edge-v1
+    owner_directed_adr: docs/adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md
+    normative_spec: docs/specs/SPEC-0052-early-access-profile-and-acceptance.md
+    user_outcome: >
+      Operate a bounded O3K Core for development, test, and selected replaceable
+      non-critical semi-production workloads while collecting adoption feedback.
+    supported_targets:
+      os: [ubuntu-24.04]
+      arch: x86_64
+      hosts: {initial_minimum: 1, initial_maximum: 3, five_host_expansion_requires: separate-evidence-and-owner-decision}
+    controller: {active_controllers: 1, ha: unsupported}
+    database: {required: postgresql, version: 16, support_is_profile_specific: true}
+    compute_provider: libvirt-kvm-via-o3k-compute-agent
+    interfaces: [native-api, o3k-cli, already-advertised-compatibility-operations]
+    capabilities:
+      - canonical-iam-and-authorization
+      - compute-lifecycle
+      - network-lifecycle
+      - storage-lifecycle
+      - resource-ownership-and-reconciliation
+    installation_trust:
+      profile: early-access-v1
+      authority: installation-local
+      fresh-install-only: true
+      c1-recovery-ceremony-required: false
+      recovery_activation: unsupported
+      profile_transition: unsupported
+    workload_boundary:
+      allowed: [development, test, selected-replaceable-non-critical-semi-production]
+      customer_deployment_before_gate: prohibited
+    known_limitations:
+      - no-ha
+      - no-automatic-evacuation
+      - no-live-migration
+      - no-enterprise-sla
+      - no-general-disaster-recovery
+      - no-full-production-certification
+      - no-arbitrary-host-count
+    required_evidence:
+      - SPEC-0052-section-8-bounded-early-access-acceptance-gate
+      - independent-security-review
+      - owner-release-go
+    evidence_state: not-run
+    release_blocking_for_profile: true
+    release_blocking_for_first_alpha: false
+    footprint_claim: unmeasured
+
 claim_rules:
   cloud_operating_system:
     type: architecture-and-product-direction

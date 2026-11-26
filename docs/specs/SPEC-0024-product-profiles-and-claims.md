@@ -1,6 +1,6 @@
 # SPEC-0024 — Product profiles and claims
 
-Status: Accepted
+Status: Accepted; profile and release-maturity claims amended by owner-directed ADR-0191 and SPEC-0052
 
 Related decisions and specifications:
 
@@ -8,6 +8,8 @@ Related decisions and specifications:
 - [ADR-0165](../adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166](../adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
 - [ADR-0182](../adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
+- [ADR-0191](../adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
+- [SPEC-0052](SPEC-0052-early-access-profile-and-acceptance.md)
 - [SPEC-0020](SPEC-0020-keystone-trust-catalog-and-auth-context.md)
 - [SPEC-0022](SPEC-0022-service-api-baseline-and-evidence-gates.md)
 - [SPEC-0023](SPEC-0023-external-cinder-service-under-test.md)
@@ -43,6 +45,16 @@ Current release wording must still identify actual maturity, for example:
 
 > O3K v0.2.0-alpha.1 is a Rust-native OpenStack-compatible libvirt TestLab
 > alpha.
+
+The owner-directed release target is `v0.4.1 — Early Access`, governed by
+ADR-0191 and SPEC-0052. This is a separate bounded deployment/evidence profile:
+Ubuntu 24.04 LTS, one active controller, PostgreSQL 16, KVM/libvirt, initially
+one to three hypervisors. It is not supported for customer deployment until its
+exact-artifact acceptance gate passes and the owner records GO. This profile
+does not imply GA, full production certification, HA, automatic evacuation,
+live migration, enterprise SLA, general DR, arbitrary host-count support, or
+full OpenStack parity. The existing `v0.4.0` artifact remains immutable and
+test-use-only.
 
 "Cloud Operating System" and "edge to datacenter" describe architecture/
 direction. They are not evidence for production readiness, HA, full OpenStack

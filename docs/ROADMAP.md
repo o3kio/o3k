@@ -6,6 +6,37 @@ O3K develops one product:
 
 > **O3K Cloud OS — a lightweight, open, Rust-native Cloud Operating System.**
 
+## Owner-directed Early Access objective (2026-11-25)
+
+The immediate roadmap objective is adoption of a usable, stable-enough O3K
+Core baseline for selected early adopters, development/test, and bounded
+replaceable non-critical semi-production workloads. The accepted profile and
+its security boundary are [ADR-0191](adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
+and [SPEC-0052](specs/SPEC-0052-early-access-profile-and-acceptance.md).
+
+The profile is Ubuntu 24.04 LTS, one active controller, PostgreSQL 16,
+KVM/libvirt, and one to three hypervisors. Expansion to five requires evidence
+and a separate owner decision. Customer deployments remain prohibited until
+the exact authenticated release passes all SPEC-0052 acceptance items and the
+owner approves release publication. Target release: `v0.4.1`, **O3K v0.4.1 —
+Early Access**, subject to version conventions and the protected release
+workflow.
+
+PP.5 (#974), PP.6 (#975), and PP.7 (#976) are no longer mandatory release
+predecessors for Early Access. Their uncompleted work is classified and
+transferred; past implementation/evidence remains intact, and NOT_RUN or
+ACCEPTANCE_PENDING results are not promoted. The PP parents close only as
+superseded after the new adoption epic and traceability map are recorded.
+
+No HA, automatic evacuation, live migration, enterprise SLA, general DR,
+full production certification, broad OpenStack parity, or arbitrary host-count
+support is implied. S10, S20, K-min, K-full and advanced restore activation
+remain future milestones. Araf planning may target the accepted EA API baseline
+after its gate rather than wait on PP.7.
+
+The immutable `v0.4.0` remains test-use-only and its existing C1 authority is
+unchanged. Its tag, artifacts, and evidence are not replaced or relabeled.
+
 Primary product targets remain:
 
 1. an OpenStack-compatible native O3K cloud;
@@ -36,9 +67,9 @@ exact tested Kubernetes topology.
 The post-foundation milestones increase **tenant-visible cloud product
 capability**, not infrastructure abstraction for its own sake.
 
-## PP.4 Core release-gate state
+## Historical PP.4 Core release-gate state
 
-PP.4 Core is the current productization and release-hardening gate, not a
+PP.4 Core was the former productization and release-hardening gate, not a
 production-readiness declaration. Immutable `v0.4.0-rc.21` evidence proves
 native replay convergence on SQLite/PostgreSQL and a fresh Ubuntu native/KVM
 smoke. Immutable `v0.4.0-rc.22` proves the fresh-Ubuntu native lifecycle,
@@ -50,9 +81,10 @@ proved necessary (Horizon login/bootstrap identity compatibility and bounded
 Nova/Neutron collection pagination); no successor is named, tagged or
 published here, and the complete Ubuntu 24.04 + Debian 12 native-first
 lifecycle, bounded Horizon witness, reinstall/purge, foreign-state and secret
-checks remain pending. PP.5 remains dependent on PP.4 Core, PP.7 remains later
-certification, and Araf successor certification is tracked separately by
-#1029.
+checks remain pending. The former PP dependency description is historical:
+ADR-0191/SPEC-0052 and #1241 define the owner-directed EA path, with PP
+acceptance incomplete and not a prerequisite. See the
+[EA traceability matrix](roadmap/early-access-traceability.md).
 
 ## P9 — O3K Routed Fabric v1 — completed profile
 
@@ -564,16 +596,15 @@ in `docs/architecture/p15-0-post-araf-current-state-audit.md`; the post-#928
 gap truth lives in `docs/architecture/p15-e2d-gap-register.md`; implementation
 prompts live under `docs/prompts/p15/`.
 
-## PP — Production Phase (umbrella #968)
+## Historical PP program (umbrella #968; superseded as release-governance root)
 
-**Current phase state (2026-10-15):** PP.4 Core is complete; PP.5 (#974) remains
-open, with affordable engineering/correctness work continuing and expensive
-scale, endurance, and physical-deployment acceptance deferred by policy; PP.6
-(#975) is the next active engineering phase; PP.7 (#976) is final certification
-and is not yet authorized. Deferral leaves the affected PP.5 gates mandatory
-and `ACCEPTANCE_PENDING`; it is neither PASS nor waiver. No release publication,
-stable-release claim, or production certification follows from this sequence.
-See [the accepted PP execution strategy](pp/PRODUCTION_FIRST_SEQUENCE.md).
+**Historical state (2026-10-15; PP release dependency superseded by ADR-0191):**
+PP.4 Core was complete; PP.5 (#974) and PP.6 (#975) acceptance remained
+pending; PP.7 (#976) was not authorized. No unexecuted test is promoted to
+PASS. PP issue status and evidence are preserved and reclassified in
+[the EA traceability matrix](roadmap/early-access-traceability.md). The
+historical [PP execution strategy](pp/PRODUCTION_FIRST_SEQUENCE.md) remains
+reference for PP evidence but no longer defines the EA release gate.
 
 P15 is complete: the protected certification run 35365369016 passed the P15.7
 scale/composition convergence gate at the exact completion SHA 096e4679.
@@ -615,7 +646,7 @@ product baseline:
   PP.5 dependency for the O3K Core claim. An O3K + Araf claim requires its own
   accepted evidence.
 
-PP execution dependency:
+Former PP execution dependency (historical; superseded for EA by ADR-0191):
 
 ```text
 PP.4 Core (#973) COMPLETE
@@ -626,12 +657,10 @@ PP.4 Core (#973) COMPLETE
                                  └──> PP.5 may remain open while PP.6 proceeds
 ```
 
-PP.5 remains open until every mandatory acceptance gate passes, including the
-currently deferred S3/S10/S20, K-min/K-full, and physical-deployment acceptance
-work. `ENGINEERING_COMPLETE`, `DEFERRED_BY_POLICY`, `ACCEPTANCE_PENDING`, and
-`CERTIFIED` describe different states; see
-`docs/pp/PRODUCTION_FIRST_SEQUENCE.md`. PP.6 engineering may proceed while
-PP.5 acceptance is pending. PP.7 final certification is not yet authorized.
+This former dependency graph is retained only as historical PP context. The
+PP tracks are incomplete and remain so; S10/S20/K-min/K-full and comprehensive
+DR are future milestones, not EA release gates. The EA release gate is
+SPEC-0052 §8.
 
 Horizon is an external OpenStack compatibility witness, not the O3K dashboard
 or an authority.
