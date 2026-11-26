@@ -289,6 +289,9 @@ fn main() -> ExitCode {
             trust,
             mode,
         } => {
+            if !require_non_ea_recovery_profile("installation provisioning") {
+                return ExitCode::from(1);
+            }
             // This root-only installer command publishes the first
             // authenticated selector. The selector cannot be required before
             // its signed inputs have been verified and provisioned.
@@ -315,6 +318,9 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryProvisionPrepare { data_root, backend } => {
+            if !require_non_ea_recovery_profile("recovery provisioning") {
+                return ExitCode::from(1);
+            }
             // This is the root-only first-install bootstrap that creates the
             // protected selector paths themselves. Requiring an installed
             // selector here makes a C1 release impossible to provision: the
@@ -342,6 +348,9 @@ fn main() -> ExitCode {
             }
         }
         Commands::RecoveryTrustUpdate { policy, trust } => {
+            if !require_non_ea_recovery_profile("recovery trust update") {
+                return ExitCode::from(1);
+            }
             // Trust maintenance can be required precisely because the
             // installed generation denies operational admission. The updater
             // independently authenticates policy/trust, locks the data root,
@@ -419,6 +428,9 @@ fn main() -> ExitCode {
             revalidation,
             custody_record,
         } => {
+            if !require_non_ea_recovery_profile("recovery re-anchor") {
+                return ExitCode::from(1);
+            }
             // The plan builder authenticates a complete generation and
             // verifies the signed R/C against the durable prior bytes for an
             // exact-forward resume; a full operational selector check here
@@ -502,6 +514,9 @@ fn main() -> ExitCode {
             source_release_digests,
             source_release_signature,
         } => {
+            if !require_non_ea_recovery_profile("recovery policy migration") {
+                return ExitCode::from(1);
+            }
             let inputs = o3k::recovery_migration_publisher::MigrationInputs {
                 policy_v2: &policy,
                 migration_event: &event,
@@ -652,6 +667,20 @@ fn require_maintenance_selector() -> bool {
         Ok(()) => true,
         Err(reason) => {
             eprintln!("o3k maintenance: installation authority denied: {reason}");
+            false
+        }
+    }
+}
+
+fn require_non_ea_recovery_profile(operation: &str) -> bool {
+    match o3k::ea_installation::verify_startup(Path::new("/var/lib/o3k"), None) {
+        Ok(true) => {
+            eprintln!("o3k {operation}: unsupported in Early Access");
+            false
+        }
+        Ok(false) => true,
+        Err(reason) => {
+            eprintln!("o3k {operation}: installation profile cannot be verified: {reason}");
             false
         }
     }
@@ -833,6 +862,12 @@ fn run_upgrade_cli(
     assume_yes: bool,
     json: bool,
 ) -> ExitCode {
+    if o3k::ea_installation::verify_startup(&o3k::upgrade::state::default_data_dir(), None)
+        .is_ok_and(|ea_selected| ea_selected)
+    {
+        eprintln!("o3k upgrade: unsupported in Early Access");
+        return ExitCode::from(1);
+    }
     if let Err(reason) = o3k::recovery_installation::deny_operator_startup_access(
         &o3k::upgrade::state::default_data_dir(),
     ) {
@@ -863,6 +898,12 @@ fn run_upgrade_cli(
 }
 
 fn run_rollback_cli(json: bool) -> ExitCode {
+    if o3k::ea_installation::verify_startup(&o3k::upgrade::state::default_data_dir(), None)
+        .is_ok_and(|ea_selected| ea_selected)
+    {
+        eprintln!("o3k rollback: unsupported in Early Access");
+        return ExitCode::from(1);
+    }
     if let Err(reason) = o3k::recovery_installation::deny_operator_startup_access(
         &o3k::upgrade::state::default_data_dir(),
     ) {
