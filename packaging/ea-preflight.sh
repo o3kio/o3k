@@ -15,18 +15,37 @@ for path in \
   /usr/local/share/o3k/release-manifest.json \
   /usr/local/share/o3k/.o3k-installed \
   /usr/local/bin/o3kd /usr/local/bin/o3k \
+  /usr/local/bin/o3k-compute /usr/local/bin/o3k-network \
   /etc/o3k/o3kd.env /etc/o3k/installation-policy.json \
+  /etc/o3k/o3k-compute.env /etc/o3k/o3k-network.env \
   /etc/o3k/recovery-trust.json /etc/o3k/installation-identity.json \
-  /etc/systemd/system/o3kd.service \
+  /etc/o3k/installation-local.key \
+  /etc/systemd/system/o3kd.service /etc/systemd/system/o3k-compute.service \
+  /etc/systemd/system/o3k-network.service \
   /var/lib/o3k-recovery /var/lib/o3k-recovery-state; do
   [[ ! -e "$path" && ! -L "$path" ]] || die "existing O3K or recovery state blocks a fresh install: $path"
 done
+if [[ -e /etc/o3k || -L /etc/o3k ]]; then
+  [[ -d /etc/o3k && ! -L /etc/o3k ]] || die "existing O3K config root is unsafe"
+  if find /etc/o3k -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    die "existing O3K configuration or TLS state blocks a fresh install"
+  fi
+fi
+if [[ -e /usr/local/share/o3k || -L /usr/local/share/o3k ]]; then
+  [[ -d /usr/local/share/o3k && ! -L /usr/local/share/o3k ]] \
+    || die "existing O3K release directory is unsafe"
+  if find /usr/local/share/o3k -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    die "existing O3K release files block a fresh install"
+  fi
+fi
 if [[ -e /var/lib/o3k ]] && find /var/lib/o3k -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
   die "existing O3K data blocks a fresh install"
 fi
-if id o3k >/dev/null 2>&1 || getent group o3k >/dev/null 2>&1; then
-  die "existing O3K service identity blocks a fresh install"
-fi
+for identity in o3k o3k-compute o3k-network; do
+  if id "$identity" >/dev/null 2>&1 || getent group "$identity" >/dev/null 2>&1; then
+    die "existing O3K service identity blocks a fresh install: $identity"
+  fi
+done
 
 # PostgreSQL packages create a local cluster as a package side effect. Refuse
 # any cluster before apt runs; the cluster created by this transaction is

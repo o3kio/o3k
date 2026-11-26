@@ -180,6 +180,10 @@ PY
     for path in "$PREFIX/share/o3k/release-manifest.json" "$PREFIX/share/o3k/.o3k-installed" \
       "$CONFIG_DIR/installation-policy.json" "$CONFIG_DIR/recovery-trust.json" \
       "$CONFIG_DIR/installation-identity.json" "$CONFIG_DIR/installation-local.key" \
+      "$CONFIG_DIR/o3k-compute.env" "$CONFIG_DIR/o3k-network.env" \
+      "$PREFIX/bin/o3k-compute" "$PREFIX/bin/o3k-network" \
+      /etc/systemd/system/o3kd.service /etc/systemd/system/o3k-compute.service \
+      /etc/systemd/system/o3k-network.service \
       /var/lib/o3k-recovery /var/lib/o3k-recovery-state; do
       if [[ -e "$path" || -L "$path" ]]; then
         echo "Early Access requires a fresh target; existing installation/recovery state blocks admission: $path" >&2
@@ -694,12 +698,14 @@ fi
 if [[ "$EA_INSTALL" == 1 ]]; then
   command -v pg_lsclusters >/dev/null 2>&1 \
     || { echo "pg_lsclusters is required for Early Access PostgreSQL admission" >&2; exit 1; }
-  command -v psql >/dev/null 2>&1 && command -v pg_isready >/dev/null 2>&1 \
-    || { echo "PostgreSQL 16 client tools are required for Early Access" >&2; exit 1; }
+  if ! command -v psql >/dev/null 2>&1 || ! command -v pg_isready >/dev/null 2>&1; then
+    echo "PostgreSQL 16 client tools are required for Early Access" >&2
+    exit 1
+  fi
   clusters="$(pg_lsclusters --no-header 2>/dev/null)" \
     || { echo "cannot inspect PostgreSQL cluster inventory" >&2; exit 1; }
   cluster_count=0
-  while read -r version name port status owner data_dir log_file extra; do
+  while read -r version name _port status owner _data_dir _log_file _extra; do
     [[ -n "${version:-}" ]] || continue
     cluster_count=$((cluster_count + 1))
     [[ "$version" == 16 && "$name" == main && "$status" == online \
