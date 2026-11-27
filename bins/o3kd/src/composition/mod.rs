@@ -2161,6 +2161,19 @@ pub async fn build_composition_with_guard(
                     client_ca_certificate,
                 },
                 authorized_agents,
+                enrollment_service: std::env::var_os("O3K_ENROLLMENT_SIGNER")
+                    .map(|path| {
+                        let signer = o3k_compute_agent::RootHelperEnrollmentSigner::new(path);
+                        let issuer = o3k_compute_agent::EnrollmentIssuer::new(Vec::new(), signer);
+                        o3k_compute_agent::EnrollmentServiceHandle::new(
+                            o3k_compute_agent::DurableComputeEnrollmentService::new(
+                                issuer,
+                                crate::native_adapters::StoreEnrollmentGrants(
+                                    store.clone(),
+                                ),
+                            ),
+                        )
+                    }),
             };
             let readiness = state.clone();
             let lifecycle_readiness = native_lifecycle_registry.clone();

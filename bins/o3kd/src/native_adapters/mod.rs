@@ -19,7 +19,7 @@ mod volume;
 mod tests;
 
 pub use audit::AuditReaderAdapter;
-pub use bootstrap::BootstrapAdapter;
+pub use bootstrap::{BootstrapAdapter, StoreEnrollmentGrants};
 pub use building_block::BuildingBlockAdapter;
 pub use composition::CompositionResourceHandler;
 pub use composition_profile::CloudProfileAdapter;
