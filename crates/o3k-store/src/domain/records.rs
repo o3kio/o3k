@@ -127,6 +127,7 @@ pub struct BootstrapStateRecord {
 pub struct EnrollmentGrantRecord {
     pub grant_id: String,
     pub agent_id: String,
+    pub agent_epoch: String,
     pub token_digest: String,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,

@@ -30,6 +30,7 @@ fn grant(row: sqlx::sqlite::SqliteRow) -> Result<EnrollmentGrantRecord, StoreErr
     Ok(EnrollmentGrantRecord {
         grant_id: row.try_get("grant_id").map_err(StoreError::Database)?,
         agent_id: row.try_get("agent_id").map_err(StoreError::Database)?,
+        agent_epoch: row.try_get("agent_epoch").map_err(StoreError::Database)?,
         token_digest: row.try_get("token_digest").map_err(StoreError::Database)?,
         issued_at_unix_ms: row
             .try_get::<i64, _>("issued_at_unix_ms")
@@ -72,14 +73,14 @@ impl SqliteStore {
         &self,
         id: &str,
     ) -> Result<Option<EnrollmentGrantRecord>, StoreError> {
-        sqlx::query("SELECT grant_id,agent_id,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms FROM enrollment_grants WHERE grant_id=?").bind(id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.map(grant).transpose()
+        sqlx::query("SELECT grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms FROM enrollment_grants WHERE grant_id=?").bind(id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.map(grant).transpose()
     }
     pub async fn insert_enrollment_grant(
         &self,
         g: &EnrollmentGrantRecord,
     ) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO enrollment_grants(grant_id,agent_id,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms) VALUES(?,?,?,?,?,?)")
-            .bind(&g.grant_id).bind(&g.agent_id).bind(&g.token_digest).bind(i64::try_from(g.issued_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(i64::try_from(g.expires_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(g.used_at_unix_ms.and_then(|v| i64::try_from(v).ok())).execute(&self.pool).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO enrollment_grants(grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms) VALUES(?,?,?,?,?,?)")
+            .bind(&g.grant_id).bind(&g.agent_id).bind(&g.agent_epoch).bind(&g.token_digest).bind(i64::try_from(g.issued_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(i64::try_from(g.expires_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(g.used_at_unix_ms.and_then(|v| i64::try_from(v).ok())).execute(&self.pool).await.map_err(StoreError::Database)?;
         Ok(())
     }
     pub async fn consume_enrollment_grant(
@@ -89,7 +90,7 @@ impl SqliteStore {
         now: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError> {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
-        let row = sqlx::query("SELECT grant_id,agent_id,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms FROM enrollment_grants WHERE grant_id=?").bind(id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::ResourceNotFound)?;
+        let row = sqlx::query("SELECT grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms FROM enrollment_grants WHERE grant_id=?").bind(id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::ResourceNotFound)?;
         let g = grant(row)?;
         if g.token_digest != digest || g.used_at_unix_ms.is_some() || now >= g.expires_at_unix_ms {
             return Err(StoreError::OwnershipConflict);
