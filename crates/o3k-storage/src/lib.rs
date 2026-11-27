@@ -50,6 +50,8 @@ pub enum StorageJournalError {
     NotFound,
     #[error("storage command is stale for the executor")]
     Stale,
+    #[error("storage journal commit is visible but directory durability is uncertain: {0}")]
+    DurabilityUncertain(#[source] std::io::Error),
 }
 
 #[derive(Debug)]
@@ -62,22 +64,14 @@ pub struct StorageJournal {
 impl StorageJournal {
     pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageJournalError> {
         let path = path.into();
-        let (controller_epoch, records) = if path.exists() {
-            let bytes = std::fs::read(&path)?;
-            match serde_json::from_slice::<JournalSnapshot>(&bytes) {
-                Ok(snapshot) if snapshot.format_version == 1 => {
-                    (snapshot.controller_epoch, snapshot.records)
-                }
-                _ => (0, serde_json::from_slice::<Vec<JournalRecord>>(&bytes)?),
-            }
-        } else {
-            (0, Vec::new())
-        };
-        Ok(Self {
+        let journal = Self {
             path,
-            records: std::sync::Mutex::new(records),
-            controller_epoch: std::sync::Mutex::new(controller_epoch),
-        })
+            records: std::sync::Mutex::new(Vec::new()),
+            controller_epoch: std::sync::Mutex::new(0),
+        };
+        let _lock = acquire_journal_lock(&journal_lock_path(&journal.path))?;
+        journal.reload_locked()?;
+        Ok(journal)
     }
 
     pub fn accept(
@@ -98,7 +92,7 @@ impl StorageJournal {
             .records
             .lock()
             .map_err(|_| StorageJournalError::Conflict)?;
-        let current_epoch = self
+        let mut current_epoch = self
             .controller_epoch
             .lock()
             .map_err(|_| StorageJournalError::Conflict)?;
@@ -135,14 +129,18 @@ impl StorageJournal {
             envelope,
             observation: observation.clone(),
         });
-        persist_journal(&self.path, next_controller_epoch, &candidate)?;
+        match persist_journal(&self.path, next_controller_epoch, &candidate) {
+            Ok(()) => {}
+            Err(error @ StorageJournalError::DurabilityUncertain(_)) => {
+                *records = candidate;
+                drop(records);
+                *current_epoch = next_controller_epoch;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
         *records = candidate;
-        drop(records);
-        drop(current_epoch);
-        *self
-            .controller_epoch
-            .lock()
-            .map_err(|_| StorageJournalError::Conflict)? = next_controller_epoch;
+        *current_epoch = next_controller_epoch;
         Ok(observation)
     }
 
@@ -150,6 +148,8 @@ impl StorageJournal {
         &self,
         idempotency_key: &str,
     ) -> Result<Option<StorageObservation>, StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
         let records = self
             .records
             .lock()
@@ -200,7 +200,14 @@ impl StorageJournal {
             .controller_epoch
             .lock()
             .map_err(|_| StorageJournalError::Conflict)?;
-        persist_journal(&self.path, epoch, &candidate)?;
+        match persist_journal(&self.path, epoch, &candidate) {
+            Ok(()) => {}
+            Err(error @ StorageJournalError::DurabilityUncertain(_)) => {
+                *records = candidate;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
         *records = candidate;
         Ok(())
     }
@@ -209,18 +216,43 @@ impl StorageJournal {
         if !self.path.exists() {
             return Ok(());
         }
-        let snapshot: JournalSnapshot = serde_json::from_slice(&std::fs::read(&self.path)?)?;
-        if snapshot.format_version != 1 {
-            return Err(StorageJournalError::Conflict);
+        let bytes = std::fs::read(&self.path)?;
+        let (epoch, records, migrated) = match serde_json::from_slice::<JournalSnapshot>(&bytes) {
+            Ok(snapshot) if snapshot.format_version == 1 => {
+                (snapshot.controller_epoch, snapshot.records, false)
+            }
+            Ok(_) => return Err(StorageJournalError::Conflict),
+            Err(_) => (
+                0,
+                serde_json::from_slice::<Vec<JournalRecord>>(&bytes)?,
+                true,
+            ),
+        };
+        if migrated {
+            match persist_journal(&self.path, epoch, &records) {
+                Ok(()) => {}
+                Err(StorageJournalError::DurabilityUncertain(error)) => {
+                    *self
+                        .records
+                        .lock()
+                        .map_err(|_| StorageJournalError::Conflict)? = records;
+                    *self
+                        .controller_epoch
+                        .lock()
+                        .map_err(|_| StorageJournalError::Conflict)? = epoch;
+                    return Err(StorageJournalError::DurabilityUncertain(error));
+                }
+                Err(error) => return Err(error),
+            }
         }
         *self
             .records
             .lock()
-            .map_err(|_| StorageJournalError::Conflict)? = snapshot.records;
+            .map_err(|_| StorageJournalError::Conflict)? = records;
         *self
             .controller_epoch
             .lock()
-            .map_err(|_| StorageJournalError::Conflict)? = snapshot.controller_epoch;
+            .map_err(|_| StorageJournalError::Conflict)? = epoch;
         Ok(())
     }
 }
@@ -260,42 +292,32 @@ fn persist_journal(
         .open(&temporary)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     file.sync_all()?;
-    std::fs::rename(temporary, path)?;
-    std::fs::File::open(parent)?.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        return Err(StorageJournalError::DurabilityUncertain(error));
+    }
     Ok(())
 }
 
-struct JournalLock(std::path::PathBuf);
-impl Drop for JournalLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+struct JournalLock {
+    _file: std::fs::File,
 }
 fn acquire_journal_lock(path: &std::path::Path) -> Result<JournalLock, StorageJournalError> {
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(_) => Ok(JournalLock(path.to_owned())),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let stale = std::fs::metadata(path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > std::time::Duration::from_secs(300));
-            if stale {
-                std::fs::remove_file(path)?;
-                acquire_journal_lock(path)
-            } else {
-                Err(error.into())
-            }
-        }
-        Err(error) => Err(error.into()),
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(std::io::Error::from)?;
+    Ok(JournalLock { _file: file })
 }
 
 fn acceptance_time() -> String {
@@ -450,6 +472,63 @@ mod journal_tests {
         assert!(reloaded.get("op-a").expect("lookup").is_some());
         assert!(reloaded.get("op-b").expect("lookup").is_some());
         let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn legacy_record_vector_is_migrated_before_mutation() {
+        let journal_path = path();
+        let command = envelope("legacy-op", &"a".repeat(64));
+        let old = JournalRecord {
+            envelope: command.clone(),
+            observation: StorageObservation {
+                agent_id: "storage-a".to_owned(),
+                agent_epoch: 7,
+                resource_id: command.resource_id.clone(),
+                provider_resource_id: None,
+                operation_id: command.operation_id,
+                resource_generation: command.resource_generation,
+                observation_sequence: 1,
+                observed_at: acceptance_time(),
+                operation_state: StorageOperationState::Accepted,
+                resource_state: "accepted".to_owned(),
+                error_category: None,
+                redacted_message: None,
+            },
+        };
+        std::fs::write(
+            &journal_path,
+            serde_json::to_vec(&vec![old]).expect("encode legacy"),
+        )
+        .expect("write legacy journal");
+
+        let journal = StorageJournal::open(&journal_path).expect("migrate legacy on open");
+        assert!(
+            journal
+                .get("legacy-op")
+                .expect("read legacy record")
+                .is_some()
+        );
+        journal
+            .accept(envelope("new-op", &"b".repeat(64)), "storage-a", 7)
+            .expect("mutation succeeds after migration");
+        let migrated: JournalSnapshot =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read migrated"))
+                .expect("snapshot format");
+        assert_eq!(migrated.format_version, 1);
+        assert_eq!(migrated.records.len(), 2);
+        let _ = std::fs::remove_file(&journal_path);
+    }
+
+    #[test]
+    fn reads_refresh_records_written_by_another_journal_instance() {
+        let journal_path = path();
+        let first = StorageJournal::open(&journal_path).expect("first journal");
+        let second = StorageJournal::open(&journal_path).expect("second journal");
+        first
+            .accept(envelope("cross-instance", &"c".repeat(64)), "storage-a", 7)
+            .expect("accept command");
+        assert!(second.get("cross-instance").expect("fresh read").is_some());
+        let _ = std::fs::remove_file(&journal_path);
     }
 }
 
