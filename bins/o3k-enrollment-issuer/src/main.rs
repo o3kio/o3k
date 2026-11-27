@@ -15,6 +15,13 @@ use std::{
 
 const MAX: usize = 1024 * 1024;
 
+struct LockGuard(PathBuf);
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[derive(Deserialize)]
 struct Request {
     grant_id: String,
@@ -125,6 +132,16 @@ fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509),
     let cert = b.build();
     let parent = key_path.parent().ok_or("CA path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|_| "CA directory")?;
+    let lock_path = parent.join("enrollment-ca.lock");
+    let _lock = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(_) => return Err("concurrent CA initialization".into()),
+    };
+    let _guard = LockGuard(lock_path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
