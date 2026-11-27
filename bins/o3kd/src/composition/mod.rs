@@ -2161,19 +2161,6 @@ pub async fn build_composition_with_guard(
                     client_ca_certificate,
                 },
                 authorized_agents,
-                enrollment_service: std::env::var_os("O3K_ENROLLMENT_SIGNER")
-                    .map(|path| {
-                        let signer = o3k_compute_agent::RootHelperEnrollmentSigner::new(path);
-                        let issuer = o3k_compute_agent::EnrollmentIssuer::new(Vec::new(), signer);
-                        o3k_compute_agent::EnrollmentServiceHandle::new(
-                            o3k_compute_agent::DurableComputeEnrollmentService::new(
-                                issuer,
-                                crate::native_adapters::StoreEnrollmentGrants(
-                                    store.clone(),
-                                ),
-                            ),
-                        )
-                    }),
             };
             let readiness = state.clone();
             let lifecycle_readiness = native_lifecycle_registry.clone();
@@ -2211,18 +2198,57 @@ pub async fn build_composition_with_guard(
         config.compute_client_ca.clone(),
         std::env::var_os("O3K_ENROLLMENT_SIGNER"),
     ) {
-        (Some(address), Some(server_certificate), Some(server_private_key), Some(client_ca_certificate), Some(signer_path)) => {
-            let address: std::net::SocketAddr = match address.parse() { Ok(value) => value, Err(_) => { tracing::error!("invalid O3K_ENROLLMENT_LISTEN_ADDR"); return Err("invalid enrollment listener address".into()); } };
+        (
+            Some(address),
+            Some(server_certificate),
+            Some(server_private_key),
+            Some(client_ca_certificate),
+            Some(signer_path),
+        ) => {
+            let address: std::net::SocketAddr = match address.parse() {
+                Ok(value) => value,
+                Err(_) => {
+                    tracing::error!("invalid O3K_ENROLLMENT_LISTEN_ADDR");
+                    return Err("invalid enrollment listener address".into());
+                }
+            };
+            if !address.ip().is_loopback() {
+                tracing::error!(%address, "enrollment listener must be loopback-only");
+                return Err("enrollment listener must bind to loopback".into());
+            }
             let service = o3k_compute_agent::EnrollmentServiceHandle::new(
                 o3k_compute_agent::DurableComputeEnrollmentService::new(
-                    o3k_compute_agent::EnrollmentIssuer::new(Vec::new(), o3k_compute_agent::RootHelperEnrollmentSigner::new(signer_path)),
+                    o3k_compute_agent::EnrollmentIssuer::new(
+                        Vec::new(),
+                        o3k_compute_agent::RootHelperEnrollmentSigner::new(signer_path),
+                    ),
                     crate::native_adapters::StoreEnrollmentGrants(store.clone()),
                 ),
             );
-            let tls = o3k_compute_agent::ControlPlaneTls { server_certificate, server_private_key, client_ca_certificate };
+            let tls = o3k_compute_agent::ControlPlaneTls {
+                server_certificate,
+                server_private_key,
+                client_ca_certificate,
+            };
             Some(tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind(address).await { Ok(value) => value, Err(error) => { tracing::error!(%error, "enrollment listener bind failed"); return; } };
-                if let Err(error) = o3k_compute_agent::ControlPlaneServer::serve_enrollment_listener(listener, tls, service, control_shutdown_signal()).await { tracing::error!(%error, "enrollment listener stopped"); }
+                let listener = match tokio::net::TcpListener::bind(address).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!(%error, "enrollment listener bind failed");
+                        return;
+                    }
+                };
+                if let Err(error) =
+                    o3k_compute_agent::ControlPlaneServer::serve_enrollment_listener(
+                        listener,
+                        tls,
+                        service,
+                        control_shutdown_signal(),
+                    )
+                    .await
+                {
+                    tracing::error!(%error, "enrollment listener stopped");
+                }
             }))
         }
         _ => None,

@@ -456,6 +456,9 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .insert_enrollment_grant(&EnrollmentGrantRecord {
                 grant_id,
                 agent_id: request.agent_id.unwrap_or_else(|| "*".into()),
+                // Init precedes host registration; the epoch is bound when the
+                // grant is consumed by the enrollment RPC.
+                agent_epoch: String::new(),
                 token_digest: digest(&raw),
                 issued_at_unix_ms: issued_at,
                 expires_at_unix_ms: expires_at,

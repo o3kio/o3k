@@ -2728,7 +2728,6 @@ pub struct ControlPlaneServer {
     pub address: SocketAddr,
     pub tls: ControlPlaneTls,
     pub authorized_agents: Vec<AuthorizedAgent>,
-    pub enrollment_service: Option<EnrollmentServiceHandle>,
 }
 
 #[derive(Clone)]
@@ -2742,16 +2741,24 @@ impl EnrollmentServiceHandle {
         S: EnrollmentSigner + 'static,
         R: AsyncDurableEnrollmentGrants + 'static,
     {
-        Self { inner: std::sync::Arc::new(service) }
+        Self {
+            inner: std::sync::Arc::new(service),
+        }
     }
 }
 
 #[tonic::async_trait]
 impl proto::compute_enrollment_server::ComputeEnrollment for EnrollmentServiceHandle {
-    async fn enroll(&self, request: tonic::Request<proto::EnrollRequest>) -> Result<tonic::Response<proto::EnrollResponse>, tonic::Status> {
+    async fn enroll(
+        &self,
+        request: tonic::Request<proto::EnrollRequest>,
+    ) -> Result<tonic::Response<proto::EnrollResponse>, tonic::Status> {
         self.inner.enroll(request).await
     }
-    async fn rotate_certificate(&self, request: tonic::Request<proto::RotateCertificateRequest>) -> Result<tonic::Response<proto::RotateCertificateResponse>, tonic::Status> {
+    async fn rotate_certificate(
+        &self,
+        request: tonic::Request<proto::RotateCertificateRequest>,
+    ) -> Result<tonic::Response<proto::RotateCertificateResponse>, tonic::Status> {
         self.inner.rotate_certificate(request).await
     }
 }
@@ -2767,20 +2774,44 @@ impl ControlPlaneServer {
         service: EnrollmentServiceHandle,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), AgentError> {
+        let bound = listener.local_addr().map_err(|_| {
+            AgentError::InvalidConfiguration("enrollment listener address unavailable")
+        })?;
+        if !bound.ip().is_loopback() {
+            return Err(AgentError::InvalidConfiguration(
+                "enrollment listener must bind to loopback",
+            ));
+        }
         install_crypto_provider();
-        let cert = pem_certificates(&fs::read(&tls.server_certificate).map_err(|_| AgentError::TlsMaterial)?)?;
-        let key = pem_private_key(&fs::read(&tls.server_private_key).map_err(|_| AgentError::TlsMaterial)?)?;
-        let config = ServerConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13]).map_err(|_| AgentError::TlsMaterial)?
-            .with_no_client_auth().with_single_cert(cert, key).map_err(|_| AgentError::TlsMaterial)?;
+        let cert = pem_certificates(
+            &fs::read(&tls.server_certificate).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let key = pem_private_key(
+            &fs::read(&tls.server_private_key).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let config = ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| AgentError::TlsMaterial)?
+        .with_no_client_auth()
+        .with_single_cert(cert, key)
+        .map_err(|_| AgentError::TlsMaterial)?;
         let acceptor = TlsAcceptor::from(std::sync::Arc::new(config));
         let incoming = TcpListenerStream::new(listener).then(move |connection| {
             let acceptor = acceptor.clone();
-            async move { match connection { Ok(stream) => acceptor.accept(stream).await.map_err(io::Error::other), Err(error) => Err(error) } }
+            async move {
+                match connection {
+                    Ok(stream) => acceptor.accept(stream).await.map_err(io::Error::other),
+                    Err(error) => Err(error),
+                }
+            }
         });
         Server::builder()
             .add_service(proto::compute_enrollment_server::ComputeEnrollmentServer::new(service))
-            .serve_with_incoming_shutdown(incoming, shutdown).await.map_err(AgentError::Transport)
+            .serve_with_incoming_shutdown(incoming, shutdown)
+            .await
+            .map_err(AgentError::Transport)
     }
 
     pub async fn serve(
@@ -2846,26 +2877,17 @@ impl ControlPlaneServer {
                 registry.mark_unavailable(DEFAULT_LEASE).await;
             }
         });
-        let builder = Server::builder()
+        Server::builder()
             .add_service(
                 proto::compute_agent_server::ComputeAgentServer::new(ComputeAgentService::new(
                     self.registry,
                 ))
                 .max_decoding_message_size(MAX_MESSAGE_SIZE)
                 .max_encoding_message_size(MAX_MESSAGE_SIZE),
-            );
-        if let Some(enrollment) = self.enrollment_service {
-            builder
-                .add_service(proto::compute_enrollment_server::ComputeEnrollmentServer::new(enrollment))
-                .serve_with_incoming_shutdown(incoming, shutdown)
-                .await
-                .map_err(|_| AgentError::InvalidConfiguration("control plane failed"))
-        } else {
-            builder
-                .serve_with_incoming_shutdown(incoming, shutdown)
-                .await
-                .map_err(|_| AgentError::InvalidConfiguration("control plane failed"))
-        }
+            )
+            .serve_with_incoming_shutdown(incoming, shutdown)
+            .await
+            .map_err(|_| AgentError::InvalidConfiguration("control plane failed"))
     }
 }
 
