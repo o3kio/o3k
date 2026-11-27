@@ -120,6 +120,24 @@ O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/down
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
 die() { printf 'O3K installer: %s\n' "$1" >&2; exit 1; }
+ensure_bundle_inspection_tools() {
+  APT_UPDATED=0
+  if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
+    printf 'installing binutils for authenticated bundle inspection\n'
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update || return 1
+    apt-get install -y binutils || return 1
+    APT_UPDATED=1
+  fi
+  command -v nm >/dev/null 2>&1 || {
+    printf 'O3K installer: nm (binutils) is required to inspect release executables\n' >&2
+    return 1
+  }
+  command -v readelf >/dev/null 2>&1 || {
+    printf 'O3K installer: readelf (binutils) is required to inspect release executables\n' >&2
+    return 1
+  }
+}
 step() { printf '✓ %s\n' "$1"; }
 
 # ---- PP.4 timing ledger -------------------------------------------------------
@@ -679,16 +697,7 @@ PY
 # digest has matched, and extraction has rejected unsafe entries. Install only
 # the inspection dependency now; full bundle checksum and executable checks
 # still run before any bundled application code is executed.
-APT_UPDATED=0
-if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
-  printf 'installing binutils for authenticated bundle inspection\n'
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y binutils
-  APT_UPDATED=1
-fi
-command -v nm >/dev/null 2>&1 || die 'nm (binutils) is required to inspect release executables'
-command -v readelf >/dev/null 2>&1 || die 'readelf (binutils) is required to inspect release executables'
+ensure_bundle_inspection_tools || die 'binutils installation failed before authenticated bundle inspection'
 bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
   || die "release bundle verification failed for o3k-$VERSION_NO_V"
 step "O3K v$VERSION_NO_V verified"

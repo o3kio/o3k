@@ -69,7 +69,7 @@ assert chart_version == version, chart_version
 assert docker_version == version, docker_version
 assert docker_local_version == version, docker_local_version
 digest_verified = wrapper.index("release archive digest verified from authenticated manifest")
-inspection_install = wrapper.index("apt-get install -y binutils")
+inspection_install = wrapper.index("ensure_bundle_inspection_tools || die")
 bundle_verify = wrapper.index('verify-release-bundle.sh" "$BUNDLE_DIR"')
 remaining_dependencies = wrapper.index("apt-get install -y $APT_PACKAGES")
 assert digest_verified < inspection_install < bundle_verify < remaining_dependencies
@@ -82,6 +82,7 @@ grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
 ! grep -Fq 'O3K_ENROLLMENT_SIGNER=/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
 grep -Fq '/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
 grep -Fq 'EA_INSTALL' "$ROOT/packaging/install.sh"
+bash "$ROOT/tests/installer-binutils-bootstrap.sh"
 if grep -Fq 'O3K_ENROLLMENT_SIGNER=' "$ROOT/packaging/install.sh" && \
   ! grep -Fq 'if [[ "$EA_INSTALL" == 1' "$ROOT/packaging/install.sh"; then
   echo "EA enrollment settings are not gated by the authenticated EA installer" >&2
