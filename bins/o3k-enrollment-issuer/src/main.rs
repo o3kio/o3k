@@ -110,6 +110,12 @@ fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509),
     b.set_subject_name(&name).map_err(|_| "CA subject")?;
     b.set_issuer_name(&name).map_err(|_| "CA issuer")?;
     b.set_pubkey(&key).map_err(|_| "CA pubkey")?;
+    #[allow(deprecated)]
+    b.append_extension(
+        X509Extension::new_nid(None, None, Nid::BASIC_CONSTRAINTS, "critical,CA:TRUE")
+            .map_err(|_| "CA constraints")?,
+    )
+    .map_err(|_| "CA constraints")?;
     let before = Asn1Time::days_from_now(0).map_err(|_| "CA time")?;
     let after = Asn1Time::days_from_now(3650).map_err(|_| "CA time")?;
     b.set_not_before(&before).map_err(|_| "CA time")?;
@@ -195,6 +201,16 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     b.set_issuer_name(ca.subject_name())
         .map_err(|_| "cert issuer")?;
     b.set_pubkey(&pubkey).map_err(|_| "cert key")?;
+    let serial = openssl::bn::BigNum::from_u32(
+        (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos())
+            | 1,
+    )
+    .map_err(|_| "cert serial")?;
+    let serial = serial.to_asn1_integer().map_err(|_| "cert serial")?;
+    b.set_serial_number(&serial).map_err(|_| "cert serial")?;
     let san = X509Extension::new_nid(
         None,
         None,
@@ -264,4 +280,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     std::io::stdout().write_all(&out)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use o3k_compute_agent::{
+        IssuedEnrollment, types::EnrollmentIdentity, validate_issued_enrollment,
+    };
+
+    #[allow(deprecated)]
+    #[test]
+    fn issued_certificate_passes_agent_validator() {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let ca_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "test CA").unwrap();
+        let name = name.build();
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(&ca_key).unwrap();
+        builder
+            .append_extension(
+                X509Extension::new_nid(None, None, Nid::BASIC_CONSTRAINTS, "critical,CA:TRUE")
+                    .unwrap(),
+            )
+            .unwrap();
+        builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        builder
+            .set_not_after(&Asn1Time::days_from_now(365).unwrap())
+            .unwrap();
+        builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
+        let ca = builder.build();
+        let identity = EnrollmentIdentity::generate("agent-test", "epoch-test").unwrap();
+        let response = issue(
+            Request {
+                grant_id: "g".into(),
+                token: vec![1],
+                agent_id: identity.agent_id().into(),
+                agent_epoch: identity.agent_epoch().into(),
+                csr_pem: identity.csr_pem().to_vec(),
+            },
+            &ca_key,
+            &ca,
+        )
+        .unwrap();
+        let issued = IssuedEnrollment {
+            agent_id: response.agent_id,
+            agent_epoch: response.agent_epoch,
+            client_certificate_chain_pem: response.client_certificate_chain_pem,
+            ca_certificate_pem: response.ca_certificate_pem,
+            ca_fingerprint_sha256: response.ca_fingerprint_sha256,
+            certificate_expires_at_unix_ms: response.certificate_expires_at_unix_ms,
+            rotation_deadline_unix_ms: response.rotation_deadline_unix_ms,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        validate_issued_enrollment(&issued, now).unwrap();
+    }
 }
