@@ -4,7 +4,7 @@
 #
 # Usage: packaging/make-release.sh [VERSION] [PROFILE=fake]
 # Early Access: O3K_INSTALLATION_SECURITY_PROFILE=early-access-v1 \
-#   O3K_PRODUCT_PROFILE_ID=o3k-early-access-v1 packaging/make-release.sh 0.4.1 libvirt
+#   O3K_PRODUCT_PROFILE_ID=o3k-early-access-v1 packaging/make-release.sh 0.4.1-rc.1 libvirt
 #
 # Release asset contract for the GitHub Release (see docs/RELEASE.md):
 #   dist/install.sh                            byte-identical export of
@@ -180,7 +180,7 @@ PROFILE_ID="${O3K_PRODUCT_PROFILE_ID:-o3k-demo-v1}"
 case "$PROFILE_ID" in
   o3k-demo-v1|o3k-small-edge-v1|o3k-early-access-v1) ;;
   *)
-    echo "O3K_PRODUCT_PROFILE_ID must be o3k-demo-v1 or o3k-small-edge-v1: $PROFILE_ID" >&2
+    echo "O3K_PRODUCT_PROFILE_ID must be o3k-demo-v1, o3k-small-edge-v1, or o3k-early-access-v1: $PROFILE_ID" >&2
     exit 2
     ;;
 esac
@@ -204,10 +204,11 @@ if [[ "$C1_INSTALLATION_POLICY_ENABLED" != 0 && "$C1_INSTALLATION_POLICY_ENABLED
 fi
 EA_MANIFEST_FIELDS=
 if [[ "$INSTALLATION_SECURITY_PROFILE" == early-access-v1 ]]; then
-  [[ "$VERSION" == 0.4.1 && "$PROFILE" == libvirt \
+  [[ "$VERSION" =~ ^0\.4\.1-rc\.[1-9][0-9]*$ || "$VERSION" == 0.4.1 ]] \
+    && [[ "$PROFILE" == libvirt \
     && "$PROFILE_ID" == o3k-early-access-v1 \
     && "$C1_INSTALLATION_POLICY_ENABLED" == 0 ]] || {
-    echo "Early Access release requires v0.4.1, libvirt and the EA product profile, with C1 disabled" >&2
+    echo "Early Access release requires v0.4.1 or v0.4.1-rc.N, libvirt and the EA product profile, with C1 disabled" >&2
     exit 2
   }
   EA_MANIFEST_FIELDS=',"installation_security_profile":"early-access-v1","installation_authority":"installation-local"'
