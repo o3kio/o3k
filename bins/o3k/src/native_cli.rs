@@ -28,6 +28,7 @@ use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 
 /// Default native API base URL.
 const DEFAULT_API_BASE: &str = "http://127.0.0.1:18080/o3k/v1";
+const DEFAULT_ENROLLMENT_TLS_SERVER_NAME: &str = "o3k-control-plane";
 
 /// Maximum number of `bootstrap/init` attempts after a transport failure.
 const INIT_MAX_ATTEMPTS: usize = 3;
@@ -129,7 +130,7 @@ pub fn enroll_host(
             .ca_certificate(Certificate::from_pem(ca))
             .domain_name(
                 std::env::var("O3K_ENROLLMENT_TLS_SERVER_NAME")
-                    .unwrap_or_else(|_| "o3k-controller".to_owned()),
+                    .unwrap_or_else(|_| DEFAULT_ENROLLMENT_TLS_SERVER_NAME.to_owned()),
             );
         let channel = Endpoint::from_shared(endpoint)
             .map_err(|e| format!("invalid enrollment endpoint: {e}"))?
@@ -647,7 +648,7 @@ pub fn print_help() {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{secret_from, validate_persisted_identity};
+    use super::{DEFAULT_ENROLLMENT_TLS_SERVER_NAME, secret_from, validate_persisted_identity};
     use o3k_compute_agent::types::EnrollmentIdentity;
     use std::io::Write;
     use std::path::PathBuf;
@@ -673,6 +674,11 @@ mod tests {
         .expect("env secret");
         assert_eq!(value, "  env-value  ");
         std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn enrollment_tls_default_matches_packaged_controller_certificate() {
+        assert_eq!(DEFAULT_ENROLLMENT_TLS_SERVER_NAME, "o3k-control-plane");
     }
 
     #[test]

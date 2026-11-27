@@ -92,6 +92,10 @@ bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
 grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
+grep -Fq 'o3k-enrollment-issuer" --export-ca' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA' "$ROOT/packaging/install.sh"
+grep -Fq 'compute-client-ca.pem' "$ROOT/packaging/install.sh"
+grep -Fq 'Some("--export-ca")' "$ROOT/bins/o3k-enrollment-issuer/src/main.rs"
 grep -Fq 'share/o3k/o3k-enrollment-issuer@.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh"
 grep -Fq 'systemctl disable --now o3k-enrollment-issuer.socket' "$ROOT/packaging/uninstall.sh"
 grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"

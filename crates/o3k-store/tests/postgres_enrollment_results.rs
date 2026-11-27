@@ -112,6 +112,34 @@ async fn postgres_enrollment_issue_is_atomic_retryable_and_token_bound() {
         Some(30)
     );
 
+    let unbound = EnrollmentGrantRecord {
+        grant_id: "grant-first-epoch-binding".into(),
+        agent_id: "node-unbound".into(),
+        agent_epoch: String::new(),
+        token_digest: "unbound-token-digest".into(),
+        issued_at_unix_ms: 40,
+        expires_at_unix_ms: 200,
+        used_at_unix_ms: None,
+    };
+    store.insert_enrollment_grant(&unbound).await.unwrap();
+    let bound = store
+        .consume_enrollment_grant(
+            &unbound.grant_id,
+            "epoch-first-use",
+            &unbound.token_digest,
+            50,
+        )
+        .await
+        .unwrap();
+    assert_eq!(bound.agent_epoch, "epoch-first-use");
+    assert_eq!(bound.used_at_unix_ms, Some(50));
+    assert!(
+        store
+            .consume_enrollment_grant(&unbound.grant_id, "epoch-replay", &unbound.token_digest, 51,)
+            .await
+            .is_err()
+    );
+
     store.pool().close().await;
     let admin = PgPoolOptions::new()
         .max_connections(1)

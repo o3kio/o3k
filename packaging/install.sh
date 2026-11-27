@@ -868,14 +868,37 @@ if [[ "$PROFILE" == libvirt ]]; then
   # Listen on 127.0.0.1:18080 like the disposable-testlab path
   # (O3K_LISTEN_ADDR) instead of the default 127.0.0.1:8080; the unit does not
   # hardcode a listen address so this env governs.
+  COMPUTE_CLIENT_CA="$TLS_DIR/ca.pem"
+  if [[ "$EA_INSTALL" == 1 ]]; then
+    # Enrolled compute identities are signed by the root-owned installation
+    # issuer, while the local bootstrap agent uses the bootstrap CA. Trust
+    # both at the controller listener so both identities use the same
+    # authenticated admission path.
+    install -d -m 0750 "$CONFIG_DIR/ea"
+    issuer_ca="$("$PREFIX/bin/o3k-enrollment-issuer" --export-ca)" || die "cannot initialize EA enrollment CA"
+    trust_tmp="$(mktemp "$CONFIG_DIR/ea/.compute-client-ca.XXXXXX")"
+    chmod 0600 "$trust_tmp"
+    cat "$TLS_DIR/ca.pem" >"$trust_tmp"
+    printf '\n' >>"$trust_tmp"
+    printf '%s\n' "$issuer_ca" >>"$trust_tmp"
+    chmod 0644 "$trust_tmp"
+    install_owned_system_file "$trust_tmp" "$CONFIG_DIR/ea/compute-client-ca.pem" 0644
+    rm -f "$trust_tmp"
+    COMPUTE_CLIENT_CA="$CONFIG_DIR/ea/compute-client-ca.pem"
+  fi
   for setting in \
     "O3K_PROVIDER=agent" \
     "O3K_LISTEN_ADDR=127.0.0.1:18080" \
     "O3K_COMPUTE_SERVER_CERTIFICATE=$TLS_DIR/server.pem" \
     "O3K_COMPUTE_SERVER_PRIVATE_KEY=$TLS_DIR/server-key.pem" \
-    "O3K_COMPUTE_CLIENT_CA=$TLS_DIR/ca.pem" \
+    "O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA" \
     "O3K_COMPUTE_AUTHORIZED_AGENTS=$(<"$TLS_DIR/agent-id")=$FINGERPRINT"; do
     key="${setting%%=*}"
+    if [[ "$key" == O3K_COMPUTE_CLIENT_CA ]]; then
+      # The authenticated EA issuer CA is installation-local and may be
+      # introduced when upgrading an existing C1 configuration.
+      sed -i '/^O3K_COMPUTE_CLIENT_CA=/d' "$ENV_FILE"
+    fi
     grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
   done
   # Only authenticated EA installs have the root-owned issuer socket. C1
