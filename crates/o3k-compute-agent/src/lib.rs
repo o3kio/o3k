@@ -2757,6 +2757,32 @@ impl proto::compute_enrollment_server::ComputeEnrollment for EnrollmentServiceHa
 }
 
 impl ControlPlaneServer {
+    /// Serve enrollment on a loopback/server-auth TLS listener.  This endpoint
+    /// is intended to be reached through an authenticated SSH tunnel before a
+    /// compute host has a client certificate; it deliberately does not request
+    /// a client certificate.
+    pub async fn serve_enrollment_listener(
+        listener: tokio::net::TcpListener,
+        tls: ControlPlaneTls,
+        service: EnrollmentServiceHandle,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), AgentError> {
+        install_crypto_provider();
+        let cert = pem_certificates(&fs::read(&tls.server_certificate).map_err(|_| AgentError::TlsMaterial)?)?;
+        let key = pem_private_key(&fs::read(&tls.server_private_key).map_err(|_| AgentError::TlsMaterial)?)?;
+        let config = ServerConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13]).map_err(|_| AgentError::TlsMaterial)?
+            .with_no_client_auth().with_single_cert(cert, key).map_err(|_| AgentError::TlsMaterial)?;
+        let acceptor = TlsAcceptor::from(std::sync::Arc::new(config));
+        let incoming = TcpListenerStream::new(listener).then(move |connection| {
+            let acceptor = acceptor.clone();
+            async move { match connection { Ok(stream) => acceptor.accept(stream).await.map_err(io::Error::other), Err(error) => Err(error) } }
+        });
+        Server::builder()
+            .add_service(proto::compute_enrollment_server::ComputeEnrollmentServer::new(service))
+            .serve_with_incoming_shutdown(incoming, shutdown).await.map_err(AgentError::Transport)
+    }
+
     pub async fn serve(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
