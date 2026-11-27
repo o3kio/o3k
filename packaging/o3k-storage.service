@@ -7,9 +7,7 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-EnvironmentFile=/etc/o3k/o3k-storage.env
-# O3K_STORAGE_CONTROLLER_IDENTITY must be the exact URI SAN of the controller
-# certificate; CA membership alone is not sufficient authorization.
+EnvironmentFile=/etc/o3k/storage/o3k-storage.env
 ExecStart=/usr/local/bin/o3k-storage-bin
 Restart=on-failure
 NoNewPrivileges=false
@@ -20,6 +18,18 @@ UMask=0077
 ReadWritePaths=/var/lib/o3k/storage
 CapabilityBoundingSet=CAP_SYS_ADMIN
 AmbientCapabilities=CAP_SYS_ADMIN
+PrivateDevices=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+DevicePolicy=closed
+# The installer must add explicit rules for configured VG backing devices.
+DeviceAllow=/dev/mapper/control rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]

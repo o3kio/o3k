@@ -44,6 +44,7 @@ for path in "$DATA_DIR" "$LOG_DIR"; do
 done
 if command -v systemctl >/dev/null 2>&1; then
   systemctl stop o3k-compute.service 2>/dev/null || true
+systemctl stop o3k-storage.service 2>/dev/null || true
   systemctl stop o3kd.service 2>/dev/null || true
 fi
 echo "reset O3K-owned state under $DATA_DIR and $LOG_DIR; credentials were preserved"

@@ -15,6 +15,7 @@ C1_MIGRATE=0
 C1_BACKEND=sqlite
 EA_INSTALL=0
 NETWORK_BINARY=
+STORAGE_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
 # The digest of the release tarball that the outer installer verified before
@@ -55,6 +56,7 @@ while (($#)); do
       [[ "$2" == early-access-v1 ]] || { echo "unsupported installation security profile: $2" >&2; exit 2; }
       EA_INSTALL=1; shift 2;;
     --network-binary) NETWORK_BINARY="$2"; shift 2;;
+    --storage-binary) STORAGE_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --release-artifact-sha256) RELEASE_ARTIFACT_SHA256="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
@@ -182,8 +184,9 @@ PY
       "$CONFIG_DIR/installation-identity.json" "$CONFIG_DIR/installation-local.key" \
       "$CONFIG_DIR/o3k-compute.env" "$CONFIG_DIR/o3k-network.env" \
       "$PREFIX/bin/o3k-compute" "$PREFIX/bin/o3k-network" \
+      "$PREFIX/bin/o3k-storage-bin" \
       /etc/systemd/system/o3kd.service /etc/systemd/system/o3k-compute.service \
-      /etc/systemd/system/o3k-network.service \
+      /etc/systemd/system/o3k-network.service /etc/systemd/system/o3k-storage.service \
       /var/lib/o3k-recovery /var/lib/o3k-recovery-state; do
       if [[ -e "$path" || -L "$path" ]]; then
         echo "Early Access requires a fresh target; existing installation/recovery state blocks admission: $path" >&2
@@ -299,6 +302,20 @@ if [[ "$PROFILE" == libvirt && -z "$NETWORK_BINARY" && -x "$ROOT_DIR/bin/o3k-net
 fi
 if [[ -n "$NETWORK_BINARY" ]]; then
   [[ -x "$NETWORK_BINARY" ]] || { echo "network binary is not executable: $NETWORK_BINARY" >&2; exit 1; }
+fi
+# Native storage is an EA-only root execution boundary. It is deliberately
+# opt-in: an operator must name a dedicated VG and thin pool before any
+# privileged storage service is installed or enabled. C1 and non-EA installs
+# never inspect or mutate this path.
+STORAGE_ENABLED=0
+if [[ "$EA_INSTALL" == 1 && "$PROFILE" == libvirt && -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" ]]; then
+  STORAGE_ENABLED=1
+  if [[ -z "$STORAGE_BINARY" ]]; then
+    if [[ -x "$ROOT_DIR/bin/o3k-storage" ]]; then STORAGE_BINARY="$ROOT_DIR/bin/o3k-storage";
+    elif [[ "$RELEASE_BUNDLE" == 1 ]]; then bundle_missing_binary "$ROOT_DIR/bin/o3k-storage (o3k-storage)";
+    else cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-storage-bin; STORAGE_BINARY="$ROOT_DIR/target/release/o3k-storage-bin"; fi
+  fi
+  [[ -x "$STORAGE_BINARY" ]] || { echo "storage binary is not executable: $STORAGE_BINARY" >&2; exit 1; }
 fi
 TLS_DIR="$CONFIG_DIR/tls"
 if [[ "$PROFILE" == libvirt ]]; then
@@ -703,6 +720,20 @@ if [[ "$PROFILE" == libvirt && -n "$NETWORK_BINARY" ]]; then
   INSTALLED_FILES+=(bin/o3k-network share/o3k/o3k-network.service)
   if [[ $EUID -eq 0 ]]; then
     install -d -o o3k-network -g o3k-network -m 0700 "$DATA_DIR/network"
+  fi
+fi
+if [[ "$STORAGE_ENABLED" == 1 ]]; then
+  install_owned_file "$STORAGE_BINARY" "$PREFIX/bin/o3k-storage-bin" bin/o3k-storage 0755
+  install_owned_file "$ROOT_DIR/packaging/o3k-storage.service" "$PREFIX/share/o3k/o3k-storage.service" share/o3k/o3k-storage.service 0644
+  INSTALLED_FILES+=(bin/o3k-storage share/o3k/o3k-storage.service)
+  if [[ $EUID -eq 0 ]]; then
+    install -d -o root -g root -m 0700 /var/lib/o3k/storage
+    install -d -o root -g root -m 0750 "$CONFIG_DIR/storage"
+    if [[ ! -f "$CONFIG_DIR/storage/o3k-storage.env" ]]; then
+      umask 077
+      printf 'O3K_STORAGE_LISTEN=127.0.0.1:9444\nO3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json\nO3K_STORAGE_AGENT_ID=%s\nO3K_STORAGE_AGENT_EPOCH=1\nO3K_STORAGE_VOLUME_GROUP=%s\nO3K_STORAGE_THIN_POOL=%s\nO3K_STORAGE_NAMESPACE=o3k\nO3K_STORAGE_TLS_CERT=%s/server.pem\nO3K_STORAGE_TLS_KEY=%s/server-key.pem\nO3K_STORAGE_TLS_CLIENT_CA=%s/ca.pem\nO3K_STORAGE_TLS_EXPECTED_CLIENT_URI=urn:o3k:controller:installation-local\n' "$(cat "$TLS_DIR/agent-id")" "$O3K_LVM_VOLUME_GROUP" "$O3K_LVM_THIN_POOL" "$TLS_DIR" "$TLS_DIR" "$TLS_DIR" >"$CONFIG_DIR/storage/o3k-storage.env"
+      chmod 0600 "$CONFIG_DIR/storage/o3k-storage.env"
+    fi
   fi
 fi
 MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
@@ -1157,6 +1188,9 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
     install_owned_system_file "$ROOT_DIR/packaging/o3k-network.service" \
       /etc/systemd/system/o3k-network.service 0644
   fi
+  if [[ "$STORAGE_ENABLED" == 1 ]]; then
+    install_owned_system_file "$ROOT_DIR/packaging/o3k-storage.service" /etc/systemd/system/o3k-storage.service 0644
+  fi
   systemctl daemon-reload
   if [[ "$EA_INSTALL" == 1 && "$C1_PREPARE_ONLY" != 1 ]]; then
     systemctl enable --now o3k-enrollment-issuer.socket
@@ -1171,6 +1205,9 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
     else
       systemctl enable --now o3k-compute.service
     fi
+  fi
+  if [[ "$STORAGE_ENABLED" == 1 && "$C1_PREPARE_ONLY" != 1 ]]; then
+    systemctl enable --now o3k-storage.service
   fi
 fi
 # The runtime access model applies to every root install and mirrors the
