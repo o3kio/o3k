@@ -1951,6 +1951,7 @@ dependencies = [
  "o3k-store",
  "openssl",
  "prost",
+ "rustix 0.38.44",
  "rustls",
  "serde",
  "serde_json",
