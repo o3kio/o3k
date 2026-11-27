@@ -186,18 +186,37 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     }
     let agent_uri = format!("urn:o3k:compute:agent:{}", req.agent_id);
     let epoch_uri = format!("urn:o3k:compute:epoch:{}", req.agent_epoch);
-    let ext_der = csr
-        .extensions()
-        .map_err(|_| "CSR extensions unavailable")?
-        .iter()
-        .flat_map(|e| e.to_der().unwrap_or_default())
-        .collect::<Vec<_>>();
-    if !ext_der
-        .windows(agent_uri.len())
-        .any(|w| w == agent_uri.as_bytes())
-        || !ext_der
-            .windows(epoch_uri.len())
-            .any(|w| w == epoch_uri.as_bytes())
+    let extensions = csr.extensions().map_err(|_| "CSR extensions unavailable")?;
+    let mut uris = Vec::new();
+    for extension in extensions.iter() {
+        let encoded = extension.to_der().map_err(|_| "invalid CSR extension")?;
+        if encoded
+            .windows(5)
+            .any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x11])
+        {
+            let marker = [0x06, 0x03, 0x55, 0x1d, 0x11];
+            let oid_end = encoded
+                .windows(marker.len())
+                .position(|w| w == marker)
+                .ok_or("invalid CSR SAN")?
+                + marker.len();
+            let octet = encoded[oid_end..]
+                .iter()
+                .position(|b| *b == 0x04)
+                .ok_or("invalid CSR SAN")?
+                + oid_end;
+            let (len, used) = der_len(&encoded[octet + 1..])?;
+            let start = octet + 1 + used;
+            if start + len > encoded.len() {
+                return Err("invalid CSR SAN".into());
+            }
+            uris = parse_san_uris(&encoded[start..start + len])?;
+            break;
+        }
+    }
+    if uris.len() != 2
+        || !uris.iter().any(|u| u == &agent_uri)
+        || !uris.iter().any(|u| u == &epoch_uri)
     {
         return Err("CSR SAN identity mismatch".into());
     }
@@ -262,6 +281,52 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
         certificate_expires_at_unix_ms: expires,
         rotation_deadline_unix_ms: rotation,
     })
+}
+
+fn parse_san_uris(mut der: &[u8]) -> Result<Vec<String>, String> {
+    if der.first().copied() != Some(0x30) {
+        return Err("invalid CSR SAN".into());
+    }
+    let (len, used) = der_len(&der[1..])?;
+    der = &der[1 + used..];
+    if der.len() != len {
+        return Err("invalid CSR SAN".into());
+    }
+    let mut result = Vec::new();
+    while !der.is_empty() {
+        if der[0] != 0x86 {
+            return Err("CSR SAN contains non-URI name".into());
+        }
+        let (len, used) = der_len(&der[1..])?;
+        let start = 1 + used;
+        if start + len > der.len() {
+            return Err("invalid CSR SAN".into());
+        }
+        result.push(
+            String::from_utf8(der[start..start + len].to_vec()).map_err(|_| "invalid CSR SAN")?,
+        );
+        der = &der[start + len..];
+    }
+    Ok(result)
+}
+
+fn der_len(bytes: &[u8]) -> Result<(usize, usize), String> {
+    let first = *bytes.first().ok_or("invalid CSR SAN")?;
+    if first & 0x80 == 0 {
+        return Ok((first as usize, 1));
+    }
+    let count = (first & 0x7f) as usize;
+    if count == 0 || count > std::mem::size_of::<usize>() || bytes.len() < count + 1 {
+        return Err("invalid CSR SAN".into());
+    }
+    let mut value = 0usize;
+    for byte in &bytes[1..=count] {
+        value = value
+            .checked_mul(256)
+            .and_then(|v| v.checked_add(*byte as usize))
+            .ok_or("invalid CSR SAN")?;
+    }
+    Ok((value, count + 1))
 }
 
 fn safe_component(value: &str) -> bool {
