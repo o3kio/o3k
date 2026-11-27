@@ -1,0 +1,58 @@
+name: Early Access epic closure guard
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  require-final-acceptance:
+    # This guard intentionally handles only the EA adoption epic. The PP.6
+    # certification guard remains the authority for issue #975.
+    if: github.event.issue.number == 1241
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      EA_OWNER_LOGIN: senolcolak
+    steps:
+      - name: Verify explicit EA owner acceptance
+        id: acceptance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          issue_api="repos/${GH_REPOSITORY}/issues/${ISSUE_NUMBER}"
+          issue_json="$(gh api "$issue_api")"
+          comments_json="$(gh api --paginate --slurp "${issue_api}/comments?per_page=100")"
+
+          has_label=false
+          if jq -e 'any(.labels[]?.name; . == "ea-final-go")' <<<"$issue_json" >/dev/null; then
+            has_label=true
+          fi
+
+          # The owner marker is deliberately exact and must be accompanied by
+          # a SPEC-0052 evidence URL. A label alone can never close the epic.
+          has_owner_go=false
+          if jq -e --arg owner "$EA_OWNER_LOGIN" '
+            any(.[][]?;
+              .user.login == $owner and
+              (.body | contains("EA-OWNER-GO")) and
+              (.body | contains("SPEC-0052 acceptance evidence:")) and
+              (.body | test("SPEC-0052 acceptance evidence: https://[^[:space:]]+")))
+          ' <<<"$comments_json" >/dev/null; then
+            has_owner_go=true
+          fi
+
+          if [[ "$has_label" == true && "$has_owner_go" == true ]]; then
+            echo "EA final acceptance marker and owner evidence are present"
+            exit 0
+          fi
+
+          echo "Reopening #1241: EA final acceptance is incomplete" >&2
+          gh api --method PATCH "$issue_api" --field state=open >/dev/null
+          gh api --method POST "${issue_api}/comments" --field body="Reopened automatically by the Early Access epic closure guard. Closing #1241 requires the ea-final-go label and an owner comment containing EA-OWNER-GO plus a SPEC-0052 acceptance evidence URL. This guard does not certify historical PP phases." >/dev/null
+          exit 0
