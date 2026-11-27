@@ -25,8 +25,12 @@ fn state(row: sqlx::postgres::PgRow) -> Result<BootstrapStateRecord, StoreError>
         enrolled_agents: row
             .try_get("enrolled_agents")
             .map_err(StoreError::Database)?,
-        enrolled_agent_epochs: row.try_get("enrolled_agent_epochs").map_err(StoreError::Database)?,
-        revoked_agents: row.try_get("revoked_agents").map_err(StoreError::Database)?,
+        enrolled_agent_epochs: row
+            .try_get("enrolled_agent_epochs")
+            .map_err(StoreError::Database)?,
+        revoked_agents: row
+            .try_get("revoked_agents")
+            .map_err(StoreError::Database)?,
         updated_at: row.try_get("updated_at").map_err(StoreError::Database)?,
     })
 }
@@ -94,8 +98,7 @@ fn enrollment_result(row: sqlx::postgres::PgRow) -> Result<EnrollmentResultRecor
             .transpose()?,
     })
 }
-const STATE_COLUMNS: &str =
-    "state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,enrolled_agent_epochs,revoked_agents,updated_at";
+const STATE_COLUMNS: &str = "state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,enrolled_agent_epochs,revoked_agents,updated_at";
 const GRANT_COLUMNS: &str = "grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms";
 const ENROLLMENT_RESULT_COLUMNS: &str = "grant_id,agent_id,agent_epoch,token_digest,csr_sha256,certificate_fingerprint_sha256,client_certificate_chain_pem,ca_certificate_pem,ca_fingerprint_sha256,certificate_expires_at_unix_ms,rotation_deadline_unix_ms,issued_at_unix_ms,registered_at_unix_ms";
 
