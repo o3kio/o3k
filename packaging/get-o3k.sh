@@ -745,7 +745,10 @@ case "$ID:$VERSION_CODENAME" in
 esac
 if [ "$EA_INSTALL" = 1 ]; then
   [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || die 'Early Access supports Ubuntu 24.04 LTS only'
-  APT_PACKAGES="$APT_PACKAGES postgresql-16"
+  # Native Volume execution uses the bounded storage executor's LVM provider.
+  # The controller remains unprivileged; the dedicated storage service owns
+  # the narrow device-mapper capability boundary.
+  APT_PACKAGES="$APT_PACKAGES postgresql-16 lvm2"
 fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update

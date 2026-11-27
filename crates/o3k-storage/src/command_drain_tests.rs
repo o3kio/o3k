@@ -20,7 +20,10 @@ async fn blocked_command() -> Result<
     let path =
         SocketPath(std::env::temp_dir().join(format!("o3k-lvm-drain-{}", uuid::Uuid::now_v7())));
     let listener = tokio::net::UnixListener::bind(&path.0)?;
-    let runner = SystemLvmCommandRunner::default();
+    // Use the production runner's task ownership and drain behavior with a
+    // test-only subprocess adapter. Production command admission remains
+    // restricted to trusted absolute LVM paths.
+    let runner = SystemLvmCommandRunner::for_test_program("python3");
     let caller_runner = runner.clone();
     let args = vec!["-c".to_owned(), "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.recv(1); print('completed')".to_owned(), path.0.to_string_lossy().into_owned()];
     let caller = tokio::spawn(async move { caller_runner.run("python3", &args).await });
