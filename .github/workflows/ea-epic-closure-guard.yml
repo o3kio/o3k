@@ -42,7 +42,7 @@ jobs:
               .user.login == $owner and
               (.body | contains("EA-OWNER-GO")) and
               (.body | contains("SPEC-0052 acceptance evidence:")) and
-              (.body | test("https?://")))
+              (.body | test("SPEC-0052 acceptance evidence: https://[^[:space:]]+")))
           ' <<<"$comments_json" >/dev/null; then
             has_owner_go=true
           fi

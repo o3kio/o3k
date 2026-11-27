@@ -30,7 +30,8 @@ cat >"${fixture}" <<'JSON'
 [
   {"name":"label-only","labels":["ea-final-go"],"owner_go":false,"expected":false},
   {"name":"owner-marker-only","labels":[],"owner_go":true,"expected":false},
-  {"name":"complete","labels":["ea-final-go"],"owner_go":true,"expected":true}
+  {"name":"http-evidence","labels":["ea-final-go"],"owner_go":true,"evidence_url":"http://evidence.example/acceptance","expected":false},
+  {"name":"https-evidence","labels":["ea-final-go"],"owner_go":true,"evidence_url":"https://evidence.example/acceptance","expected":true}
 ]
 JSON
 if ! python3 - "${fixture}" <<'PY'
@@ -38,13 +39,46 @@ import json
 import sys
 
 for row in json.load(open(sys.argv[1], encoding="utf-8")):
-    accepted = "ea-final-go" in row["labels"] and row["owner_go"] is True
+    accepted = (
+        "ea-final-go" in row["labels"]
+        and row["owner_go"] is True
+        and row.get("evidence_url", "https://evidence.example/acceptance").startswith("https://")
+    )
     assert accepted is row["expected"], row
 PY
 then
     echo "EA closure guard fixture checks failed" >&2
     exit 1
 fi
+
+# Exercise the same jq URL predicate used by the live guard, including the
+# rejection of HTTP even when the comment contains a separate HTTPS URL.
+for scheme in http https; do
+    comment_body="EA-OWNER-GO SPEC-0052 acceptance evidence: ${scheme}://evidence.example/acceptance and notes https://unrelated.example/"
+    comments_json="$(python3 - "$comment_body" <<'PY'
+import json
+import sys
+print(json.dumps([[{"user": {"login": "senolcolak"}, "body": sys.argv[1]}]]))
+PY
+)"
+    if jq -e --arg owner senolcolak '
+        any(.[][]?;
+          .user.login == $owner and
+          (.body | contains("EA-OWNER-GO")) and
+          (.body | contains("SPEC-0052 acceptance evidence:")) and
+          (.body | test("SPEC-0052 acceptance evidence: https://[^[:space:]]+")))
+      ' <<<"$comments_json" >/dev/null; then
+        accepted=true
+    else
+        accepted=false
+    fi
+    expected=false
+    [[ "$scheme" == https ]] && expected=true
+    [[ "$accepted" == "$expected" ]] || {
+        echo "EA owner evidence URL scheme check failed for $scheme" >&2
+        exit 1
+    }
+done
 
 duplicate_workflow="${WORK_DIR}/duplicate.yml"
 cat >"${duplicate_workflow}" <<'YAML'
