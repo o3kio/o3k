@@ -137,7 +137,7 @@ pub trait StorageControllerFence: Send + Sync {
     }
 }
 
-pub struct StorageAttachmentWorkflow<S, P, C, F> {
+pub struct StorageAttachmentWorkflow<S, P: ?Sized, C, F> {
     store: Arc<S>,
     provider: Arc<P>,
     compute: Arc<C>,
@@ -147,7 +147,7 @@ pub struct StorageAttachmentWorkflow<S, P, C, F> {
 impl<S, P, C, F> StorageAttachmentWorkflow<S, P, C, F>
 where
     S: DurableStore + StorageRepository + Send + Sync + 'static,
-    P: StorageProvider + 'static,
+    P: StorageProvider + ?Sized + 'static,
     C: ComputeAttachmentExecutor + 'static,
     F: StorageControllerFence + 'static,
 {

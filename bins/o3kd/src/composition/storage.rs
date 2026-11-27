@@ -714,7 +714,7 @@ pub(crate) struct NativeStorageAttachmentWorkflow {
     pub(crate) controller_epoch: u64,
     pub(crate) workflow: o3k_reconciler::storage_workflow::StorageAttachmentWorkflow<
         o3k_store::O3kStore,
-        o3k_storage::LvmStorageProvider,
+        dyn o3k_storage::StorageProvider,
         LocalComputeAttachmentExecutor,
         LocalStorageFence,
     >,

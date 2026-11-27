@@ -9,7 +9,6 @@ pub mod backup;
 
 use o3k_kernel::{Clock, Controller};
 use o3k_provider::ComputeProvider;
-use o3k_storage::StorageProvider;
 use o3k_store::{
     BootstrapRepository, ComputeRepository, FederatedBindingRecord, IdentityRepository,
     OperatorAssignmentRecord,
@@ -255,38 +254,6 @@ fn unix_time_millis() -> u64 {
 }
 
 /// Resolve the native LVM provider configuration from the three `O3K_LVM_*`
-/// environment values. Unset and set-but-empty values both mean "provider not
-/// configured"; a partial configuration (some values set, others unset or
-/// empty) is rejected so a misconfigured host fails closed instead of
-/// silently running without storage. Values that are set but invalid are
-/// rejected by `LvmConfig::validate`.
-fn resolve_native_lvm_config(
-    volume_group: Option<String>,
-    thin_pool: Option<String>,
-    provider_namespace: Option<String>,
-) -> Result<Option<o3k_storage::LvmConfig>, Box<dyn std::error::Error>> {
-    let volume_group = volume_group.filter(|value| !value.is_empty());
-    let thin_pool = thin_pool.filter(|value| !value.is_empty());
-    let provider_namespace = provider_namespace.filter(|value| !value.is_empty());
-    match (volume_group, thin_pool, provider_namespace) {
-        (None, None, None) => Ok(None),
-        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => {
-            let config = o3k_storage::LvmConfig {
-                volume_group,
-                thin_pool,
-                provider_namespace,
-            };
-            config.validate()?;
-            Ok(Some(config))
-        }
-        _ => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "partial O3K_LVM_* configuration: set all of O3K_LVM_VOLUME_GROUP, \
-             O3K_LVM_THIN_POOL and O3K_LVM_PROVIDER_NAMESPACE, or none",
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod drain_test_support;
 #[cfg(test)]
@@ -1726,28 +1693,19 @@ pub async fn build_composition_with_guard(
         native_manifest_registry.update_controller_health(service_id, health)?;
     }
 
-    let native_lvm_config = resolve_native_lvm_config(
-        std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
-        std::env::var("O3K_LVM_THIN_POOL").ok(),
-        std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
-    )?;
-    let native_lvm_provider = native_lvm_config
-        .map(|config| o3k_storage::LvmStorageProvider::new(config).map(Arc::new))
-        .transpose()?;
+    // Native EA storage always crosses the dedicated mTLS executor boundary.
+    // Missing executor identity is a fail-closed configuration error.
+    let native_lvm_provider: Option<Arc<o3k_storage::LvmStorageProvider>> = None;
     let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
-        match native_lvm_provider.clone() {
-            Some(provider) => match provider.capabilities().await {
-                Ok(capabilities) if capabilities.create_volume => Some(provider as _),
-                Ok(_) => {
-                    tracing::warn!("native storage provider lacks volume-create capability");
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "native storage provider readiness probe failed");
-                    None
-                }
-            },
-            None => None,
+        if std::env::var_os("O3K_STORAGE_ENDPOINT").is_some() {
+            Some(Arc::new(
+                crate::composition::storage::RemoteStorageProvider::from_env(
+                    "local".to_owned(),
+                    storage_intent_epoch(&controller_epoch),
+                )?,
+            ) as Arc<dyn o3k_storage::StorageProvider>)
+        } else {
+            None
         };
 
     // Metering authority: the durable authority window is anchored once at
@@ -1882,7 +1840,7 @@ pub async fn build_composition_with_guard(
     let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
     let mut storage_fence_for_drain = None;
     let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
-        native_lvm_provider.as_ref().map(|provider| {
+        native_storage_provider.as_ref().map(|provider| {
             let storage_fence = LocalStorageFence {
                 coordination: coordination_store.clone(),
                 controller_id: controller_id.clone(),
