@@ -563,6 +563,10 @@ pub struct StorageAttachmentRequest {
     pub host_id: String,
     pub access_mode: AttachmentAccessMode,
 }
+#[derive(Debug, Clone)]
+pub struct StorageExecutionContext {
+    pub envelope: o3k_domain::StorageCommandEnvelope,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageVolumeObservation {
@@ -673,6 +677,13 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<PreparedAttachment, StorageProviderError>;
+    async fn prepare_attachment_with_context(
+        &self,
+        request: &StorageAttachmentRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<PreparedAttachment, StorageProviderError> {
+        self.prepare_attachment(request).await
+    }
     /// Observe the bounded storage-side attachment state without retrying a
     /// mutation. A controller uses this after an unknown outcome before it
     /// may issue another command.
@@ -684,6 +695,13 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<StorageAttachmentObservation, StorageProviderError>;
+    async fn terminate_attachment_with_context(
+        &self,
+        request: &StorageAttachmentRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        self.terminate_attachment(request).await
+    }
     async fn create_snapshot(
         &self,
         request: &StorageSnapshotRequest,

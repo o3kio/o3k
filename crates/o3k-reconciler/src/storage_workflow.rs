@@ -620,7 +620,16 @@ where
             .await?
             .ok_or(StoreError::ResourceNotFound)?;
         let request = attachment_request(&record.attachment, volume.volume.generation, &envelope);
-        match self.provider.terminate_attachment(&request).await {
+        match self
+            .provider
+            .terminate_attachment_with_context(
+                &request,
+                &o3k_storage::StorageExecutionContext {
+                    envelope: envelope.clone(),
+                },
+            )
+            .await
+        {
             Err(error) if error.is_unknown_outcome() => {
                 self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
@@ -685,7 +694,16 @@ where
             )
             .await?;
         let request = attachment_request(&record.attachment, volume_generation, &envelope);
-        let prepared = match self.provider.prepare_attachment(&request).await {
+        let prepared = match self
+            .provider
+            .prepare_attachment_with_context(
+                &request,
+                &o3k_storage::StorageExecutionContext {
+                    envelope: envelope.clone(),
+                },
+            )
+            .await
+        {
             Ok(value) => value,
             Err(error) if error.is_unknown_outcome() => {
                 self.fence.assert_current(controller_epoch).await?;
