@@ -2350,6 +2350,7 @@ dependencies = [
  "o3k-controller-protocol",
  "o3k-domain",
  "o3k-storage",
+ "openssl",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
