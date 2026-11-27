@@ -2064,6 +2064,7 @@ version = "0.4.1-rc.1"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "uuid",
 ]
@@ -2345,10 +2346,12 @@ dependencies = [
 name = "o3k-storage-bin"
 version = "0.4.1-rc.1"
 dependencies = [
+ "hex",
  "o3k-controller-protocol",
  "o3k-domain",
  "o3k-storage",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tonic",
  "tracing",
