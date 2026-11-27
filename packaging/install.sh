@@ -548,7 +548,6 @@ if [[ "$PROFILE" == libvirt ]]; then mark_owned_dir "$COMPUTE_DATA_DIR"; fi
 INSTALLED_FILES=(
   bin/o3kd
   bin/o3k
-  bin/o3k-enrollment-issuer
   share/o3k/o3kd.service
   share/o3k/reset.sh
   share/o3k/uninstall.sh
@@ -560,7 +559,20 @@ INSTALLED_FILES=(
 )
 install_owned_file "$BINARY" "$PREFIX/bin/o3kd" bin/o3kd 0755
 install_owned_file "$O3K_BINARY" "$PREFIX/bin/o3k" bin/o3k 0755
-if [[ "$EA_INSTALL" == 1 ]]; then install_owned_file "$ENROLLMENT_ISSUER_BINARY" "$PREFIX/bin/o3k-enrollment-issuer" bin/o3k-enrollment-issuer 0755; fi
+if [[ "$EA_INSTALL" == 1 ]]; then
+  INSTALLED_FILES+=(
+    bin/o3k-enrollment-issuer
+    share/o3k/o3k-enrollment-issuer@.service
+    share/o3k/o3k-enrollment-issuer.socket
+  )
+  install_owned_file "$ENROLLMENT_ISSUER_BINARY" "$PREFIX/bin/o3k-enrollment-issuer" bin/o3k-enrollment-issuer 0755
+  install_owned_file "$ROOT_DIR/packaging/o3k-enrollment-issuer@.service" \
+    "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" \
+    share/o3k/o3k-enrollment-issuer@.service 0644
+  install_owned_file "$ROOT_DIR/packaging/o3k-enrollment-issuer.socket" \
+    "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" \
+    share/o3k/o3k-enrollment-issuer.socket 0644
+fi
 install_owned_file "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service" share/o3k/o3kd.service 0644
 for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh bootstrap-testlab.sh; do
   install_owned_file "$ROOT_DIR/packaging/$file" "$PREFIX/share/o3k/$file" "share/o3k/$file" 0755
@@ -1126,8 +1138,10 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   fi
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
   if [[ "$EA_INSTALL" == 1 ]]; then
-    install_owned_system_file "$ROOT_DIR/packaging/o3k-enrollment-issuer@.service" /etc/systemd/system/o3k-enrollment-issuer@.service 0644
-    install_owned_system_file "$ROOT_DIR/packaging/o3k-enrollment-issuer.socket" /etc/systemd/system/o3k-enrollment-issuer.socket 0644
+    install_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" \
+      /etc/systemd/system/o3k-enrollment-issuer@.service 0644
+    install_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" \
+      /etc/systemd/system/o3k-enrollment-issuer.socket 0644
     install -d -m 0750 -o root -g o3k /etc/o3k/ea
   fi
   if [[ "$PROFILE" == libvirt ]]; then

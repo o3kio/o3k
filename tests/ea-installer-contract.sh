@@ -92,6 +92,8 @@ bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
 grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
+grep -Fq 'share/o3k/o3k-enrollment-issuer@.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh"
+grep -Fq 'systemctl disable --now o3k-enrollment-issuer.socket' "$ROOT/packaging/uninstall.sh"
 grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
 ! grep -Fq 'O3K_ENROLLMENT_SIGNER=/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
 grep -Fq '/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
