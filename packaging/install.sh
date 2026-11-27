@@ -866,9 +866,6 @@ if [[ "$PROFILE" == libvirt ]]; then
     key="${setting%%=*}"
     grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
   done
-  # Enrollment is enabled only when the operator supplies the approved
-  # root-issuer socket path.  Do not guess a socket or silently enable a
-  # listener whose issuer has not been installed and permission-checked.
   # EA release bundles install the root-owned, socket-activated issuer at
   # this canonical path. Operators may override it only for an explicitly
   # provisioned campaign-owned issuer.

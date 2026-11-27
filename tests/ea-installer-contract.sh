@@ -70,7 +70,6 @@ assert docker_local_version == version, docker_local_version
 PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
-echo 'Early Access installer contract: PASS'
 grep -Fq 'O3K_STORAGE_CONTROLLER_IDENTITY' "$ROOT/packaging/install.sh"
 ! grep -Fq 'urn:o3k:controller:installation-local' "$ROOT/packaging/install.sh"
 grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
