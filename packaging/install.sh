@@ -866,11 +866,10 @@ if [[ "$PROFILE" == libvirt ]]; then
     key="${setting%%=*}"
     grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
   done
-  # EA release bundles install the root-owned, socket-activated issuer at
-  # this canonical path. Operators may override it only for an explicitly
-  # provisioned campaign-owned issuer.
-  O3K_ENROLLMENT_SIGNER="${O3K_ENROLLMENT_SIGNER:-/run/o3k/enrollment-issuer.sock}"
-  if [[ -n "$O3K_ENROLLMENT_SIGNER" ]]; then
+  # Only authenticated EA installs have the root-owned issuer socket. C1
+  # must never inherit these listener settings from a shared environment.
+  if [[ "$EA_INSTALL" == 1 ]]; then
+    O3K_ENROLLMENT_SIGNER="${O3K_ENROLLMENT_SIGNER:-/run/o3k/enrollment-issuer.sock}"
     [[ "$O3K_ENROLLMENT_SIGNER" == /* && "$O3K_ENROLLMENT_SIGNER" != *$'\n'* ]] || {
       echo "O3K_ENROLLMENT_SIGNER must be an absolute local issuer socket path" >&2; exit 2;
     }
