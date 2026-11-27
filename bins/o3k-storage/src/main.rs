@@ -2,11 +2,10 @@ use o3k_controller_protocol::storage::{
     ExecuteResponse, StorageCommand, StorageObservation as WireObservation,
     storage_executor_server::{StorageExecutor, StorageExecutorServer},
 };
-use o3k_domain::StorageCommandEnvelope;
+use o3k_domain::{StorageCommandEnvelope, storage_payload_fingerprint};
 use o3k_storage::{
     LvmConfig, LvmStorageProvider, StorageJournal, StorageProvider, StorageVolumeRequest,
 };
-use sha2::{Digest, Sha256};
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -33,7 +32,8 @@ impl StorageExecutor for Executor {
         if payload.volume_id.to_string() != envelope.resource_id
             || payload.project_id != envelope.project_id
             || payload.generation != envelope.resource_generation
-            || hex::encode(Sha256::digest(&command.payload_json))
+            || storage_payload_fingerprint(&payload)
+                .map_err(|_| Status::invalid_argument("invalid storage payload"))?
                 != envelope.canonical_payload_fingerprint
         {
             return Err(Status::invalid_argument(
