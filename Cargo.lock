@@ -2332,12 +2332,27 @@ version = "0.4.1-rc.1"
 dependencies = [
  "async-trait",
  "o3k-domain",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "o3k-storage-bin"
+version = "0.4.1-rc.1"
+dependencies = [
+ "o3k-controller-protocol",
+ "o3k-domain",
+ "o3k-storage",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
