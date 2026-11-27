@@ -445,6 +445,27 @@ mod tests {
         path
     }
 
+    #[allow(deprecated)]
+    fn csr_with_sans(sans: &[&str]) -> Vec<u8> {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "agent-test").unwrap();
+        let name = name.build();
+        let mut request = X509Req::builder().unwrap();
+        request.set_subject_name(&name).unwrap();
+        request.set_pubkey(&key).unwrap();
+        let mut extensions = openssl::stack::Stack::new().unwrap();
+        for san in sans {
+            extensions
+                .push(X509Extension::new_nid(None, None, Nid::SUBJECT_ALT_NAME, san).unwrap())
+                .unwrap();
+        }
+        request.add_extensions(&extensions).unwrap();
+        request.sign(&key, MessageDigest::sha256()).unwrap();
+        request.build().to_pem().unwrap()
+    }
+
     #[test]
     fn ca_directory_publication_is_complete_idempotent_and_race_safe() {
         let root = test_dir("parallel");
@@ -598,5 +619,31 @@ mod tests {
         assert!(safe_component("agent-01.example"));
         assert!(!safe_component("agent,URI:DNS:evil"));
         assert!(!safe_component("epoch\nURI:DNS:evil"));
+    }
+
+    #[test]
+    fn csr_san_validation_rejects_extra_names_and_identity_mismatch() {
+        let agent_uri = "urn:o3k:compute:agent:agent-test";
+        let epoch_uri = "urn:o3k:compute:epoch:epoch-test";
+        let valid = csr_with_sans(&[&format!("URI:{agent_uri},URI:{epoch_uri}")]);
+        assert!(validate_csr_uri_sans(&valid, agent_uri, epoch_uri).is_ok());
+
+        let extra_uri = csr_with_sans(&[&format!(
+            "URI:{agent_uri},URI:{epoch_uri},URI:urn:o3k:compute:agent:other"
+        )]);
+        assert!(validate_csr_uri_sans(&extra_uri, agent_uri, epoch_uri).is_err());
+
+        let non_uri =
+            csr_with_sans(&[&format!("URI:{agent_uri},URI:{epoch_uri},DNS:evil.example")]);
+        assert!(validate_csr_uri_sans(&non_uri, agent_uri, epoch_uri).is_err());
+        assert!(validate_csr_uri_sans(&valid, agent_uri, "urn:o3k:compute:epoch:other").is_err());
+    }
+
+    #[test]
+    fn csr_san_validation_rejects_duplicate_san_extensions() {
+        let agent_uri = "urn:o3k:compute:agent:agent-test";
+        let epoch_uri = "urn:o3k:compute:epoch:epoch-test";
+        let duplicate = csr_with_sans(&[&format!("URI:{agent_uri}"), &format!("URI:{epoch_uri}")]);
+        assert!(validate_csr_uri_sans(&duplicate, agent_uri, epoch_uri).is_err());
     }
 }
