@@ -866,6 +866,20 @@ if [[ "$PROFILE" == libvirt ]]; then
     key="${setting%%=*}"
     grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
   done
+  # Enrollment is enabled only when the operator supplies the approved
+  # root-issuer socket path.  Do not guess a socket or silently enable a
+  # listener whose issuer has not been installed and permission-checked.
+  if [[ -n "${O3K_ENROLLMENT_SIGNER:-}" ]]; then
+    [[ "$O3K_ENROLLMENT_SIGNER" == /* && "$O3K_ENROLLMENT_SIGNER" != *$'\n'* ]] || {
+      echo "O3K_ENROLLMENT_SIGNER must be an absolute local issuer socket path" >&2; exit 2;
+    }
+    for setting in \
+      "O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443" \
+      "O3K_ENROLLMENT_SIGNER=$O3K_ENROLLMENT_SIGNER"; do
+      key="${setting%%=*}"
+      grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
+    done
+  fi
   # The compute agent reads its identity from ITS data directory
   # (bins/o3k-compute/src/main.rs: identity_file = data_dir.join("agent-id")),
   # so the identity must be installed there, owned by the compute account —

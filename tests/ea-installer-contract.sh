@@ -71,3 +71,18 @@ PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
 echo 'Early Access installer contract: PASS'
+grep -Fq 'O3K_STORAGE_CONTROLLER_IDENTITY' "$ROOT/packaging/install.sh"
+! grep -Fq 'urn:o3k:controller:installation-local' "$ROOT/packaging/install.sh"
+grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
+grep -Fq '10-configured-pool.conf' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
+grep -Fq '/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
+grep -Fq 'EA_INSTALL' "$ROOT/packaging/install.sh"
+if grep -Fq 'O3K_ENROLLMENT_SIGNER=' "$ROOT/packaging/install.sh" && \
+  ! grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]' "$ROOT/packaging/install.sh"; then
+  echo "EA enrollment settings are not gated by the authenticated EA installer" >&2
+  exit 1
+fi
+
+echo 'Early Access installer contract: PASS'
