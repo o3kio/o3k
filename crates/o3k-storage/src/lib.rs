@@ -690,6 +690,30 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<(), StorageProviderError>;
+    /// Context-bound volume mutation hooks.  Durable controller workflows use
+    /// these hooks so command identity, idempotency and fencing come from the
+    /// persisted envelope rather than being synthesized by a provider.
+    async fn create_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        self.create_volume(request).await
+    }
+    async fn inspect_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        self.inspect_volume(request).await
+    }
+    async fn delete_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<(), StorageProviderError> {
+        self.delete_volume(request).await
+    }
     async fn prepare_attachment(
         &self,
         request: &StorageAttachmentRequest,

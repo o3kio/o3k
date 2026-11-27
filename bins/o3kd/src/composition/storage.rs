@@ -309,6 +309,96 @@ impl StorageProvider for RemoteStorageProvider {
         .await
         .map(|_| ())
     }
+    async fn create_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        context: &StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        if context.envelope.action != StorageAction::CreateVolume
+            || context.envelope.resource_id != request.volume_id.to_string()
+            || context.envelope.project_id != request.project_id
+            || context.envelope.resource_generation != request.generation
+        {
+            return Err(StorageProviderError::InvalidRequest);
+        }
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
+        let observation = self
+            .execute_with_envelope(&context.envelope, &payload)
+            .await?;
+        Ok(StorageVolumeObservation {
+            provider_reference: observation
+                .provider_resource_id
+                .map(|resource_id| o3k_domain::StorageProviderReference {
+                    provider: "o3k-storage".into(),
+                    resource_id,
+                })
+                .ok_or(StorageProviderError::CommandFailed)?,
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: observation.resource_state == "available",
+        })
+    }
+    async fn inspect_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        context: &StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        if context.envelope.action != StorageAction::InspectVolume
+            || context.envelope.resource_id != request.volume_id.to_string()
+            || context.envelope.project_id != request.project_id
+            || context.envelope.resource_generation != request.generation
+        {
+            return Err(StorageProviderError::InvalidRequest);
+        }
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
+        let observation = self
+            .execute_with_envelope(&context.envelope, &payload)
+            .await?;
+        Ok(StorageVolumeObservation {
+            provider_reference: observation
+                .provider_resource_id
+                .map(|resource_id| o3k_domain::StorageProviderReference {
+                    provider: "o3k-storage".into(),
+                    resource_id,
+                })
+                .ok_or(StorageProviderError::CommandFailed)?,
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: observation.resource_state == "available",
+        })
+    }
+    async fn delete_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        context: &StorageExecutionContext,
+    ) -> Result<(), StorageProviderError> {
+        if context.envelope.action != StorageAction::DeleteVolume
+            || context.envelope.resource_id != request.volume_id.to_string()
+            || context.envelope.project_id != request.project_id
+            || context.envelope.resource_generation != request.generation
+        {
+            return Err(StorageProviderError::InvalidRequest);
+        }
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
+        self.execute_with_envelope(&context.envelope, &payload)
+            .await
+            .map(|_| ())
+    }
     async fn prepare_attachment(
         &self,
         request: &StorageAttachmentRequest,
