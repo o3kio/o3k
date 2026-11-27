@@ -10,7 +10,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use openssl::x509::X509Req;
+use openssl::{
+    stack::Stack,
+    x509::{X509, X509Req},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -162,6 +165,18 @@ pub enum EnrollmentIssueError {
     State,
 }
 
+/// Minimal durable grant boundary. Implementations must perform the
+/// token-digest check and consume transition in one transaction; the
+/// authority never receives the plaintext token from the store.
+pub trait DurableEnrollmentGrants: Send + Sync {
+    fn consume(
+        &self,
+        grant_id: &str,
+        token_digest_hex: &str,
+        now_unix_ms: u64,
+    ) -> Result<EnrollmentGrantBinding, EnrollmentIssueError>;
+}
+
 pub struct EnrollmentIssuer<S> {
     grants: Arc<Mutex<Vec<EnrollmentGrantBinding>>>,
     signer: S,
@@ -308,6 +323,90 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
         grant.consumed_at_unix_ms = Some(now_unix_ms);
         Ok(issued)
     }
+
+    /// Issue using a controller-owned durable grant transaction. This path is
+    /// intended for production composition; the in-memory constructor remains
+    /// useful only for isolated unit tests.
+    pub fn issue_durable<R: DurableEnrollmentGrants>(
+        &self,
+        grants: &R,
+        grant_id: &str,
+        token: &[u8],
+        csr_pem: &[u8],
+        now_unix_ms: u64,
+    ) -> Result<IssuedEnrollment, EnrollmentIssueError> {
+        if token.len() > 4096 || csr_pem.len() > 128 * 1024 {
+            return Err(EnrollmentIssueError::UnauthorizedGrant);
+        }
+        let token_digest = hex_lower(&Sha256::digest(token));
+        let grant = grants.consume(grant_id, &token_digest, now_unix_ms)?;
+        validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
+        let issued = self
+            .signer
+            .sign_csr(
+                grant_id,
+                token,
+                &grant.agent_id,
+                &grant.agent_epoch,
+                csr_pem,
+            )
+            .map_err(|_| EnrollmentIssueError::Signer)?;
+        validate_issued_binding(&issued, csr_pem, now_unix_ms)?;
+        Ok(issued)
+    }
+}
+
+fn validate_issued_binding(
+    issued: &IssuedEnrollment,
+    csr_pem: &[u8],
+    now_unix_ms: u64,
+) -> Result<(), EnrollmentIssueError> {
+    let chain = X509::stack_from_pem(&issued.client_certificate_chain_pem)
+        .map_err(|_| EnrollmentIssueError::Signer)?;
+    let ca =
+        X509::from_pem(&issued.ca_certificate_pem).map_err(|_| EnrollmentIssueError::Signer)?;
+    let leaf = chain.first().ok_or(EnrollmentIssueError::Signer)?;
+    let key = X509Req::from_pem(csr_pem)
+        .and_then(|r| r.public_key())
+        .map_err(|_| EnrollmentIssueError::Signer)?;
+    if !leaf
+        .public_key()
+        .map_err(|_| EnrollmentIssueError::Signer)?
+        .public_eq(&key)
+    {
+        return Err(EnrollmentIssueError::Signer);
+    }
+    let mut roots =
+        openssl::x509::store::X509StoreBuilder::new().map_err(|_| EnrollmentIssueError::Signer)?;
+    roots
+        .add_cert(ca.clone())
+        .map_err(|_| EnrollmentIssueError::Signer)?;
+    let roots = roots.build();
+    let chain_rest = Stack::new().map_err(|_| EnrollmentIssueError::Signer)?;
+    let mut ctx =
+        openssl::x509::X509StoreContext::new().map_err(|_| EnrollmentIssueError::Signer)?;
+    ctx.init(&roots, leaf, &chain_rest, |c| c.verify_cert())
+        .map_err(|_| EnrollmentIssueError::Signer)?;
+    let digest = hex_lower(&Sha256::digest(
+        ca.to_der().map_err(|_| EnrollmentIssueError::Signer)?,
+    ));
+    if !digest.eq_ignore_ascii_case(&issued.ca_fingerprint_sha256)
+        || issued.certificate_expires_at_unix_ms <= now_unix_ms
+        || issued.rotation_deadline_unix_ms > issued.certificate_expires_at_unix_ms
+    {
+        return Err(EnrollmentIssueError::Signer);
+    }
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn validate_csr(csr_pem: &[u8], agent_id: &str, epoch: &str) -> Result<(), EnrollmentIssueError> {
