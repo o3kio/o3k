@@ -115,7 +115,16 @@ pub struct StorageCommandEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum StorageCommandPayload {
+    Volume(StorageVolumeCommandPayload),
     Attachment(StorageAttachmentCommandPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageVolumeCommandPayload {
+    pub volume_id: VolumeId,
+    pub project_id: String,
+    pub size_bytes: u64,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +213,8 @@ pub struct StorageObservation {
     pub resource_state: String,
     pub error_category: Option<StorageErrorCategory>,
     pub redacted_message: Option<String>,
+    #[serde(default)]
+    pub device_path: Option<String>,
 }
 
 impl StorageObservation {
@@ -815,6 +826,7 @@ mod tests {
             resource_state: "available".to_owned(),
             error_category: None,
             redacted_message: None,
+            device_path: None,
         };
         assert!(observation.validate().is_ok());
     }

@@ -3,8 +3,9 @@ use o3k_controller_protocol::storage::{
     StorageCommand, storage_executor_client::StorageExecutorClient,
 };
 use o3k_domain::{
-    StorageAction, StorageCapabilities, StorageCommandEnvelope, StorageObservation,
-    StorageOperationState, storage_payload_fingerprint,
+    StorageAction, StorageAttachmentCommandPayload, StorageCapabilities, StorageCommandEnvelope,
+    StorageCommandPayload, StorageObservation, StorageOperationState, StorageVolumeCommandPayload,
+    storage_payload_fingerprint,
 };
 use o3k_provider::BlockDeviceAttachment;
 use o3k_reconciler;
@@ -162,13 +163,19 @@ impl StorageProvider for RemoteStorageProvider {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
         let o = self
             .execute(
                 StorageAction::CreateVolume,
                 request.volume_id.to_string(),
                 request.project_id.clone(),
                 request.generation,
-                request,
+                &payload,
             )
             .await?;
         Ok(StorageVolumeObservation {
@@ -188,13 +195,19 @@ impl StorageProvider for RemoteStorageProvider {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
         let o = self
             .execute(
                 StorageAction::InspectVolume,
                 request.volume_id.to_string(),
                 request.project_id.clone(),
                 request.generation,
-                request,
+                &payload,
             )
             .await?;
         Ok(StorageVolumeObservation {
@@ -214,12 +227,18 @@ impl StorageProvider for RemoteStorageProvider {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<(), StorageProviderError> {
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
         self.execute(
             StorageAction::DeleteVolume,
             request.volume_id.to_string(),
             request.project_id.clone(),
             request.generation,
-            request,
+            &payload,
         )
         .await
         .map(|_| ())
@@ -228,7 +247,18 @@ impl StorageProvider for RemoteStorageProvider {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<PreparedAttachment, StorageProviderError> {
-        let payload = serde_json::json!({"attachment_id": request.attachment_id, "volume_id": request.volume_id, "project_id": request.project_id, "volume_generation": request.volume_generation, "host_id": request.host_id, "access_mode": request.access_mode});
+        let payload = StorageCommandPayload::Attachment(StorageAttachmentCommandPayload {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            server_id: request
+                .host_id
+                .parse()
+                .map_err(|_| StorageProviderError::InvalidRequest)?,
+            project_id: request.project_id.clone(),
+            access_mode: request.access_mode,
+            delete_on_termination: false,
+            volume_generation: request.volume_generation,
+        });
         let o = self
             .execute(
                 StorageAction::PrepareAttachment,
@@ -243,7 +273,7 @@ impl StorageProvider for RemoteStorageProvider {
                 provider: "o3k-storage".into(),
                 resource_id: o.provider_resource_id.unwrap_or_default(),
             },
-            "/dev/unknown".into(),
+            o.device_path.ok_or(StorageProviderError::CommandFailed)?,
             request.attachment_id,
             request.volume_id,
         )
@@ -252,7 +282,18 @@ impl StorageProvider for RemoteStorageProvider {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<StorageAttachmentObservation, StorageProviderError> {
-        let payload = serde_json::json!({"attachment_id": request.attachment_id, "volume_id": request.volume_id, "project_id": request.project_id, "volume_generation": request.volume_generation, "host_id": request.host_id, "access_mode": request.access_mode});
+        let payload = StorageCommandPayload::Attachment(StorageAttachmentCommandPayload {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            server_id: request
+                .host_id
+                .parse()
+                .map_err(|_| StorageProviderError::InvalidRequest)?,
+            project_id: request.project_id.clone(),
+            access_mode: request.access_mode,
+            delete_on_termination: false,
+            volume_generation: request.volume_generation,
+        });
         let o = self
             .execute(
                 StorageAction::Reconcile,

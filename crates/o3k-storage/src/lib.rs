@@ -122,6 +122,7 @@ impl StorageJournal {
             resource_state: "accepted".to_owned(),
             error_category: None,
             redacted_message: None,
+            device_path: None,
         };
         let next_controller_epoch = envelope.controller_epoch;
         let mut candidate = records.clone();
