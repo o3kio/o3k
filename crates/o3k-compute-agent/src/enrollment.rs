@@ -51,6 +51,22 @@ impl RootHelperEnrollmentSigner {
             command: command.into(),
         }
     }
+
+    fn validate_command(&self) -> Result<(), String> {
+        if !self.command.starts_with("/usr/libexec/o3k/") {
+            return Err("signer path is outside packaged directory".to_owned());
+        }
+        let meta = std::fs::metadata(&self.command)
+            .map_err(|_| "signer executable is unavailable".to_owned())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.uid() != 0 || (meta.mode() & 0o022) != 0 || (meta.mode() & 0o111) == 0 {
+                return Err("signer executable ownership or mode is unsafe".to_owned());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -71,9 +87,7 @@ impl EnrollmentSigner for RootHelperEnrollmentSigner {
         agent_epoch: &str,
         csr_pem: &[u8],
     ) -> Result<IssuedEnrollment, String> {
-        if !self.command.starts_with("/usr/libexec/o3k/") {
-            return Err("signer path is outside packaged directory".to_owned());
-        }
+        self.validate_command()?;
         let request = serde_json::to_vec(&SignRequest {
             grant_id,
             token,
@@ -82,6 +96,9 @@ impl EnrollmentSigner for RootHelperEnrollmentSigner {
             csr_pem,
         })
         .map_err(|_| "cannot encode signer request".to_owned())?;
+        if request.len() > 1024 * 1024 {
+            return Err("signer request too large".to_owned());
+        }
         let mut child = Command::new(&self.command)
             .arg("sign-csr")
             .stdin(Stdio::piped())
