@@ -158,6 +158,14 @@ for tool in bash python3 sha256sum find sort xargs grep mktemp rm strings dirnam
 done
 NO_TOOL="$WORK_DIR/no-inspector"
 clone_bundle "$NO_TOOL"
+if ! env -i HOME="$WORK_DIR/home" PATH="$NO_NM" /bin/bash \
+  "$NO_TOOL/packaging/verify-release-bundle.sh" "$NO_TOOL" --integrity-only \
+  >"$WORK_DIR/integrity-only-no-nm.log" 2>&1; then
+  cat "$WORK_DIR/integrity-only-no-nm.log" >&2
+  echo "checksum-only bundle verification incorrectly requires executable inspection tools" >&2
+  exit 1
+fi
+record "checksum-only bundle integrity without binutils" "PASS"
 if env -i HOME="$WORK_DIR/home" PATH="$NO_NM" /bin/bash \
   "$NO_TOOL/packaging/verify-release-bundle.sh" "$NO_TOOL" >"$WORK_DIR/no-nm.log" 2>&1; then
   status=0

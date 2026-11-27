@@ -32,6 +32,18 @@ grep -Fq 'EA_INSTALL" = 0' "$WRAPPER"
 grep -Fq 'installation_authority":"installation-local' "$RELEASE"
 grep -Fq 'early-access-v1' "$WORKFLOW"
 grep -Fq "'0' || '1'" "$WORKFLOW"
+python3 - "$WRAPPER" <<'PY'
+from pathlib import Path
+import sys
+
+wrapper = Path(sys.argv[1]).read_text()
+integrity = wrapper.index('verify-release-bundle.sh" "$BUNDLE_DIR" --integrity-only')
+ea_preflight = wrapper.index('ea-preflight.sh')
+install_tools = wrapper.index('apt-get install -y $APT_PACKAGES')
+executable_check = wrapper.index('release bundle executable verification failed')
+service_start = wrapper.index('systemctl enable --now libvirtd')
+assert integrity < ea_preflight < install_tools < executable_check < service_start
+PY
 grep -Fq 'qualification candidate' "$ROOT/docs/releases/v0.4.1-rc.1.md"
 grep -Fq -- '--draft --title "O3K v0.4.1' "$WORKFLOW"
 grep -Fq 'workflow_dispatch:' "$PROMOTE_WORKFLOW"
