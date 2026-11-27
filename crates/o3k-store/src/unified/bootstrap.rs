@@ -40,12 +40,13 @@ impl BootstrapRepository for O3kStore {
     async fn consume_enrollment_grant(
         &self,
         id: &str,
+        epoch: &str,
         d: &str,
         n: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError> {
         match self {
-            Self::Sqlite(s) => s.consume_enrollment_grant(id, d, n).await,
-            Self::Postgres(s) => s.consume_enrollment_grant(id, d, n).await,
+            Self::Sqlite(s) => s.consume_enrollment_grant(id, epoch, d, n).await,
+            Self::Postgres(s) => s.consume_enrollment_grant(id, epoch, d, n).await,
         }
     }
 }

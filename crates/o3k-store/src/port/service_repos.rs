@@ -72,6 +72,7 @@ pub trait BootstrapRepository: Send + Sync {
     async fn consume_enrollment_grant(
         &self,
         grant_id: &str,
+        agent_epoch: &str,
         token_digest: &str,
         now_unix_ms: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError>;

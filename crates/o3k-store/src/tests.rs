@@ -206,6 +206,7 @@ mod tests {
         let grant = EnrollmentGrantRecord {
             grant_id: "grant-1".into(),
             agent_id: "node-1".into(),
+            agent_epoch: "epoch-1".into(),
             token_digest: "digest".into(),
             issued_at_unix_ms: 10,
             expires_at_unix_ms: 100,
@@ -213,12 +214,12 @@ mod tests {
         };
         store.insert_enrollment_grant(&grant).await?;
         let consumed = store
-            .consume_enrollment_grant("grant-1", "digest", 20)
+            .consume_enrollment_grant("grant-1", "epoch-1", "digest", 20)
             .await?;
         assert_eq!(consumed.used_at_unix_ms, Some(20));
         assert!(
             store
-                .consume_enrollment_grant("grant-1", "digest", 21)
+                .consume_enrollment_grant("grant-1", "epoch-1", "digest", 21)
                 .await
                 .is_err()
         );

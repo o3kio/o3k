@@ -35,7 +35,7 @@ impl o3k_compute_agent::AsyncDurableEnrollmentGrants for StoreEnrollmentGrants {
     {
         let record = self
             .0
-            .consume_enrollment_grant(grant_id, token_digest_hex, now_unix_ms)
+            .consume_enrollment_grant(grant_id, "", token_digest_hex, now_unix_ms)
             .await
             .map_err(|_| o3k_compute_agent::EnrollmentIssueError::State)?;
         Ok(o3k_compute_agent::EnrollmentGrantBinding {
@@ -678,7 +678,12 @@ impl BootstrapWorkflow for BootstrapAdapter {
         // A crash before this point can safely replay through the durable
         // agent projection; a replay after it is rejected as single-use.
         self.store
-            .consume_enrollment_grant(grant_id, &digest(&request.enrollment_token), now_ms())
+            .consume_enrollment_grant(
+                grant_id,
+                &request.agent_epoch,
+                &digest(&request.enrollment_token),
+                now_ms(),
+            )
             .await
             .map_err(|_| BootstrapFailure::Unauthorized)?;
         record_bootstrap_audit(

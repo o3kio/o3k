@@ -86,13 +86,19 @@ impl SqliteStore {
     pub async fn consume_enrollment_grant(
         &self,
         id: &str,
+        epoch: &str,
         digest: &str,
         now: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError> {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let row = sqlx::query("SELECT grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms FROM enrollment_grants WHERE grant_id=?").bind(id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::ResourceNotFound)?;
         let g = grant(row)?;
-        if g.token_digest != digest || g.used_at_unix_ms.is_some() || now >= g.expires_at_unix_ms {
+        if g.agent_epoch.is_empty()
+            || g.agent_epoch != epoch
+            || g.token_digest != digest
+            || g.used_at_unix_ms.is_some()
+            || now >= g.expires_at_unix_ms
+        {
             return Err(StoreError::OwnershipConflict);
         }
         let updated = sqlx::query("UPDATE enrollment_grants SET used_at_unix_ms=? WHERE grant_id=? AND used_at_unix_ms IS NULL")
@@ -138,9 +144,10 @@ impl BootstrapRepository for SqliteStore {
     async fn consume_enrollment_grant(
         &self,
         id: &str,
+        epoch: &str,
         d: &str,
         n: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError> {
-        self.consume_enrollment_grant(id, d, n).await
+        self.consume_enrollment_grant(id, epoch, d, n).await
     }
 }
