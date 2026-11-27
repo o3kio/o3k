@@ -242,6 +242,9 @@ if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   O3K_RELEASE_DIST_DIR="$ASSET_DIST" \
   O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
     bash "$ROOT_DIR/packaging/make-release.sh" "$ASSET_VERSION" fake
+  cmp -s "$ROOT_DIR/packaging/config-env.sh" \
+    "$ASSET_DIST/o3k-$ASSET_VERSION/packaging/config-env.sh" \
+    || { echo "release bundle config-env.sh is missing or out of sync" >&2; exit 1; }
   [[ -f "$ASSET_DIST/install.sh" && -x "$ASSET_DIST/install.sh" ]] \
     || { echo "install.sh release asset missing or not 0755" >&2; exit 1; }
   cmp -s "$ROOT_DIR/packaging/get-o3k.sh" "$ASSET_DIST/install.sh" \
