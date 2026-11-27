@@ -1250,14 +1250,31 @@ pub async fn build_composition_with_guard(
     if let Some(bootstrap) = store.get_bootstrap_state("default").await? {
         let enrolled: std::collections::BTreeMap<String, String> =
             serde_json::from_str(&bootstrap.enrolled_agents).unwrap_or_default();
+        let epochs: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&bootstrap.enrolled_agent_epochs).unwrap_or_default();
+        let revoked: std::collections::BTreeMap<String, bool> =
+            serde_json::from_str(&bootstrap.revoked_agents).unwrap_or_default();
         for (agent_id, fingerprint) in enrolled {
+            if revoked.get(&agent_id).copied().unwrap_or(false) {
+                tracing::info!(agent_id = %agent_id, "not rehydrating revoked compute identity");
+                continue;
+            }
             let Some(bytes) = decode_certificate_fingerprint(&fingerprint) else {
                 tracing::warn!(agent_id = %agent_id, "ignoring malformed durable compute certificate fingerprint");
                 continue;
             };
-            registry
-                .authorize_agent_fingerprint(&agent_id, bytes)
-                .await?;
+            if let Some(epoch) = epochs.get(&agent_id) {
+                registry
+                    .authorize_agent_fingerprint_with_epoch(&agent_id, bytes, epoch)
+                    .await?;
+            } else {
+                // Pre-migration records have no epoch metadata. Preserve
+                // compatibility for those records until the next join writes
+                // the additive metadata.
+                registry
+                    .authorize_agent_fingerprint(&agent_id, bytes)
+                    .await?;
+            }
         }
     }
     // The console-log consumer keeps its own durable liveness handle: the

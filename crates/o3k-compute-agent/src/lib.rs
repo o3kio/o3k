@@ -148,6 +148,7 @@ pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
     epoch_gates: Arc<RwLock<HashMap<String, Arc<RwLock<()>>>>>,
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
+    authorized_agent_epochs: Arc<RwLock<HashMap<String, String>>>,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     artifact_transfer_slots: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
     events: broadcast::Sender<ProviderAgentEvent>,
@@ -185,6 +186,7 @@ impl Default for NodeRegistry {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             epoch_gates: Arc::new(RwLock::new(HashMap::new())),
             authorized_agents: Arc::new(RwLock::new(HashMap::new())),
+            authorized_agent_epochs: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
             events,
@@ -1019,6 +1021,24 @@ impl NodeRegistry {
         Ok(())
     }
 
+    /// Rehydrates an identity together with the durable epoch that currently
+    /// owns it.  Epochs are checked before registration, so a stale host
+    /// certificate cannot regain admission after replacement.
+    pub async fn authorize_agent_fingerprint_with_epoch(
+        &self,
+        agent_id: &str,
+        certificate_fingerprint: [u8; 32],
+        epoch: &str,
+    ) -> Result<(), AgentError> {
+        self.authorize_agent_fingerprint(agent_id, certificate_fingerprint)
+            .await?;
+        self.authorized_agent_epochs
+            .write()
+            .await
+            .insert(agent_id.to_owned(), epoch.to_owned());
+        Ok(())
+    }
+
     async fn is_authorized(&self, agent_id: &str, certificate: &[u8]) -> bool {
         let digest = Sha256::digest(certificate);
         self.authorized_agents
@@ -1026,6 +1046,39 @@ impl NodeRegistry {
             .await
             .get(agent_id)
             .is_some_and(|expected| expected.as_slice() == digest.as_slice())
+    }
+
+    async fn is_authorized_for_epoch(
+        &self,
+        agent_id: &str,
+        certificate: &[u8],
+        epoch: &str,
+    ) -> bool {
+        if !self.is_authorized(agent_id, certificate).await {
+            return false;
+        }
+        self.authorized_agent_epochs
+            .read()
+            .await
+            .get(agent_id)
+            .is_none_or(|expected| expected == epoch)
+    }
+
+    /// Revokes a joined identity from live admission and fences its active
+    /// stream. The public host-removal workflow owns when this is invoked;
+    /// this primitive does not create a new removal authority.
+    pub async fn revoke_agent_identity(&self, agent_id: &str) {
+        self.authorized_agents.write().await.remove(agent_id);
+        self.authorized_agent_epochs.write().await.remove(agent_id);
+        self.connections.write().await.remove(agent_id);
+    }
+
+    async fn is_current_connection(&self, agent_id: &str, epoch: &str) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(agent_id)
+            .is_some_and(|connection| connection.epoch == epoch)
     }
 
     pub async fn register(
@@ -2479,7 +2532,11 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         if !peer_matches_agent(certificate.as_ref(), &register.agent_id)
             || !self
                 .registry
-                .is_authorized(&register.agent_id, certificate.as_ref())
+                .is_authorized_for_epoch(
+                    &register.agent_id,
+                    certificate.as_ref(),
+                    &register.agent_epoch,
+                )
                 .await
         {
             return Err(Status::permission_denied(
@@ -2501,6 +2558,12 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         let agent_epoch = register.agent_epoch;
         self.registry.spawn_owned_task(async move {
             while let Ok(Some(message)) = inbound.get_mut().message().await {
+                if !registry
+                    .is_current_connection(&agent_id, &agent_epoch)
+                    .await
+                {
+                    break;
+                }
                 match message.body {
                     Some(proto::control_request::Body::Heartbeat(heartbeat)) => {
                         if !matches_stream_identity(
@@ -5135,6 +5198,34 @@ mod tests {
         assert_eq!(node.availability, Availability::Unavailable);
         assert_eq!(node.capabilities.architecture, "x86_64");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_epoch_authorization_rejects_stale_epoch_and_revocation() {
+        let registry = NodeRegistry::default();
+        let certificate = b"test-certificate";
+        let fingerprint: [u8; 32] = Sha256::digest(certificate).into();
+        registry
+            .authorize_agent_fingerprint_with_epoch("node", fingerprint, "epoch-2")
+            .await
+            .expect("valid durable identity");
+        assert!(
+            registry
+                .is_authorized_for_epoch("node", certificate, "epoch-2")
+                .await
+        );
+        assert!(
+            !registry
+                .is_authorized_for_epoch("node", certificate, "epoch-1")
+                .await
+        );
+
+        registry.revoke_agent_identity("node").await;
+        assert!(
+            !registry
+                .is_authorized_for_epoch("node", certificate, "epoch-2")
+                .await
+        );
     }
 
     /// Issue #606: every successful registration must wake the inventory
