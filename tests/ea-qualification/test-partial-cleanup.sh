@@ -11,7 +11,7 @@ set -Eeuo pipefail
 case "$1" in
   net-list) printf 'o3k-ea-test-net\n' ;;
   pool-list) : ;;
-  net-uuid) printf '00000000-0000-4000-8000-000000000001\n' ;;
+  net-uuid) printf '%s\n' "${FAKE_NETWORK_UUID:-00000000-0000-4000-8000-000000000001}" ;;
   dominfo) exit 1 ;;
   *) echo "unexpected virsh command: $*" >&2; exit 2 ;;
 esac
@@ -48,6 +48,14 @@ host_b=o3k-ea-test-b|22222222-2222-4222-8222-222222222222|$tmp/images/test-campa
 host_c=o3k-ea-test-c|33333333-3333-4333-8333-333333333333|$tmp/images/test-campaign/o3k-ea-test-c.qcow2|$tmp/images/test-campaign/o3k-ea-test-c-seed.iso
 EOF
 chmod 0600 "$state"
+
+if output="$(PATH="$tmp/bin:$PATH" FAKE_NETWORK_UUID=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa \
+  EA_CONFIG_FILE="$tmp/config" "$ROOT_DIR/tests/ea-qualification/ea-testlab.sh" cleanup 2>&1)"; then
+  echo "cleanup accepted a campaign network name with a foreign UUID" >&2
+  exit 1
+fi
+grep -Fq 'campaign network name has a different UUID' <<<"$output"
+[[ -f "$state" ]] || { echo "rejected cleanup removed the ownership marker" >&2; exit 1; }
 
 PATH="$tmp/bin:$PATH" EA_CONFIG_FILE="$tmp/config" "$ROOT_DIR/tests/ea-qualification/ea-testlab.sh" cleanup
 [[ ! -e "$state" ]] || { echo "cleanup retained a valid partial campaign marker" >&2; exit 1; }
