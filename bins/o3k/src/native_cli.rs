@@ -251,7 +251,7 @@ fn validate_persisted_identity(
         .subject_name()
         .entries_by_nid(openssl::nid::Nid::COMMONNAME)
         .next()
-        .and_then(|entry| entry.data().as_utf8().ok().map(|v| v.to_string()));
+        .and_then(|entry| entry.data().to_string().ok());
     let agent_uri = format!("urn:o3k:compute:agent:{agent_id}");
     let epoch_uri = format!("urn:o3k:compute:epoch:{agent_epoch}");
     let request_text = request
