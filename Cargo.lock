@@ -2398,6 +2398,7 @@ dependencies = [
  "o3k-config",
  "o3k-config-drive",
  "o3k-console",
+ "o3k-controller-protocol",
  "o3k-database-example",
  "o3k-domain",
  "o3k-identity",
