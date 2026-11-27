@@ -2,9 +2,10 @@ use o3k_controller_protocol::storage::{
     ExecuteResponse, StorageCommand, StorageObservation as WireObservation,
     storage_executor_server::{StorageExecutor, StorageExecutorServer},
 };
-use o3k_domain::{StorageCommandEnvelope, storage_payload_fingerprint};
+use o3k_domain::{StorageCommandEnvelope, StorageCommandPayload, storage_payload_fingerprint};
 use o3k_storage::{
-    LvmConfig, LvmStorageProvider, StorageJournal, StorageProvider, StorageVolumeRequest,
+    LvmConfig, LvmStorageProvider, StorageAttachmentRequest, StorageJournal, StorageProvider,
+    StorageVolumeRequest,
 };
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -27,14 +28,12 @@ impl StorageExecutor for Executor {
         let command = request.into_inner();
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.envelope_json)
             .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
-        let payload: StorageVolumeRequest = serde_json::from_slice(&command.payload_json)
+        let payload: StorageCommandPayload = serde_json::from_slice(&command.payload_json)
             .map_err(|_| Status::invalid_argument("invalid storage payload"))?;
-        if payload.volume_id.to_string() != envelope.resource_id
-            || payload.project_id != envelope.project_id
-            || payload.generation != envelope.resource_generation
-            || storage_payload_fingerprint(&payload)
-                .map_err(|_| Status::invalid_argument("invalid storage payload"))?
-                != envelope.canonical_payload_fingerprint
+        if storage_payload_fingerprint(&payload)
+            .map_err(|_| Status::invalid_argument("invalid storage payload"))?
+            != envelope.canonical_payload_fingerprint
+            || envelope.validate().is_err()
         {
             return Err(Status::invalid_argument(
                 "storage payload does not match command envelope",
@@ -82,14 +81,64 @@ impl StorageExecutor for Executor {
             .journal
             .accept(envelope.clone(), &self.agent_id, self.agent_epoch)
             .map_err(|_| Status::failed_precondition("storage command fenced or conflicting"))?;
-        let result = match envelope.action {
-            o3k_domain::StorageAction::CreateVolume => {
-                self.provider.create_volume(&payload).await.map(|_| ())
+        let mut device_path = None;
+        let result = match (envelope.action, payload) {
+            (o3k_domain::StorageAction::CreateVolume, StorageCommandPayload::Volume(p))
+            | (o3k_domain::StorageAction::InspectVolume, StorageCommandPayload::Volume(p))
+            | (o3k_domain::StorageAction::DeleteVolume, StorageCommandPayload::Volume(p)) => {
+                let req = StorageVolumeRequest {
+                    volume_id: p.volume_id,
+                    project_id: p.project_id,
+                    size_bytes: p.size_bytes,
+                    generation: p.generation,
+                };
+                match envelope.action {
+                    o3k_domain::StorageAction::CreateVolume => {
+                        self.provider.create_volume(&req).await.map(|_| ())
+                    }
+                    o3k_domain::StorageAction::InspectVolume => {
+                        self.provider.inspect_volume(&req).await.map(|_| ())
+                    }
+                    o3k_domain::StorageAction::DeleteVolume => {
+                        self.provider.delete_volume(&req).await
+                    }
+                    _ => unreachable!(),
+                }
             }
-            o3k_domain::StorageAction::InspectVolume => {
-                self.provider.inspect_volume(&payload).await.map(|_| ())
+            (action, StorageCommandPayload::Attachment(p)) => {
+                if envelope.resource_id != p.attachment_id.to_string()
+                    || envelope.project_id != p.project_id
+                    || envelope.resource_generation == 0
+                {
+                    Err(o3k_storage::StorageProviderError::InvalidRequest)
+                } else {
+                    let req = StorageAttachmentRequest {
+                        attachment_id: p.attachment_id,
+                        volume_id: p.volume_id,
+                        project_id: p.project_id,
+                        volume_generation: p.volume_generation,
+                        host_id: p.server_id.to_string(),
+                        access_mode: p.access_mode,
+                    };
+                    match action {
+                        o3k_domain::StorageAction::PrepareAttachment => self
+                            .provider
+                            .prepare_attachment(&req)
+                            .await
+                            .map(|prepared| {
+                                device_path = Some(prepared.device_path().to_owned());
+                                ()
+                            }),
+                        o3k_domain::StorageAction::TerminateAttachment => {
+                            self.provider.terminate_attachment(&req).await.map(|_| ())
+                        }
+                        o3k_domain::StorageAction::Reconcile => {
+                            self.provider.inspect_attachment(&req).await.map(|_| ())
+                        }
+                        _ => Err(o3k_storage::StorageProviderError::InvalidRequest),
+                    }
+                }
             }
-            o3k_domain::StorageAction::DeleteVolume => self.provider.delete_volume(&payload).await,
             _ => Err(o3k_storage::StorageProviderError::InvalidRequest),
         };
         let mut terminal = observation;
@@ -106,11 +155,16 @@ impl StorageExecutor for Executor {
             o3k_domain::StorageOperationState::Failed
         };
         terminal.resource_state = if result.is_ok() {
-            "available"
+            if device_path.is_some() {
+                "attached"
+            } else {
+                "available"
+            }
         } else {
             "unknown"
         }
         .to_owned();
+        terminal.device_path = device_path;
         self.journal
             .record_observation(&envelope.idempotency_key, terminal.clone())
             .map_err(|_| Status::internal("journal outcome persistence failed"))?;
