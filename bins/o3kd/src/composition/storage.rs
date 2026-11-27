@@ -429,7 +429,33 @@ impl StorageProvider for RemoteStorageProvider {
         {
             return Err(StorageProviderError::InvalidRequest);
         }
-        self.terminate_attachment(request).await
+        let payload = StorageCommandPayload::Attachment(StorageAttachmentCommandPayload {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            server_id: request
+                .host_id
+                .parse()
+                .map_err(|_| StorageProviderError::InvalidRequest)?,
+            project_id: request.project_id.clone(),
+            access_mode: request.access_mode,
+            delete_on_termination: false,
+            volume_generation: request.volume_generation,
+        });
+        let o = self
+            .execute_with_envelope(&context.envelope, &payload)
+            .await?;
+        Ok(StorageAttachmentObservation {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            host_id: request.host_id.clone(),
+            attached: o.resource_state == "attached",
+            provider_reference: o3k_domain::StorageProviderReference {
+                provider: "o3k-storage".into(),
+                resource_id: o
+                    .provider_resource_id
+                    .ok_or(StorageProviderError::CommandFailed)?,
+            },
+        })
     }
     async fn terminate_attachment(
         &self,
