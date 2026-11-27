@@ -5278,14 +5278,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_epoch_authorization_rejects_stale_epoch_and_revocation() {
+    async fn durable_epoch_authorization_rejects_stale_epoch_and_revocation()
+    -> Result<(), AgentError> {
         let registry = NodeRegistry::default();
         let certificate = b"test-certificate";
         let fingerprint: [u8; 32] = Sha256::digest(certificate).into();
         registry
             .authorize_agent_fingerprint_with_epoch("node", fingerprint, "epoch-2")
-            .await
-            .expect("valid durable identity");
+            .await?;
         assert!(
             registry
                 .is_authorized_for_epoch("node", certificate, "epoch-2")
@@ -5303,6 +5303,7 @@ mod tests {
                 .is_authorized_for_epoch("node", certificate, "epoch-2")
                 .await
         );
+        Ok(())
     }
 
     /// Issue #606: every successful registration must wake the inventory
