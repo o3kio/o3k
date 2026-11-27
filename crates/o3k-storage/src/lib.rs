@@ -63,11 +63,13 @@ impl StorageJournal {
     pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageJournalError> {
         let path = path.into();
         let (controller_epoch, records) = if path.exists() {
-            let snapshot: JournalSnapshot = serde_json::from_slice(&std::fs::read(&path)?)?;
-            if snapshot.format_version != 1 {
-                return Err(StorageJournalError::Conflict);
+            let bytes = std::fs::read(&path)?;
+            match serde_json::from_slice::<JournalSnapshot>(&bytes) {
+                Ok(snapshot) if snapshot.format_version == 1 => {
+                    (snapshot.controller_epoch, snapshot.records)
+                }
+                _ => (0, serde_json::from_slice::<Vec<JournalRecord>>(&bytes)?),
             }
-            (snapshot.controller_epoch, snapshot.records)
         } else {
             (0, Vec::new())
         };
@@ -212,6 +214,17 @@ fn persist_journal(
         .ok_or_else(|| std::io::Error::other("journal has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".journal-{}.tmp", uuid::Uuid::new_v4()));
+    let lock_path = parent.join(format!(
+        ".{}.lock",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("journal")
+    ));
+    let lock = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock_path)?;
     let bytes = serde_json::to_vec(&JournalSnapshot {
         format_version: 1,
         controller_epoch,
@@ -226,6 +239,8 @@ fn persist_journal(
     file.sync_all()?;
     std::fs::rename(temporary, path)?;
     std::fs::File::open(parent)?.sync_all()?;
+    drop(lock);
+    std::fs::remove_file(lock_path)?;
     Ok(())
 }
 
