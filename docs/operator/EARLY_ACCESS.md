@@ -21,6 +21,38 @@ After an authenticated candidate is published, the exact-artifact command is:
 curl -fsSL https://github.com/o3kio/o3k/releases/download/v0.4.1-rc.1/install.sh | sudo sh -
 ```
 
+Before installing, operators who want to verify the release separately can
+download the signed digest manifest, Sigstore bundle, provenance, installer,
+and archive, then verify the manifest's GitHub Actions identity and the
+downloaded payload hashes. For a release tag, set `TAG` to its exact tag (for
+example, `v0.4.1-rc.1`):
+
+```sh
+set -euo pipefail
+TAG=v0.4.1-rc.1
+BASE="https://github.com/o3kio/o3k/releases/download/$TAG"
+mkdir -m 700 "o3k-$TAG-verify"
+cd "o3k-$TAG-verify"
+for asset in release-digests.txt release-digests.sigstore.json provenance.json install.sh "o3k-${TAG#v}-linux-x86_64.tar.gz"; do
+  curl -fsSLO "$BASE/$asset"
+done
+cosign verify-blob \
+  --bundle release-digests.sigstore.json \
+  --certificate-identity "https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/$TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  release-digests.txt
+for asset in install.sh "o3k-${TAG#v}-linux-x86_64.tar.gz" provenance.json; do
+  awk -v name="$asset" '$2 == name { print; found = 1 } END { if (!found) exit 1 }' release-digests.txt \
+    | sha256sum --check --strict -
+done
+```
+
+This verifies the signed digest manifest and the installer, archive, and
+provenance bytes against it. The installer repeats the release authentication,
+profile selection, safe archive, SBOM, and executable-integrity checks before
+it runs any bundled application code. Treat a verification error as a hard
+failure and do not run the installer.
+
 The wrapper authenticates the release before extracting or executing bundled
 files, then invokes canonical initialization and authenticated host join. It
 does not compile O3K on the target. The signed manifest explicitly selects
@@ -153,8 +185,8 @@ Before a destructive rebuild:
 2. Back up guest disks and external storage using their supported procedures.
 3. Verify those backups independently and retain access to required images,
    networks, and credentials.
-4. Use the documented destructive rebuild procedure only after confirming the
-   old O3K state is intentionally being abandoned.
+4. Use the [installer's destructive purge procedure](../INSTALLER.md#uninstall-reset-purge)
+   only after confirming the old O3K state is intentionally being abandoned.
 5. Install on a genuinely clean host, initialize a new cloud, and reconcile
    external data only through supported O3K authority and lifecycle APIs.
 
