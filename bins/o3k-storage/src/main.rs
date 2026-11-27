@@ -67,6 +67,16 @@ impl StorageExecutor for Executor {
             .get(&envelope.idempotency_key)
             .map_err(|_| Status::internal("journal lookup failed"))?
         {
+            let stored = self
+                .journal
+                .get_envelope(&envelope.idempotency_key)
+                .map_err(|_| Status::internal("journal lookup failed"))?
+                .ok_or_else(|| Status::failed_precondition("journal record disappeared"))?;
+            if stored != envelope {
+                return Err(Status::failed_precondition(
+                    "idempotency key conflicts with command envelope",
+                ));
+            }
             // Accepted/Running means the provider side effect may have happened
             // before this process lost the response.  Never replay a mutation
             // blindly: return an explicit unknown outcome for controller

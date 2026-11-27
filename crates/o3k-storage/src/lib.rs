@@ -161,6 +161,22 @@ impl StorageJournal {
             .map(|record| record.observation.clone()))
     }
 
+    pub fn get_envelope(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<StorageCommandEnvelope>, StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        Ok(records
+            .iter()
+            .find(|r| r.envelope.idempotency_key == idempotency_key)
+            .map(|r| r.envelope.clone()))
+    }
+
     /// Persist an executor observation after the bounded provider has run.
     /// The caller must retain the envelope identity and monotonically advance
     /// the observation sequence; the journal never invents controller state.
