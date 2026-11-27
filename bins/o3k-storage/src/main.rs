@@ -3,7 +3,9 @@ use o3k_controller_protocol::storage::{
     storage_executor_server::{StorageExecutor, StorageExecutorServer},
 };
 use o3k_domain::StorageCommandEnvelope;
-use o3k_storage::StorageJournal;
+use o3k_storage::{
+    LvmConfig, LvmStorageProvider, StorageJournal, StorageProvider, StorageVolumeRequest,
+};
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -13,6 +15,7 @@ struct Executor {
     journal: Arc<StorageJournal>,
     agent_id: String,
     agent_epoch: u64,
+    provider: Arc<LvmStorageProvider>,
 }
 
 #[tonic::async_trait]
@@ -21,13 +24,30 @@ impl StorageExecutor for Executor {
         &self,
         request: Request<StorageCommand>,
     ) -> Result<Response<ExecuteResponse>, Status> {
-        let envelope: StorageCommandEnvelope =
-            serde_json::from_slice(&request.into_inner().envelope_json)
-                .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
+        let command = request.into_inner();
+        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.envelope_json)
+            .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
         let observation = self
             .journal
-            .accept(envelope, &self.agent_id, self.agent_epoch)
+            .accept(envelope.clone(), &self.agent_id, self.agent_epoch)
             .map_err(|_| Status::failed_precondition("storage command fenced or conflicting"))?;
+        let payload: StorageVolumeRequest = serde_json::from_slice(&command.payload_json)
+            .map_err(|_| Status::invalid_argument("invalid storage payload"))?;
+        let result = match envelope.action {
+            o3k_domain::StorageAction::CreateVolume => {
+                self.provider.create_volume(&payload).await.map(|_| ())
+            }
+            o3k_domain::StorageAction::InspectVolume => {
+                self.provider.inspect_volume(&payload).await.map(|_| ())
+            }
+            o3k_domain::StorageAction::DeleteVolume => self.provider.delete_volume(&payload).await,
+            _ => Err(o3k_storage::StorageProviderError::InvalidRequest),
+        };
+        if result.is_err() {
+            return Err(Status::failed_precondition(
+                "bounded storage operation failed",
+            ));
+        }
         let bytes = serde_json::to_vec(&observation)
             .map_err(|_| Status::internal("observation encoding failed"))?;
         Ok(Response::new(ExecuteResponse {
@@ -52,6 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         journal: Arc::new(StorageJournal::open(journal)?),
         agent_id: env::var("O3K_STORAGE_AGENT_ID")?,
         agent_epoch: env::var("O3K_STORAGE_AGENT_EPOCH")?.parse()?,
+        provider: Arc::new(LvmStorageProvider::new(LvmConfig {
+            volume_group: env::var("O3K_STORAGE_VOLUME_GROUP")?,
+            thin_pool: env::var("O3K_STORAGE_THIN_POOL")?,
+            provider_namespace: env::var("O3K_STORAGE_NAMESPACE").unwrap_or_else(|_| "o3k".into()),
+        })?),
     };
     tracing_subscriber::fmt::init();
     let cert = std::fs::read(env::var("O3K_STORAGE_TLS_CERT")?)?;

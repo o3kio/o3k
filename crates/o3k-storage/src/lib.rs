@@ -537,7 +537,7 @@ pub use ceph::{
     SystemCephCommandRunner,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageVolumeRequest {
     pub volume_id: VolumeId,
     pub project_id: String,
