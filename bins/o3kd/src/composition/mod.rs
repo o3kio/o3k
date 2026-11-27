@@ -22,6 +22,19 @@ use uuid::Uuid;
 
 struct NativeAttachmentWorkflowAdapter(Arc<dyn o3k_api::NativeAttachmentWorkflow>);
 
+fn decode_certificate_fingerprint(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)? as u8;
+        let low = (pair[1] as char).to_digit(16)? as u8;
+        out[index] = (high << 4) | low;
+    }
+    Some(out)
+}
+
 #[async_trait::async_trait]
 impl o3k_native_api::resource::VolumeAttachmentWorkflow for NativeAttachmentWorkflowAdapter {
     async fn attach(&self, attachment_id: Uuid) -> Result<(), String> {
@@ -1230,6 +1243,23 @@ pub async fn build_composition_with_guard(
             controller_id.clone(),
             controller_epoch.clone(),
         );
+    // Rehydrate the live mTLS admission map from canonical joined identities
+    // before exposing the control-plane listener. The bootstrap state stores
+    // only certificate fingerprints, so no private or certificate material is
+    // loaded at restart and environment configuration cannot override it.
+    if let Some(bootstrap) = store.get_bootstrap_state("default").await? {
+        let enrolled: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&bootstrap.enrolled_agents).unwrap_or_default();
+        for (agent_id, fingerprint) in enrolled {
+            let Some(bytes) = decode_certificate_fingerprint(&fingerprint) else {
+                tracing::warn!(agent_id = %agent_id, "ignoring malformed durable compute certificate fingerprint");
+                continue;
+            };
+            registry
+                .authorize_agent_fingerprint(&agent_id, bytes)
+                .await?;
+        }
+    }
     // The console-log consumer keeps its own durable liveness handle: the
     // `store` arc itself is moved into the compute service below.
     let console_store: Arc<dyn o3k_store::DurableStore> = store.clone();

@@ -999,6 +999,26 @@ impl NodeRegistry {
         Ok(())
     }
 
+    /// Rehydrates a canonical joined identity from durable bootstrap state.
+    /// The value is already a SHA-256 certificate fingerprint; accepting it
+    /// directly avoids requiring private certificate material at restart.
+    pub async fn authorize_agent_fingerprint(
+        &self,
+        agent_id: &str,
+        certificate_fingerprint: [u8; 32],
+    ) -> Result<(), AgentError> {
+        if agent_id.trim().is_empty() || agent_id.len() > MAX_AGENT_ID {
+            return Err(AgentError::InvalidConfiguration(
+                "authorized agent identity is invalid",
+            ));
+        }
+        self.authorized_agents
+            .write()
+            .await
+            .insert(agent_id.to_owned(), certificate_fingerprint);
+        Ok(())
+    }
+
     async fn is_authorized(&self, agent_id: &str, certificate: &[u8]) -> bool {
         let digest = Sha256::digest(certificate);
         self.authorized_agents

@@ -103,6 +103,8 @@ pub fn enroll_host(
         if !private_key.exists() || !csr_path.exists() {
             return Err("enrollment identity is partially present; refusing repair".to_owned());
         }
+        validate_identity_file(private_key)?;
+        validate_identity_file(&csr_path)?;
         let key = std::fs::read(private_key)
             .map_err(|_| "cannot read existing enrollment key".to_owned())?;
         let csr = std::fs::read(&csr_path)
@@ -180,7 +182,26 @@ pub fn enroll_host(
     Ok(())
 }
 
+fn validate_identity_file(path: &Path) -> Result<(), String> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| "identity file unavailable".to_owned())?;
+    if !metadata.file_type().is_file() {
+        return Err("identity file is not a regular file".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 {
+            return Err("identity file mode is unsafe".to_owned());
+        }
+    }
+    Ok(())
+}
+
 fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if path.exists() {
+        return Err("identity file already exists".to_owned());
+    }
     let parent = path.parent().ok_or("identity path has no parent")?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("cannot create identity directory: {e}"))?;
@@ -191,7 +212,22 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .unwrap_or("identity"),
         uuid::Uuid::new_v4()
     ));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write identity: {e}"))?;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    {
+        use std::io::Write;
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("cannot write identity: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("cannot write identity: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync identity: {e}"))?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -215,7 +251,7 @@ fn validate_persisted_identity(
         .subject_name()
         .entries_by_nid(openssl::nid::Nid::COMMONNAME)
         .next()
-        .map(|entry| entry.data().to_string());
+        .and_then(|entry| entry.data().as_utf8().ok().map(|v| v.to_string()));
     let agent_uri = format!("urn:o3k:compute:agent:{agent_id}");
     let epoch_uri = format!("urn:o3k:compute:epoch:{agent_epoch}");
     if subject.as_deref() != Some(agent_id)
