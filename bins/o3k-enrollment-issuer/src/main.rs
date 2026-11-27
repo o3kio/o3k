@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
 };
 
@@ -39,7 +38,7 @@ struct ErrorResponse {
     error: &'static str,
 }
 
-fn bounded(stream: &mut UnixStream) -> Result<Vec<u8>, String> {
+fn bounded<R: Read>(stream: &mut R) -> Result<Vec<u8>, String> {
     let mut b = Vec::new();
     stream
         .take((MAX + 1) as u64)
@@ -50,20 +49,25 @@ fn bounded(stream: &mut UnixStream) -> Result<Vec<u8>, String> {
     }
     Ok(b)
 }
-fn peer_ok(stream: &UnixStream) -> Result<(), String> {
+fn peer_ok<S: std::os::fd::AsFd>(stream: &S) -> Result<(), String> {
     let uid: u32 = std::env::var("O3K_ENROLLMENT_SOCKET_UID")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| nix_uid());
+        .or_else(|| {
+            std::fs::read_to_string("/etc/passwd").ok().and_then(|p| {
+                p.lines()
+                    .find(|l| l.starts_with("o3k:"))
+                    .and_then(|l| l.split(':').nth(2))
+                    .and_then(|v| v.parse().ok())
+            })
+        })
+        .ok_or("o3k socket user is not configured")?;
     let peer = rustix::net::sockopt::get_socket_peercred(stream)
         .map_err(|_| "peer credentials unavailable".to_owned())?;
     if peer.uid.as_raw() != uid {
         return Err("unauthorized peer".to_owned());
     }
     Ok(())
-}
-fn nix_uid() -> u32 {
-    rustix::process::geteuid().as_raw()
 }
 fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509), String> {
     if key_path.exists() || cert_path.exists() {
@@ -194,10 +198,6 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     })
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let socket = PathBuf::from(
-        std::env::var("O3K_ENROLLMENT_ISSUER_SOCKET")
-            .unwrap_or_else(|_| "/run/o3k/enrollment-issuer.sock".into()),
-    );
     let key = PathBuf::from(
         std::env::var("O3K_ENROLLMENT_CA_KEY")
             .unwrap_or_else(|_| "/etc/o3k/ea/enrollment-ca-key.pem".into()),
@@ -207,34 +207,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "/etc/o3k/ea/enrollment-ca.pem".into()),
     );
     let (ca_key, ca_cert) = ensure_ca(&key, &cert).map_err(std::io::Error::other)?;
-    if socket.exists() {
-        std::fs::remove_file(&socket)?;
-    }
-    std::fs::create_dir_all(socket.parent().ok_or("socket parent")?)?;
-    let listener = UnixListener::bind(&socket)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    }
-    for conn in listener.incoming() {
-        let mut stream = match conn {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let result = peer_ok(&stream)
-            .and_then(|_| bounded(&mut stream))
-            .and_then(|b| {
-                serde_json::from_slice::<Request>(&b).map_err(|_| "invalid request".into())
-            })
-            .and_then(|r| issue(r, &ca_key, &ca_cert));
-        let out = match result {
-            Ok(v) => serde_json::to_vec(&v)?,
-            Err(e) => serde_json::to_vec(&ErrorResponse {
-                error: Box::leak(e.into_boxed_str()),
-            })?,
-        };
-        let _ = stream.write_all(&out);
-    }
+    // systemd socket activation uses stdin/stdout for one connection (Accept=yes).
+    let mut input = std::io::stdin().lock();
+    let result = peer_ok(&input)
+        .and_then(|_| bounded(&mut input))
+        .and_then(|b| {
+            serde_json::from_slice::<Request>(&b).map_err(|_| "invalid request".to_owned())
+        })
+        .and_then(|r| issue(r, &ca_key, &ca_cert));
+    let out = match result {
+        Ok(v) => serde_json::to_vec(&v)?,
+        Err(e) => serde_json::to_vec(&ErrorResponse {
+            error: Box::leak(e.into_boxed_str()),
+        })?,
+    };
+    std::io::stdout().write_all(&out)?;
     Ok(())
 }

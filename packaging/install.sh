@@ -1112,7 +1112,7 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   fi
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
   if [[ "$EA_INSTALL" == 1 ]]; then
-    install_owned_system_file "$ROOT_DIR/packaging/o3k-enrollment-issuer.service" /etc/systemd/system/o3k-enrollment-issuer.service 0644
+    install_owned_system_file "$ROOT_DIR/packaging/o3k-enrollment-issuer@.service" /etc/systemd/system/o3k-enrollment-issuer@.service 0644
     install_owned_system_file "$ROOT_DIR/packaging/o3k-enrollment-issuer.socket" /etc/systemd/system/o3k-enrollment-issuer.socket 0644
     install -d -m 0750 -o root -g o3k /etc/o3k/ea
   fi
