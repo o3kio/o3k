@@ -19,10 +19,11 @@ use crate::HttpClient;
 use crate::context::HttpResponse;
 use crate::sys::{RequestError, SystemHttpClient, request_with_key};
 use o3k_compute_agent::types::EnrollmentIdentity;
+use o3k_compute_agent::validate_csr_uri_sans;
 use o3k_provider_contract::compute_proto::{
     EnrollRequest, ProtocolVersion, compute_enrollment_client::ComputeEnrollmentClient,
 };
-use openssl::{pkey::PKey, x509::X509Req};
+use openssl::pkey::PKey;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 
 /// Default native API base URL.
@@ -245,8 +246,8 @@ fn validate_persisted_identity(
 ) -> Result<(), String> {
     let private = PKey::private_key_from_pem(key)
         .map_err(|_| "stored enrollment key is malformed".to_owned())?;
-    let request =
-        X509Req::from_pem(csr).map_err(|_| "stored enrollment CSR is malformed".to_owned())?;
+    let request = openssl::x509::X509Req::from_pem(csr)
+        .map_err(|_| "stored enrollment CSR is malformed".to_owned())?;
     let subject = request
         .subject_name()
         .entries_by_nid(openssl::nid::Nid::COMMONNAME)
@@ -254,20 +255,12 @@ fn validate_persisted_identity(
         .and_then(|entry| entry.data().to_string().ok());
     let agent_uri = format!("urn:o3k:compute:agent:{agent_id}");
     let epoch_uri = format!("urn:o3k:compute:epoch:{agent_epoch}");
-    let request_text = request
-        .to_text()
-        .map_err(|_| "stored enrollment CSR cannot be inspected".to_owned())?;
     let request_key = request
         .public_key()
         .map_err(|_| "stored enrollment CSR key unavailable".to_owned())?;
     if !request.verify(&request_key).unwrap_or(false)
         || subject.as_deref() != Some(agent_id)
-        || !request_text
-            .windows(agent_uri.len())
-            .any(|w| w == agent_uri.as_bytes())
-        || !request_text
-            .windows(epoch_uri.len())
-            .any(|w| w == epoch_uri.as_bytes())
+        || validate_csr_uri_sans(csr, &agent_uri, &epoch_uri).is_err()
     {
         return Err("stored enrollment CSR identity does not match requested host".to_owned());
     }

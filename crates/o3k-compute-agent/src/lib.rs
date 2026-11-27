@@ -2336,6 +2336,83 @@ fn peer_matches_agent(certificate: &[u8], agent_id: &str) -> bool {
     certificate_has_uri_san(certificate, expected.as_bytes())
 }
 
+/// Validates a self-signed enrollment CSR's exact identity SAN contract.
+/// There must be one SAN extension containing exactly the agent and epoch URI
+/// names, with no unrelated or duplicate GeneralNames.
+pub fn validate_csr_uri_sans(
+    csr: &[u8],
+    expected_agent_uri: &str,
+    expected_epoch_uri: &str,
+) -> Result<(), &'static str> {
+    let request = openssl::x509::X509Req::from_pem(csr).map_err(|_| "malformed CSR")?;
+    let key = request.public_key().map_err(|_| "CSR key unavailable")?;
+    if !request.verify(&key).unwrap_or(false) {
+        return Err("CSR signature invalid");
+    }
+    const SAN_OID: &[u8] = &[0x55, 0x1d, 0x11];
+    let extensions = request
+        .extensions()
+        .map_err(|_| "CSR extensions unavailable")?;
+    let mut san_count = 0;
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    for extension in extensions.iter() {
+        let encoded = extension.to_der().map_err(|_| "invalid CSR extension")?;
+        let Some((0x30, mut body, rest)) = der_tlv(&encoded) else {
+            return Err("invalid CSR extension");
+        };
+        if !rest.is_empty() {
+            return Err("invalid CSR extension");
+        }
+        let Some((0x06, oid, remaining)) = der_tlv(body) else {
+            return Err("invalid CSR extension");
+        };
+        body = remaining;
+        if oid != SAN_OID {
+            continue;
+        }
+        san_count += 1;
+        if san_count != 1 {
+            return Err("duplicate CSR SAN extension");
+        }
+        if let Some((0x01, _, remaining)) = der_tlv(body) {
+            body = remaining;
+        }
+        let Some((0x04, value, remaining)) = der_tlv(body) else {
+            return Err("invalid CSR SAN extension");
+        };
+        if !remaining.is_empty() {
+            return Err("invalid CSR SAN extension");
+        }
+        let Some((0x30, mut general_names, rest)) = der_tlv(value) else {
+            return Err("invalid CSR SAN extension");
+        };
+        if !rest.is_empty() {
+            return Err("invalid CSR SAN extension");
+        }
+        while !general_names.is_empty() {
+            let Some((tag, name, remaining)) = der_tlv(general_names) else {
+                return Err("invalid CSR SAN name");
+            };
+            if tag != 0x86 {
+                return Err("CSR SAN contains non-URI name");
+            }
+            names.push(name.to_vec());
+            general_names = remaining;
+        }
+    }
+    if san_count != 1 || names.len() != 2 {
+        return Err("CSR SAN identity is not exact");
+    }
+    let agent = expected_agent_uri.as_bytes();
+    let epoch = expected_epoch_uri.as_bytes();
+    if names.iter().filter(|name| name.as_slice() == agent).count() != 1
+        || names.iter().filter(|name| name.as_slice() == epoch).count() != 1
+    {
+        return Err("CSR SAN identity does not match");
+    }
+    Ok(())
+}
+
 /// Finds the URI GeneralName in the Subject Alternative Name extension.
 /// TLS has already authenticated the chain and validity period; the strict
 /// structural parser performs the protocol's additional identity binding
