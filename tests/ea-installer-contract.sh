@@ -7,6 +7,7 @@ INSTALLER="$ROOT/packaging/install.sh"
 PREFLIGHT="$ROOT/packaging/ea-preflight.sh"
 RELEASE="$ROOT/packaging/make-release.sh"
 WORKFLOW="$ROOT/.github/workflows/release.yml"
+PROMOTE_WORKFLOW="$ROOT/.github/workflows/promote-ea-release.yml"
 
 bash -n "$WRAPPER" "$INSTALLER" "$PREFLIGHT" "$RELEASE"
 grep -Fq 'postgresql-16' "$WRAPPER"
@@ -31,6 +32,16 @@ grep -Fq 'installation_authority":"installation-local' "$RELEASE"
 grep -Fq 'early-access-v1' "$WORKFLOW"
 grep -Fq "'0' || '1'" "$WORKFLOW"
 grep -Fq 'qualification candidate' "$ROOT/docs/releases/v0.4.1-rc.1.md"
+grep -Fq -- '--draft --title "O3K v0.4.1' "$WORKFLOW"
+grep -Fq 'workflow_dispatch:' "$PROMOTE_WORKFLOW"
+grep -Fq 'gh release download "$TAG" --dir dist' "$PROMOTE_WORKFLOW"
+grep -Fq 'packaging/verify-release-sigstore.sh "$TAG" dist' "$PROMOTE_WORKFLOW"
+grep -Fq 'sha256:$digest' "$PROMOTE_WORKFLOW"
+grep -Fq 'PATCH "repos/o3kio/o3k/releases/$release_id"' "$PROMOTE_WORKFLOW"
+if grep -Eq 'make-release\.sh|make-release-archive\.sh|cargo build' "$PROMOTE_WORKFLOW"; then
+  echo 'EA promotion must not rebuild qualified artifacts' >&2
+  exit 1
+fi
 
 python3 - "$ROOT" <<'PY'
 from pathlib import Path

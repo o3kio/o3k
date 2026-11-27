@@ -18,7 +18,12 @@ without requiring the historical C1 signing key. The historical C1 release
 path and immutable v0.4.0 remain unchanged. The command in SPEC-0052 is a
 target URL only until final acceptance and owner GO. RC installation is
 restricted to isolated qualification hosts and is not customer deployment
-authorization.
+authorization. The `v0.4.1` tag workflow creates a signed draft release first.
+Qualify those exact draft assets and record the archive digest in the owner GO
+marker. The protected `Promote qualified O3K Early Access release` workflow
+then verifies the staged signature, provenance, digest, owner evidence, and
+`ea-final-go` label before publishing the existing draft assets. Promotion
+does not rebuild or replace them.
 
 Release bundles are built by `packaging/make-release.sh [version] [profile]`.
 The bundle contains `o3kd`, optionally `o3k-compute` for the libvirt profile,
