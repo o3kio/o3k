@@ -14,7 +14,11 @@ use o3k_domain::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 use tokio::process::Command;
 
@@ -25,6 +29,12 @@ use tokio::process::Command;
 struct JournalRecord {
     envelope: StorageCommandEnvelope,
     observation: StorageObservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalSnapshot {
+    controller_epoch: u64,
+    records: Vec<JournalRecord>,
 }
 
 #[derive(Debug, Error)]
@@ -45,19 +55,22 @@ pub enum StorageJournalError {
 pub struct StorageJournal {
     path: std::path::PathBuf,
     records: std::sync::Mutex<Vec<JournalRecord>>,
+    controller_epoch: std::sync::Mutex<u64>,
 }
 
 impl StorageJournal {
     pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageJournalError> {
         let path = path.into();
-        let records = if path.exists() {
-            serde_json::from_slice(&std::fs::read(&path)?)?
+        let (controller_epoch, records) = if path.exists() {
+            let snapshot: JournalSnapshot = serde_json::from_slice(&std::fs::read(&path)?)?;
+            (snapshot.controller_epoch, snapshot.records)
         } else {
-            Vec::new()
+            (0, Vec::new())
         };
         Ok(Self {
             path,
             records: std::sync::Mutex::new(records),
+            controller_epoch: std::sync::Mutex::new(controller_epoch),
         })
     }
 
@@ -73,6 +86,13 @@ impl StorageJournal {
         if envelope.target_agent_id != agent_id || envelope.target_agent_epoch != agent_epoch {
             return Err(StorageJournalError::Stale);
         }
+        let current_epoch = self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        if *current_epoch != 0 && envelope.controller_epoch != *current_epoch {
+            return Err(StorageJournalError::Stale);
+        }
         let mut records = self
             .records
             .lock()
@@ -81,9 +101,7 @@ impl StorageJournal {
             .iter()
             .find(|record| record.envelope.idempotency_key == envelope.idempotency_key)
         {
-            return if existing.envelope.canonical_payload_fingerprint
-                == envelope.canonical_payload_fingerprint
-            {
+            return if existing.envelope == envelope {
                 Ok(existing.observation.clone())
             } else {
                 Err(StorageJournalError::Conflict)
@@ -97,17 +115,26 @@ impl StorageJournal {
             operation_id: envelope.operation_id,
             resource_generation: envelope.resource_generation,
             observation_sequence: 1,
-            observed_at: envelope.deadline.clone(),
+            observed_at: acceptance_time(),
             operation_state: StorageOperationState::Accepted,
             resource_state: "accepted".to_owned(),
             error_category: None,
             redacted_message: None,
         };
-        records.push(JournalRecord {
+        let next_controller_epoch = envelope.controller_epoch;
+        let mut candidate = records.clone();
+        candidate.push(JournalRecord {
             envelope,
             observation: observation.clone(),
         });
-        persist_journal(&self.path, &records)?;
+        persist_journal(&self.path, next_controller_epoch, &candidate)?;
+        *records = candidate;
+        drop(records);
+        drop(current_epoch);
+        *self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = next_controller_epoch;
         Ok(observation)
     }
 
@@ -152,19 +179,55 @@ impl StorageJournal {
         {
             return Err(StorageJournalError::Conflict);
         }
-        record.observation = observation;
-        persist_journal(&self.path, &records)
+        let mut candidate = records.clone();
+        let index = candidate
+            .iter()
+            .position(|item| item.envelope.idempotency_key == idempotency_key)
+            .ok_or(StorageJournalError::NotFound)?;
+        candidate[index].observation = observation;
+        let epoch = *self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        persist_journal(&self.path, epoch, &candidate)?;
+        *records = candidate;
+        Ok(())
     }
 }
 
 fn persist_journal(
     path: &std::path::Path,
+    controller_epoch: u64,
     records: &[JournalRecord],
 ) -> Result<(), StorageJournalError> {
-    let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, serde_json::to_vec(records)?)?;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("journal has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".journal-{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec(&JournalSnapshot {
+        controller_epoch,
+        records: records.to_vec(),
+    })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.sync_all()?;
     std::fs::rename(temporary, path)?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+fn acceptance_time() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!("unix-ms:{millis}")
 }
 
 mod ceph;
