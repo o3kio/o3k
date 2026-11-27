@@ -52,6 +52,7 @@ use uuid::Uuid;
 
 mod artifact;
 mod config_drive;
+mod enrollment;
 mod events;
 mod image;
 mod provider;
@@ -64,6 +65,10 @@ pub use artifact::{
 pub use config_drive::{
     ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
     config_drive_materialization_request, config_drive_requested,
+};
+pub use enrollment::{
+    EnrollmentGrantBinding, EnrollmentIssueError, EnrollmentIssuer, EnrollmentSigner,
+    IssuedEnrollment,
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
