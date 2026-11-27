@@ -188,12 +188,17 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     let epoch_uri = format!("urn:o3k:compute:epoch:{}", req.agent_epoch);
     let extensions = csr.extensions().map_err(|_| "CSR extensions unavailable")?;
     let mut uris = Vec::new();
+    let mut san_extensions = 0;
     for extension in extensions.iter() {
         let encoded = extension.to_der().map_err(|_| "invalid CSR extension")?;
         if encoded
             .windows(5)
             .any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x11])
         {
+            san_extensions += 1;
+            if san_extensions > 1 {
+                return Err("duplicate CSR SAN extension".into());
+            }
             let marker = [0x06, 0x03, 0x55, 0x1d, 0x11];
             let oid_end = encoded
                 .windows(marker.len())
@@ -211,8 +216,10 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
                 return Err("invalid CSR SAN".into());
             }
             uris = parse_san_uris(&encoded[start..start + len])?;
-            break;
         }
+    }
+    if san_extensions != 1 {
+        return Err("CSR SAN extension missing".into());
     }
     if uris.len() != 2
         || !uris.iter().any(|u| u == &agent_uri)
