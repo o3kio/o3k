@@ -1,3 +1,4 @@
+use o3k_compute_agent::validate_csr_uri_sans;
 use openssl::{
     asn1::Asn1Time,
     ec::{EcGroup, EcKey},
@@ -15,11 +16,14 @@ use std::{
 
 const MAX: usize = 1024 * 1024;
 
-struct LockGuard(PathBuf);
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+#[cfg(all(unix, test))]
+fn expected_owner_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+#[cfg(all(unix, not(test)))]
+fn expected_owner_uid() -> u32 {
+    0
 }
 
 #[derive(Deserialize)]
@@ -76,35 +80,184 @@ fn peer_ok<S: std::os::fd::AsFd>(stream: &S) -> Result<(), String> {
     }
     Ok(())
 }
-fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509), String> {
-    let key_meta = std::fs::symlink_metadata(key_path).ok();
-    let cert_meta = std::fs::symlink_metadata(cert_path).ok();
-    if key_meta.is_some() || cert_meta.is_some() {
-        if key_meta.as_ref().is_some_and(|m| !m.file_type().is_file())
-            || cert_meta.as_ref().is_some_and(|m| !m.file_type().is_file())
-            || key_meta.is_none()
-            || cert_meta.is_none()
+fn load_ca(dir: &Path) -> Result<Option<(PKey<Private>, X509)>, String> {
+    let dir_meta = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("CA directory metadata unavailable".into()),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !dir_meta.file_type().is_dir()
+            || dir_meta.uid() != expected_owner_uid()
+            || (dir_meta.mode() & 0o077) != 0
         {
-            return Err("issuer CA paths are unsafe".into());
+            return Err("CA directory ownership or mode is unsafe".into());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let km = key_meta.as_ref().ok_or("CA key metadata")?;
-            if km.uid() != 0 || (km.mode() & 0o077) != 0 {
-                return Err("CA key ownership or mode is unsafe".into());
-            }
-        }
-        let key =
-            PKey::private_key_from_pem(&std::fs::read(key_path).map_err(|_| "CA key unavailable")?)
-                .map_err(|_| "invalid CA key")?;
-        let cert = X509::from_pem(&std::fs::read(cert_path).map_err(|_| "CA cert unavailable")?)
-            .map_err(|_| "invalid CA cert")?;
-        if !cert.verify(&key).unwrap_or(false) {
-            return Err("CA key does not match certificate".into());
-        }
-        return Ok((key, cert));
     }
+    let key_path = dir.join("key.pem");
+    let cert_path = dir.join("cert.pem");
+    load_ca_files(&key_path, &cert_path).map(Some)
+}
+
+fn load_ca_files(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509), String> {
+    let key_meta = std::fs::symlink_metadata(key_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "CA directory is incomplete"
+        } else {
+            "CA key metadata unavailable"
+        }
+    })?;
+    let cert_meta = std::fs::symlink_metadata(cert_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "CA directory is incomplete"
+        } else {
+            "CA cert metadata unavailable"
+        }
+    })?;
+    if !key_meta.file_type().is_file() || !cert_meta.file_type().is_file() {
+        return Err("CA paths are unsafe".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if key_meta.uid() != expected_owner_uid()
+            || key_meta.mode() & 0o077 != 0
+            || cert_meta.uid() != expected_owner_uid()
+            || cert_meta.mode() & 0o022 != 0
+        {
+            return Err("CA file ownership or mode is unsafe".into());
+        }
+    }
+    let key =
+        PKey::private_key_from_pem(&std::fs::read(key_path).map_err(|_| "CA key unavailable")?)
+            .map_err(|_| "invalid CA key")?;
+    let cert = X509::from_pem(&std::fs::read(cert_path).map_err(|_| "CA cert unavailable")?)
+        .map_err(|_| "invalid CA cert")?;
+    if !cert.verify(&key).unwrap_or(false) {
+        return Err("CA key does not match certificate".into());
+    }
+    Ok((key, cert))
+}
+
+fn publish_ca(dir: &Path, key: &PKey<Private>, cert: &X509) -> Result<(), String> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let parent = dir.parent().ok_or("CA directory has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|_| "CA parent directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(parent).map_err(|_| "CA parent metadata")?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != expected_owner_uid()
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err("CA parent ownership or mode is unsafe".into());
+        }
+    }
+    let mut suffix = [0u8; 16];
+    openssl::rand::rand_bytes(&mut suffix).map_err(|_| "CA temporary name")?;
+    let temporary = parent.join(format!(".enrollment-ca-{}", hex::encode(suffix)));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
+        .create(&temporary)
+        .map_err(|_| "CA temporary directory")?;
+    let write_result = (|| {
+        #[cfg(unix)]
+        let key_options = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            options
+        };
+        #[cfg(not(unix))]
+        let key_options = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            options
+        };
+        let key_path = temporary.join("key.pem");
+        let mut key_file = key_options.open(&key_path).map_err(|_| "CA key create")?;
+        key_file
+            .write_all(
+                &key.private_key_to_pem_pkcs8()
+                    .map_err(|_| "CA key encode")?,
+            )
+            .map_err(|_| "CA key write")?;
+        key_file.sync_all().map_err(|_| "CA key sync")?;
+
+        #[cfg(unix)]
+        let cert_options = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o644);
+            options
+        };
+        #[cfg(not(unix))]
+        let cert_options = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            options
+        };
+        let cert_path = temporary.join("cert.pem");
+        let mut cert_file = cert_options
+            .open(&cert_path)
+            .map_err(|_| "CA cert create")?;
+        cert_file
+            .write_all(&cert.to_pem().map_err(|_| "CA cert encode")?)
+            .map_err(|_| "CA cert write")?;
+        cert_file.sync_all().map_err(|_| "CA cert sync")?;
+        std::fs::File::open(&temporary)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "CA temporary directory sync")?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(error);
+    }
+    match std::fs::rename(&temporary, dir) {
+        Ok(()) => {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| "CA parent directory sync")?;
+            Ok(())
+        }
+        Err(_) if dir.exists() => {
+            let _ = std::fs::remove_dir_all(&temporary);
+            Ok(())
+        }
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&temporary);
+            Err("CA directory publish failed".into())
+        }
+    }
+}
+
+fn ensure_ca(
+    dir: &Path,
+    legacy_key_path: &Path,
+    legacy_cert_path: &Path,
+) -> Result<(PKey<Private>, X509), String> {
+    if let Some(ca) = load_ca(dir)? {
+        return Ok(ca);
+    }
+    let legacy_key = std::fs::symlink_metadata(legacy_key_path).ok();
+    let legacy_cert = std::fs::symlink_metadata(legacy_cert_path).ok();
+    let (key, cert) = match (legacy_key, legacy_cert) {
+        (Some(_), Some(_)) => load_ca_files(legacy_key_path, legacy_cert_path)?,
+        (None, None) => generate_ca()?,
+        _ => return Err("legacy CA state is incomplete".into()),
+    };
+    publish_ca(dir, &key, &cert)?;
+    load_ca(dir)?.ok_or_else(|| "published CA is unavailable".to_owned())
+}
+
+fn generate_ca() -> Result<(PKey<Private>, X509), String> {
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(|_| "EC group")?;
     let key = PKey::from_ec_key(EcKey::generate(&group).map_err(|_| "CA key generation failed")?)
         .map_err(|_| "CA key generation failed")?;
@@ -130,51 +283,6 @@ fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509),
     b.sign(&key, MessageDigest::sha256())
         .map_err(|_| "CA sign")?;
     let cert = b.build();
-    let parent = key_path.parent().ok_or("CA path has no parent")?;
-    std::fs::create_dir_all(parent).map_err(|_| "CA directory")?;
-    let lock_path = parent.join("enrollment-ca.lock");
-    let _lock = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-    {
-        Ok(file) => file,
-        Err(_) => return Err("concurrent CA initialization".into()),
-    };
-    let _guard = LockGuard(lock_path);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let dm = std::fs::symlink_metadata(parent).map_err(|_| "CA directory metadata")?;
-        if !dm.file_type().is_dir() || dm.uid() != 0 || (dm.mode() & 0o022) != 0 {
-            return Err("CA directory ownership or mode is unsafe".into());
-        }
-        let key_bytes = key
-            .private_key_to_pem_pkcs8()
-            .map_err(|_| "CA key encode")?;
-        let cert_bytes = cert.to_pem().map_err(|_| "CA cert encode")?;
-        let mut k = std::fs::OpenOptions::new();
-        k.write(true).create_new(true).mode(0o600);
-        use std::io::Write as _;
-        k.open(key_path)
-            .map_err(|_| "CA key create")?
-            .write_all(&key_bytes)
-            .map_err(|_| "CA key write")?;
-        let mut c = std::fs::OpenOptions::new();
-        c.write(true).create_new(true).mode(0o644);
-        let mut cert_file = match c.open(cert_path) {
-            Ok(file) => file,
-            Err(_) => {
-                let _ = std::fs::remove_file(key_path);
-                return Err("CA cert create".into());
-            }
-        };
-        if cert_file.write_all(&cert_bytes).is_err() {
-            let _ = std::fs::remove_file(key_path);
-            let _ = std::fs::remove_file(cert_path);
-            return Err("CA cert write".into());
-        }
-    }
     Ok((key, cert))
 }
 #[allow(deprecated)]
@@ -203,47 +311,8 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     }
     let agent_uri = format!("urn:o3k:compute:agent:{}", req.agent_id);
     let epoch_uri = format!("urn:o3k:compute:epoch:{}", req.agent_epoch);
-    let extensions = csr.extensions().map_err(|_| "CSR extensions unavailable")?;
-    let mut uris = Vec::new();
-    let mut san_extensions = 0;
-    for extension in extensions.iter() {
-        let encoded = extension.to_der().map_err(|_| "invalid CSR extension")?;
-        if encoded
-            .windows(5)
-            .any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x11])
-        {
-            san_extensions += 1;
-            if san_extensions > 1 {
-                return Err("duplicate CSR SAN extension".into());
-            }
-            let marker = [0x06, 0x03, 0x55, 0x1d, 0x11];
-            let oid_end = encoded
-                .windows(marker.len())
-                .position(|w| w == marker)
-                .ok_or("invalid CSR SAN")?
-                + marker.len();
-            let octet = encoded[oid_end..]
-                .iter()
-                .position(|b| *b == 0x04)
-                .ok_or("invalid CSR SAN")?
-                + oid_end;
-            let (len, used) = der_len(&encoded[octet + 1..])?;
-            let start = octet + 1 + used;
-            if start + len > encoded.len() {
-                return Err("invalid CSR SAN".into());
-            }
-            uris = parse_san_uris(&encoded[start..start + len])?;
-        }
-    }
-    if san_extensions != 1 {
-        return Err("CSR SAN extension missing".into());
-    }
-    if uris.len() != 2
-        || !uris.iter().any(|u| u == &agent_uri)
-        || !uris.iter().any(|u| u == &epoch_uri)
-    {
-        return Err("CSR SAN identity mismatch".into());
-    }
+    validate_csr_uri_sans(&req.csr_pem, &agent_uri, &epoch_uri)
+        .map_err(|_| "CSR SAN identity mismatch")?;
     let pubkey = csr.public_key().map_err(|_| "CSR key")?;
     if !csr.verify(&pubkey).unwrap_or(false) {
         return Err("CSR signature invalid".into());
@@ -307,52 +376,6 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     })
 }
 
-fn parse_san_uris(mut der: &[u8]) -> Result<Vec<String>, String> {
-    if der.first().copied() != Some(0x30) {
-        return Err("invalid CSR SAN".into());
-    }
-    let (len, used) = der_len(&der[1..])?;
-    der = &der[1 + used..];
-    if der.len() != len {
-        return Err("invalid CSR SAN".into());
-    }
-    let mut result = Vec::new();
-    while !der.is_empty() {
-        if der[0] != 0x86 {
-            return Err("CSR SAN contains non-URI name".into());
-        }
-        let (len, used) = der_len(&der[1..])?;
-        let start = 1 + used;
-        if start + len > der.len() {
-            return Err("invalid CSR SAN".into());
-        }
-        result.push(
-            String::from_utf8(der[start..start + len].to_vec()).map_err(|_| "invalid CSR SAN")?,
-        );
-        der = &der[start + len..];
-    }
-    Ok(result)
-}
-
-fn der_len(bytes: &[u8]) -> Result<(usize, usize), String> {
-    let first = *bytes.first().ok_or("invalid CSR SAN")?;
-    if first & 0x80 == 0 {
-        return Ok((first as usize, 1));
-    }
-    let count = (first & 0x7f) as usize;
-    if count == 0 || count > std::mem::size_of::<usize>() || bytes.len() < count + 1 {
-        return Err("invalid CSR SAN".into());
-    }
-    let mut value = 0usize;
-    for byte in &bytes[1..=count] {
-        value = value
-            .checked_mul(256)
-            .and_then(|v| v.checked_add(*byte as usize))
-            .ok_or("invalid CSR SAN")?;
-    }
-    Ok((value, count + 1))
-}
-
 fn safe_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 255
@@ -361,15 +384,24 @@ fn safe_component(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let key = PathBuf::from(
+    let legacy_key = PathBuf::from(
         std::env::var("O3K_ENROLLMENT_CA_KEY")
             .unwrap_or_else(|_| "/etc/o3k/ea/enrollment-ca-key.pem".into()),
     );
-    let cert = PathBuf::from(
+    let legacy_cert = PathBuf::from(
         std::env::var("O3K_ENROLLMENT_CA_CERT")
             .unwrap_or_else(|_| "/etc/o3k/ea/enrollment-ca.pem".into()),
     );
-    let (ca_key, ca_cert) = ensure_ca(&key, &cert).map_err(std::io::Error::other)?;
+    let ca_dir = PathBuf::from(std::env::var("O3K_ENROLLMENT_CA_DIR").unwrap_or_else(|_| {
+        legacy_key
+            .parent()
+            .unwrap_or_else(|| Path::new("/etc/o3k/ea"))
+            .join("enrollment-ca")
+            .to_string_lossy()
+            .into_owned()
+    }));
+    let (ca_key, ca_cert) =
+        ensure_ca(&ca_dir, &legacy_key, &legacy_cert).map_err(std::io::Error::other)?;
     // systemd socket activation uses stdin/stdout for one connection (Accept=yes).
     let mut input = std::io::stdin().lock();
     let result = peer_ok(&input)
@@ -387,11 +419,123 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use o3k_compute_agent::{
         IssuedEnrollment, types::EnrollmentIdentity, validate_issued_enrollment,
     };
+
+    fn test_dir(label: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "o3k-enrollment-ca-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&path).unwrap();
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn ca_directory_publication_is_complete_idempotent_and_race_safe() {
+        let root = test_dir("parallel");
+        let ca_dir = root.join("enrollment-ca");
+        let legacy_key = root.join("enrollment-ca-key.pem");
+        let legacy_cert = root.join("enrollment-ca.pem");
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let ca_dir = ca_dir.clone();
+                let legacy_key = legacy_key.clone();
+                let legacy_cert = legacy_cert.clone();
+                std::thread::spawn(move || {
+                    let (key, cert) = ensure_ca(&ca_dir, &legacy_key, &legacy_cert).unwrap();
+                    (key.public_key_to_der().unwrap(), cert.to_der().unwrap())
+                })
+            })
+            .collect();
+        let published: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(published.iter().all(|value| value == &published[0]));
+        assert_eq!(
+            load_ca(&ca_dir).unwrap().unwrap().1.to_der().unwrap(),
+            published[0].1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_ca_pair_is_imported_without_identity_change() {
+        let root = test_dir("legacy");
+        let ca_dir = root.join("enrollment-ca");
+        let legacy_key = root.join("enrollment-ca-key.pem");
+        let legacy_cert = root.join("enrollment-ca.pem");
+        let (key, cert) = generate_ca().unwrap();
+        std::fs::write(&legacy_key, key.private_key_to_pem_pkcs8().unwrap()).unwrap();
+        std::fs::write(&legacy_cert, cert.to_pem().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&legacy_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&legacy_cert, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let (imported_key, imported_cert) = ensure_ca(&ca_dir, &legacy_key, &legacy_cert).unwrap();
+        assert_eq!(
+            key.public_key_to_der().unwrap(),
+            imported_key.public_key_to_der().unwrap()
+        );
+        assert_eq!(cert.to_der().unwrap(), imported_cert.to_der().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orphaned_incomplete_temporary_ca_does_not_poison_initialization() {
+        let root = test_dir("orphan");
+        std::fs::create_dir_all(&root).unwrap();
+        let orphan = root.join(".enrollment-ca-interrupted");
+        std::fs::create_dir(&orphan).unwrap();
+        std::fs::write(orphan.join("key.pem"), b"interrupted").unwrap();
+        let ca_dir = root.join("enrollment-ca");
+        let (key, cert) = ensure_ca(
+            &ca_dir,
+            &root.join("legacy-key.pem"),
+            &root.join("legacy-cert.pem"),
+        )
+        .unwrap();
+        assert!(cert.verify(&key).unwrap());
+        assert_eq!(
+            load_ca(&ca_dir).unwrap().unwrap().1.to_der().unwrap(),
+            cert.to_der().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn incomplete_published_ca_fails_closed_without_replacing_state() {
+        let root = test_dir("partial");
+        let ca_dir = root.join("enrollment-ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+        std::fs::write(ca_dir.join("key.pem"), b"partial").unwrap();
+        let result = ensure_ca(
+            &ca_dir,
+            &root.join("legacy-key.pem"),
+            &root.join("legacy-cert.pem"),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(ca_dir.join("key.pem")).unwrap(), b"partial");
+        assert!(!ca_dir.join("cert.pem").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[allow(deprecated)]
     #[test]
