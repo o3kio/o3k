@@ -108,6 +108,33 @@ pub struct StorageCommandEnvelope {
     pub canonical_payload_fingerprint: String,
 }
 
+/// Typed, provider-neutral command body persisted alongside the envelope.
+/// Keeping this body durable makes replay independent of transient controller
+/// objects while ensuring provider paths and credentials never cross the
+/// canonical boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum StorageCommandPayload {
+    Attachment(StorageAttachmentCommandPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageAttachmentCommandPayload {
+    pub attachment_id: VolumeAttachmentId,
+    pub volume_id: VolumeId,
+    pub server_id: Uuid,
+    pub project_id: String,
+    pub access_mode: AttachmentAccessMode,
+    pub delete_on_termination: bool,
+    pub volume_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageCommandRecord {
+    pub envelope: StorageCommandEnvelope,
+    pub payload: StorageCommandPayload,
+}
+
 impl StorageCommandEnvelope {
     pub fn validate(&self) -> Result<(), StorageValidationError> {
         if self.protocol_version == 0

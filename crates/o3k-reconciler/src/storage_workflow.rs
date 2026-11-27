@@ -9,8 +9,9 @@
 
 use async_trait::async_trait;
 use o3k_domain::{
-    AttachmentAccessMode, StorageAction, StorageCommandEnvelope, VolumeAttachment,
-    VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState, storage_payload_fingerprint,
+    AttachmentAccessMode, StorageAction, StorageAttachmentCommandPayload, StorageCommandEnvelope,
+    StorageCommandPayload, StorageCommandRecord, VolumeAttachment, VolumeAttachmentId,
+    VolumeAttachmentState, VolumeId, VolumeState, storage_payload_fingerprint,
 };
 use o3k_storage::{
     PreparedAttachment, StorageAttachmentRequest, StorageProvider, StorageProviderError,
@@ -215,6 +216,11 @@ where
         {
             return Err(StorageWorkflowError::InvalidIntent);
         }
+        let volume = self
+            .store
+            .get_volume(record.attachment.volume_id.as_uuid())
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
 
         let operation_id = deterministic_storage_id("operation", &intent.idempotency_key);
         let command_id = deterministic_storage_id("command", &intent.idempotency_key);
@@ -226,8 +232,14 @@ where
             fingerprint.clone(),
             StorageAction::PrepareAttachment,
         )?;
-        let payload =
-            serde_json::to_vec(&envelope).map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let payload = serde_json::to_vec(&StorageCommandRecord {
+            envelope: envelope.clone(),
+            payload: StorageCommandPayload::Attachment(attachment_payload(
+                &intent,
+                volume.volume.generation,
+            )),
+        })
+        .map_err(|_| StorageWorkflowError::InvalidIntent)?;
         self.store
             .insert_operation(&OperationRecord {
                 id: operation_id,
@@ -322,6 +334,11 @@ where
         {
             return Err(StorageWorkflowError::InvalidIntent);
         }
+        let volume = self
+            .store
+            .get_volume(record.attachment.volume_id.as_uuid())
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
         let operation_id = deterministic_storage_id("operation", &intent.idempotency_key);
         let command_id = deterministic_storage_id("command", &intent.idempotency_key);
         let envelope = self.envelope(
@@ -332,8 +349,14 @@ where
             fingerprint.clone(),
             StorageAction::TerminateAttachment,
         )?;
-        let payload =
-            serde_json::to_vec(&envelope).map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let payload = serde_json::to_vec(&StorageCommandRecord {
+            envelope: envelope.clone(),
+            payload: StorageCommandPayload::Attachment(attachment_payload(
+                &intent,
+                volume.volume.generation,
+            )),
+        })
+        .map_err(|_| StorageWorkflowError::InvalidIntent)?;
         self.store
             .insert_operation(&OperationRecord {
                 id: operation_id,
@@ -400,8 +423,7 @@ where
         }
         self.fence.assert_current(controller_epoch).await?;
         let command = self.store.get_agent_command(command_id).await?;
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         envelope
             .validate()
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
@@ -500,8 +522,7 @@ where
         volume_generation: u64,
         controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         self.execute_attach_from_command_with_intent(
             intent,
             envelope,
@@ -519,8 +540,7 @@ where
         record: VolumeAttachmentRecordV1,
         controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         let volume = self
             .store
             .get_volume(record.attachment.volume_id.as_uuid())
@@ -630,8 +650,7 @@ where
         volume_generation: u64,
         controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         let intent = intent_from_attachment(&envelope, &record.attachment);
         self.execute_attach_from_command_with_intent(
             intent,
@@ -1025,6 +1044,31 @@ fn intent_from_attachment(
 fn deterministic_storage_id(kind: &str, idempotency_key: &str) -> Uuid {
     let name = format!("o3k-storage:{kind}:{idempotency_key}");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
+}
+
+fn decode_command_envelope(bytes: &[u8]) -> Result<StorageCommandEnvelope, StorageWorkflowError> {
+    if let Ok(record) = serde_json::from_slice::<StorageCommandRecord>(bytes) {
+        return Ok(record.envelope);
+    }
+    // Read-only compatibility for commands written before typed payloads were
+    // introduced. New mutations always use StorageCommandRecord.
+    serde_json::from_slice::<StorageCommandEnvelope>(bytes)
+        .map_err(|_| StorageWorkflowError::InvalidIntent)
+}
+
+fn attachment_payload(
+    intent: &StorageAttachmentIntent,
+    volume_generation: u64,
+) -> StorageAttachmentCommandPayload {
+    StorageAttachmentCommandPayload {
+        attachment_id: intent.attachment_id,
+        volume_id: intent.volume_id,
+        server_id: intent.server_id,
+        project_id: intent.project_id.clone(),
+        access_mode: intent.access_mode,
+        delete_on_termination: intent.delete_on_termination,
+        volume_generation,
+    }
 }
 
 #[cfg(test)]
