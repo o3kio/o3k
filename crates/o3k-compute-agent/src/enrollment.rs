@@ -524,8 +524,15 @@ fn validate_csr(csr_pem: &[u8], agent_id: &str, epoch: &str) -> Result<(), Enrol
             .as_slice(),
     )
     .into_owned();
-    if !text.contains(&format!("URI:urn:o3k:compute:agent:{agent_id}"))
-        || (!epoch.is_empty() && !text.contains(&format!("URI:urn:o3k:compute:epoch:{epoch}")))
+    let uris: Vec<&str> = text
+        .lines()
+        .flat_map(|line| line.split_whitespace())
+        .filter_map(|token| token.strip_prefix("URI:"))
+        .collect();
+    let expected_agent = format!("urn:o3k:compute:agent:{agent_id}");
+    let expected_epoch = format!("urn:o3k:compute:epoch:{epoch}");
+    if !uris.iter().any(|uri| *uri == expected_agent)
+        || (!epoch.is_empty() && !uris.iter().any(|uri| *uri == expected_epoch))
     {
         return Err(EnrollmentIssueError::InvalidCsr);
     }
