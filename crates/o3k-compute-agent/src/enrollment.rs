@@ -244,11 +244,12 @@ where
             .await
             .map_err(|_| Status::unauthenticated("enrollment rejected"))?;
         Ok(Response::new(crate::proto::EnrollResponse {
+            agent_id: issued.agent_id,
             client_certificate_chain_pem: issued.client_certificate_chain_pem,
             ca_certificate_pem: issued.ca_certificate_pem,
             ca_fingerprint_sha256: issued.ca_fingerprint_sha256,
-            certificate_expires_at_unix_ms: issued.certificate_expires_at_unix_ms,
-            rotation_deadline_unix_ms: issued.rotation_deadline_unix_ms,
+            certificate_expires_at_unix_ms: issued.certificate_expires_at_unix_ms as i64,
+            rotation_deadline_unix_ms: issued.rotation_deadline_unix_ms as i64,
             selected_version: request.supported_versions.into_iter().next(),
         }))
     }
