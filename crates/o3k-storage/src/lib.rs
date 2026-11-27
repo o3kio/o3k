@@ -494,6 +494,7 @@ mod journal_tests {
                 resource_state: "accepted".to_owned(),
                 error_category: None,
                 redacted_message: None,
+                device_path: None,
             },
         };
         std::fs::write(
