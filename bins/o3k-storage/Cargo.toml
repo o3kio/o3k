@@ -11,6 +11,8 @@ o3k-controller-protocol = { path = "../../crates/o3k-controller-protocol" }
 o3k-domain = { path = "../../crates/o3k-domain" }
 o3k-storage = { path = "../../crates/o3k-storage" }
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tracing.workspace = true
