@@ -20,9 +20,9 @@ pub use storage::{
     SnapshotConsistency, SnapshotId, SnapshotState, StorageAction, StorageAttachmentCommandPayload,
     StorageBackend, StorageCapabilities, StorageCommandEnvelope, StorageCommandPayload,
     StorageCommandRecord, StorageErrorCategory, StorageExecutionScope, StorageObservation,
-    StorageOperationState, StorageTransitionError, StorageValidationError,
-    StorageVolumeCommandPayload, Volume, VolumeAttachment, VolumeAttachmentId,
-    VolumeAttachmentState, VolumeId, VolumeState, storage_payload_fingerprint,
+    StorageOperationState, StorageTransitionError, StorageValidationError, Volume,
+    VolumeAttachment, VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
+    storage_payload_fingerprint,
 };
 
 use serde::{Deserialize, Serialize};
