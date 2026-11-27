@@ -9,7 +9,8 @@
 use async_trait::async_trait;
 use o3k_domain::{
     AttachmentAccessMode, SnapshotConsistency, SnapshotId, StorageCapabilities,
-    StorageProviderReference, VolumeAttachmentId, VolumeId,
+    StorageCommandEnvelope, StorageObservation, StorageOperationState, StorageProviderReference,
+    VolumeAttachmentId, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,11 +18,161 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 use tokio::process::Command;
 
+/// Durable local acceptance journal used by the storage executor boundary.
+/// The controller remains authoritative; this journal only fences replay and
+/// records executor outcomes before a process restart can lose them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalRecord {
+    envelope: StorageCommandEnvelope,
+    observation: StorageObservation,
+}
+
+#[derive(Debug, Error)]
+pub enum StorageJournalError {
+    #[error("storage journal I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("storage journal encoding failed: {0}")]
+    Encoding(#[from] serde_json::Error),
+    #[error("storage command conflicts with an existing idempotency record")]
+    Conflict,
+    #[error("storage journal record was not found")]
+    NotFound,
+    #[error("storage command is stale for the executor")]
+    Stale,
+}
+
+#[derive(Debug)]
+pub struct StorageJournal {
+    path: std::path::PathBuf,
+    records: std::sync::Mutex<Vec<JournalRecord>>,
+}
+
+impl StorageJournal {
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageJournalError> {
+        let path = path.into();
+        let records = if path.exists() {
+            serde_json::from_slice(&std::fs::read(&path)?)?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            path,
+            records: std::sync::Mutex::new(records),
+        })
+    }
+
+    pub fn accept(
+        &self,
+        envelope: StorageCommandEnvelope,
+        agent_id: &str,
+        agent_epoch: u64,
+    ) -> Result<StorageObservation, StorageJournalError> {
+        envelope
+            .validate()
+            .map_err(|_| StorageJournalError::Stale)?;
+        if envelope.target_agent_id != agent_id || envelope.target_agent_epoch != agent_epoch {
+            return Err(StorageJournalError::Stale);
+        }
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        if let Some(existing) = records
+            .iter()
+            .find(|record| record.envelope.idempotency_key == envelope.idempotency_key)
+        {
+            return if existing.envelope.canonical_payload_fingerprint
+                == envelope.canonical_payload_fingerprint
+            {
+                Ok(existing.observation.clone())
+            } else {
+                Err(StorageJournalError::Conflict)
+            };
+        }
+        let observation = StorageObservation {
+            agent_id: agent_id.to_owned(),
+            agent_epoch,
+            resource_id: envelope.resource_id.clone(),
+            provider_resource_id: None,
+            operation_id: envelope.operation_id,
+            resource_generation: envelope.resource_generation,
+            observation_sequence: 1,
+            observed_at: envelope.deadline.clone(),
+            operation_state: StorageOperationState::Accepted,
+            resource_state: "accepted".to_owned(),
+            error_category: None,
+            redacted_message: None,
+        };
+        records.push(JournalRecord {
+            envelope,
+            observation: observation.clone(),
+        });
+        persist_journal(&self.path, &records)?;
+        Ok(observation)
+    }
+
+    pub fn get(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<StorageObservation>, StorageJournalError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        Ok(records
+            .iter()
+            .find(|record| record.envelope.idempotency_key == idempotency_key)
+            .map(|record| record.observation.clone()))
+    }
+
+    /// Persist an executor observation after the bounded provider has run.
+    /// The caller must retain the envelope identity and monotonically advance
+    /// the observation sequence; the journal never invents controller state.
+    pub fn record_observation(
+        &self,
+        idempotency_key: &str,
+        observation: StorageObservation,
+    ) -> Result<(), StorageJournalError> {
+        observation
+            .validate()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.envelope.idempotency_key == idempotency_key)
+            .ok_or(StorageJournalError::NotFound)?;
+        if observation.agent_id != record.observation.agent_id
+            || observation.agent_epoch != record.observation.agent_epoch
+            || observation.operation_id != record.observation.operation_id
+            || observation.resource_generation != record.observation.resource_generation
+            || observation.observation_sequence <= record.observation.observation_sequence
+        {
+            return Err(StorageJournalError::Conflict);
+        }
+        record.observation = observation;
+        persist_journal(&self.path, &records)
+    }
+}
+
+fn persist_journal(
+    path: &std::path::Path,
+    records: &[JournalRecord],
+) -> Result<(), StorageJournalError> {
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, serde_json::to_vec(records)?)?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
 mod ceph;
 #[cfg(all(test, unix))]
 mod command_drain_tests;
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod command_allowlist_tests {
     use super::*;
 
@@ -56,6 +207,94 @@ mod command_allowlist_tests {
             result.as_ref().is_ok_and(|output| output.status != 0),
             "trusted vgs should spawn and reject the deliberately invalid option"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod journal_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn envelope(key: &str, fingerprint: &str) -> StorageCommandEnvelope {
+        StorageCommandEnvelope {
+            protocol_version: 1,
+            command_id: uuid::Uuid::new_v4(),
+            operation_id: uuid::Uuid::new_v4(),
+            idempotency_key: key.to_owned(),
+            resource_id: "volume-1".to_owned(),
+            resource_generation: 1,
+            project_id: "project-1".to_owned(),
+            controller_epoch: 1,
+            target_agent_id: "storage-a".to_owned(),
+            target_agent_epoch: 7,
+            deadline: "2099-01-01T00:00:00Z".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: o3k_domain::StorageAction::CreateVolume,
+            canonical_payload_fingerprint: fingerprint.to_owned(),
+        }
+    }
+
+    fn path() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("o3k-storage-journal-{nanos}.json"))
+    }
+
+    #[test]
+    fn acceptance_replays_after_restart_and_rejects_conflicts() {
+        let journal_path = path();
+        let command = envelope("op-1", &"a".repeat(64));
+        let accepted = StorageJournal::open(&journal_path)
+            .expect("journal opens")
+            .accept(command.clone(), "storage-a", 7)
+            .expect("command accepted");
+        let journal = StorageJournal::open(&journal_path).expect("journal reloads");
+        assert_eq!(journal.get("op-1").expect("lookup"), Some(accepted.clone()));
+        assert_eq!(
+            journal.accept(command, "storage-a", 7).expect("replay"),
+            accepted
+        );
+        assert!(matches!(
+            journal.accept(envelope("op-1", &"b".repeat(64)), "storage-a", 7),
+            Err(StorageJournalError::Conflict)
+        ));
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn stale_agent_epoch_is_rejected() {
+        let journal_path = path();
+        let result = StorageJournal::open(&journal_path)
+            .expect("journal opens")
+            .accept(envelope("op-2", &"c".repeat(64)), "storage-a", 8);
+        assert!(matches!(result, Err(StorageJournalError::Stale)));
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn terminal_observation_is_durable_and_sequence_fenced() {
+        let journal_path = path();
+        let command = envelope("op-3", &"d".repeat(64));
+        let journal = StorageJournal::open(&journal_path).expect("journal opens");
+        let accepted = journal.accept(command, "storage-a", 7).expect("accepted");
+        let mut terminal = accepted.clone();
+        terminal.observation_sequence = 2;
+        terminal.operation_state = StorageOperationState::Succeeded;
+        terminal.resource_state = "available".to_owned();
+        journal
+            .record_observation("op-3", terminal.clone())
+            .expect("recorded");
+        assert_eq!(
+            StorageJournal::open(&journal_path)
+                .expect("reload")
+                .get("op-3")
+                .expect("lookup"),
+            Some(terminal)
+        );
+        let _ = std::fs::remove_file(journal_path);
     }
 }
 
