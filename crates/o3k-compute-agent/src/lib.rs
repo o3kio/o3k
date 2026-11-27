@@ -67,8 +67,8 @@ pub use config_drive::{
     config_drive_materialization_request, config_drive_requested,
 };
 pub use enrollment::{
-    EnrollmentGrantBinding, EnrollmentIssueError, EnrollmentIssuer, EnrollmentSigner,
-    IssuedEnrollment, RootHelperEnrollmentSigner,
+    ComputeEnrollmentService, EnrollmentGrantBinding, EnrollmentIssueError, EnrollmentIssuer,
+    EnrollmentSigner, IssuedEnrollment, RootHelperEnrollmentSigner,
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,

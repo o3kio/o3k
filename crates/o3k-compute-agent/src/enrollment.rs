@@ -14,6 +14,7 @@ use openssl::x509::X509Req;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tonic::{Request, Response, Status};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnrollmentGrantBinding {
@@ -164,6 +165,87 @@ pub enum EnrollmentIssueError {
 pub struct EnrollmentIssuer<S> {
     grants: Arc<Mutex<Vec<EnrollmentGrantBinding>>>,
     signer: S,
+}
+
+/// gRPC adapter for the versioned ComputeEnrollment contract.  The adapter
+/// deliberately contains no certificate authority state; callers inject the
+/// narrow signer above and keep grant state in the controller's durable store.
+pub struct ComputeEnrollmentService<S> {
+    issuer: Arc<EnrollmentIssuer<S>>,
+}
+
+impl<S: EnrollmentSigner + 'static> ComputeEnrollmentService<S> {
+    pub fn new(issuer: EnrollmentIssuer<S>) -> Self {
+        Self {
+            issuer: Arc::new(issuer),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl<S: EnrollmentSigner + 'static> crate::proto::compute_enrollment_server::ComputeEnrollment
+    for ComputeEnrollmentService<S>
+{
+    async fn enroll(
+        &self,
+        request: Request<crate::proto::EnrollRequest>,
+    ) -> Result<Response<crate::proto::EnrollResponse>, Status> {
+        let request = request.into_inner();
+        if request.bootstrap_token.is_empty()
+            || request.certificate_signing_request_pem.is_empty()
+            || request.certificate_signing_request_pem.len() > 128 * 1024
+        {
+            return Err(Status::invalid_argument("invalid enrollment request"));
+        }
+        // The bootstrap token is an opaque durable grant identifier in the
+        // current wire contract.  The controller maps it to its grant record
+        // before constructing this service; it is never logged or echoed.
+        let token = request.bootstrap_token.as_bytes();
+        let issued = self
+            .issuer
+            .issue(
+                &request.requested_host_label,
+                token,
+                &request.certificate_signing_request_pem,
+                unix_ms(),
+            )
+            .map_err(|error| match error {
+                EnrollmentIssueError::UnauthorizedGrant => {
+                    Status::unauthenticated("enrollment grant rejected")
+                }
+                EnrollmentIssueError::InvalidCsr => {
+                    Status::invalid_argument("CSR identity rejected")
+                }
+                EnrollmentIssueError::Signer => {
+                    Status::failed_precondition("enrollment signer unavailable")
+                }
+                EnrollmentIssueError::State => Status::internal("enrollment state unavailable"),
+            })?;
+        Ok(Response::new(crate::proto::EnrollResponse {
+            agent_id: issued.agent_id,
+            client_certificate_chain_pem: issued.client_certificate_chain_pem,
+            ca_certificate_pem: issued.ca_certificate_pem,
+            ca_fingerprint_sha256: issued.ca_fingerprint_sha256,
+            selected_version: request.supported_versions.into_iter().next(),
+            certificate_expires_at_unix_ms: issued.certificate_expires_at_unix_ms as i64,
+            rotation_deadline_unix_ms: issued.rotation_deadline_unix_ms as i64,
+        }))
+    }
+
+    async fn rotate_certificate(
+        &self,
+        _request: Request<crate::proto::RotateCertificateRequest>,
+    ) -> Result<Response<crate::proto::RotateCertificateResponse>, Status> {
+        Err(Status::unimplemented(
+            "certificate rotation requires an authenticated existing agent",
+        ))
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
