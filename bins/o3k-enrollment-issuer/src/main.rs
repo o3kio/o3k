@@ -4,7 +4,7 @@ use openssl::{
     hash::MessageDigest,
     nid::Nid,
     pkey::{PKey, Private},
-    x509::{X509, X509NameBuilder, X509Req},
+    x509::{X509, X509Extension, X509NameBuilder, X509Req},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,7 @@ struct Response {
 }
 #[derive(Serialize)]
 struct ErrorResponse {
-    error: &'static str,
+    error: String,
 }
 
 fn bounded<R: Read>(stream: &mut R) -> Result<Vec<u8>, String> {
@@ -70,14 +70,20 @@ fn peer_ok<S: std::os::fd::AsFd>(stream: &S) -> Result<(), String> {
     Ok(())
 }
 fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509), String> {
-    if key_path.exists() || cert_path.exists() {
-        if !key_path.is_file() || !cert_path.is_file() {
+    let key_meta = std::fs::symlink_metadata(key_path).ok();
+    let cert_meta = std::fs::symlink_metadata(cert_path).ok();
+    if key_meta.is_some() || cert_meta.is_some() {
+        if key_meta.as_ref().is_some_and(|m| !m.file_type().is_file())
+            || cert_meta.as_ref().is_some_and(|m| !m.file_type().is_file())
+            || key_meta.is_none()
+            || cert_meta.is_none()
+        {
             return Err("issuer CA paths are unsafe".into());
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let km = std::fs::metadata(key_path).map_err(|_| "CA key metadata")?;
+            let km = key_meta.as_ref().ok_or("CA key metadata")?;
             if km.uid() != 0 || (km.mode() & 0o077) != 0 {
                 return Err("CA key ownership or mode is unsafe".into());
             }
@@ -113,24 +119,34 @@ fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509),
     let cert = b.build();
     let parent = key_path.parent().ok_or("CA path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|_| "CA directory")?;
-    std::fs::write(
-        key_path,
-        key.private_key_to_pem_pkcs8()
-            .map_err(|_| "CA key encode")?,
-    )
-    .map_err(|_| "CA key write")?;
-    std::fs::write(cert_path, cert.to_pem().map_err(|_| "CA cert encode")?)
-        .map_err(|_| "CA cert write")?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| "CA key mode")?;
-        std::fs::set_permissions(cert_path, std::fs::Permissions::from_mode(0o644))
-            .map_err(|_| "CA cert mode")?;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let dm = std::fs::symlink_metadata(parent).map_err(|_| "CA directory metadata")?;
+        if !dm.file_type().is_dir() || dm.uid() != 0 || (dm.mode() & 0o022) != 0 {
+            return Err("CA directory ownership or mode is unsafe".into());
+        }
+        let key_bytes = key
+            .private_key_to_pem_pkcs8()
+            .map_err(|_| "CA key encode")?;
+        let cert_bytes = cert.to_pem().map_err(|_| "CA cert encode")?;
+        let mut k = std::fs::OpenOptions::new();
+        k.write(true).create_new(true).mode(0o600);
+        use std::io::Write as _;
+        k.open(key_path)
+            .map_err(|_| "CA key create")?
+            .write_all(&key_bytes)
+            .map_err(|_| "CA key write")?;
+        let mut c = std::fs::OpenOptions::new();
+        c.write(true).create_new(true).mode(0o644);
+        c.open(cert_path)
+            .map_err(|_| "CA cert create")?
+            .write_all(&cert_bytes)
+            .map_err(|_| "CA cert write")?;
     }
     Ok((key, cert))
 }
+#[allow(deprecated)]
 fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, String> {
     if req.grant_id.trim().is_empty()
         || req.token.is_empty()
@@ -179,6 +195,25 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     b.set_issuer_name(ca.subject_name())
         .map_err(|_| "cert issuer")?;
     b.set_pubkey(&pubkey).map_err(|_| "cert key")?;
+    let san = X509Extension::new_nid(
+        None,
+        None,
+        Nid::SUBJECT_ALT_NAME,
+        &format!("URI:{agent_uri},URI:{epoch_uri}"),
+    )
+    .map_err(|_| "cert SAN")?;
+    let eku = X509Extension::new_nid(None, None, Nid::EXT_KEY_USAGE, "clientAuth")
+        .map_err(|_| "cert EKU")?;
+    let ku = X509Extension::new_nid(
+        None,
+        None,
+        Nid::KEY_USAGE,
+        "digitalSignature,keyEncipherment",
+    )
+    .map_err(|_| "cert key usage")?;
+    b.append_extension(san).map_err(|_| "cert SAN")?;
+    b.append_extension(eku).map_err(|_| "cert EKU")?;
+    b.append_extension(ku).map_err(|_| "cert key usage")?;
     let before = Asn1Time::days_from_now(0).map_err(|_| "cert time")?;
     let after = Asn1Time::days_from_now(365).map_err(|_| "cert time")?;
     b.set_not_before(&before).map_err(|_| "cert time")?;
@@ -187,14 +222,22 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
         .map_err(|_| "cert sign")?;
     let cert = b.build();
     let ca_pem = ca.to_pem().map_err(|_| "CA encode")?;
+    let ca_der = ca.to_der().map_err(|_| "CA encode")?;
+    let expires = std::time::SystemTime::now()
+        .checked_add(std::time::Duration::from_secs(365 * 24 * 60 * 60))
+        .ok_or("cert expiry")?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "cert expiry")?
+        .as_millis() as u64;
+    let rotation = expires.saturating_sub(30 * 24 * 60 * 60 * 1000);
     Ok(Response {
         agent_id: req.agent_id,
         agent_epoch: req.agent_epoch,
         client_certificate_chain_pem: cert.to_pem().map_err(|_| "cert encode")?,
         ca_certificate_pem: ca_pem.clone(),
-        ca_fingerprint_sha256: hex::encode(Sha256::digest(&ca_pem)),
-        certificate_expires_at_unix_ms: 0,
-        rotation_deadline_unix_ms: 0,
+        ca_fingerprint_sha256: hex::encode(Sha256::digest(&ca_der)),
+        certificate_expires_at_unix_ms: expires,
+        rotation_deadline_unix_ms: rotation,
     })
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -217,9 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|r| issue(r, &ca_key, &ca_cert));
     let out = match result {
         Ok(v) => serde_json::to_vec(&v)?,
-        Err(e) => serde_json::to_vec(&ErrorResponse {
-            error: Box::leak(e.into_boxed_str()),
-        })?,
+        Err(e) => serde_json::to_vec(&ErrorResponse { error: e })?,
     };
     std::io::stdout().write_all(&out)?;
     Ok(())

@@ -3,6 +3,8 @@ Description=O3K Early Access enrollment certificate issuer connection
 
 [Service]
 Type=oneshot
+TimeoutStartSec=15s
+RuntimeMaxSec=15s
 User=root
 Group=root
 ExecStart=/usr/local/bin/o3k-enrollment-issuer

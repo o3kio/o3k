@@ -1128,7 +1128,10 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
       /etc/systemd/system/o3k-network.service 0644
   fi
   systemctl daemon-reload
-  if [[ "$EA_INSTALL" == 1 && "$C1_PREPARE_ONLY" != 1 ]]; then systemctl enable --now o3k-enrollment-issuer.service; fi
+  if [[ "$EA_INSTALL" == 1 && "$C1_PREPARE_ONLY" != 1 ]]; then
+    systemctl enable --now o3k-enrollment-issuer.socket
+    systemctl is-active --quiet o3k-enrollment-issuer.socket || die "enrollment issuer socket failed to start"
+  fi
   if [[ "$C1_PREPARE_ONLY" != 1 ]]; then
     systemctl enable --now o3kd.service
   fi
