@@ -2728,6 +2728,32 @@ pub struct ControlPlaneServer {
     pub address: SocketAddr,
     pub tls: ControlPlaneTls,
     pub authorized_agents: Vec<AuthorizedAgent>,
+    pub enrollment_service: Option<EnrollmentServiceHandle>,
+}
+
+#[derive(Clone)]
+pub struct EnrollmentServiceHandle {
+    inner: std::sync::Arc<dyn proto::compute_enrollment_server::ComputeEnrollment>,
+}
+
+impl EnrollmentServiceHandle {
+    pub fn new<S, R>(service: DurableComputeEnrollmentService<S, R>) -> Self
+    where
+        S: EnrollmentSigner + 'static,
+        R: AsyncDurableEnrollmentGrants + 'static,
+    {
+        Self { inner: std::sync::Arc::new(service) }
+    }
+}
+
+#[tonic::async_trait]
+impl proto::compute_enrollment_server::ComputeEnrollment for EnrollmentServiceHandle {
+    async fn enroll(&self, request: tonic::Request<proto::EnrollRequest>) -> Result<tonic::Response<proto::EnrollResponse>, tonic::Status> {
+        self.inner.enroll(request).await
+    }
+    async fn rotate_certificate(&self, request: tonic::Request<proto::RotateCertificateRequest>) -> Result<tonic::Response<proto::RotateCertificateResponse>, tonic::Status> {
+        self.inner.rotate_certificate(request).await
+    }
 }
 
 impl ControlPlaneServer {
@@ -2794,17 +2820,26 @@ impl ControlPlaneServer {
                 registry.mark_unavailable(DEFAULT_LEASE).await;
             }
         });
-        Server::builder()
+        let builder = Server::builder()
             .add_service(
                 proto::compute_agent_server::ComputeAgentServer::new(ComputeAgentService::new(
                     self.registry,
                 ))
                 .max_decoding_message_size(MAX_MESSAGE_SIZE)
                 .max_encoding_message_size(MAX_MESSAGE_SIZE),
-            )
-            .serve_with_incoming_shutdown(incoming, shutdown)
-            .await
-            .map_err(AgentError::Transport)
+            );
+        if let Some(enrollment) = self.enrollment_service {
+            builder
+                .add_service(proto::compute_enrollment_server::ComputeEnrollmentServer::new(enrollment))
+                .serve_with_incoming_shutdown(incoming, shutdown)
+                .await
+                .map_err(|_| AgentError::InvalidConfiguration("control plane failed"))
+        } else {
+            builder
+                .serve_with_incoming_shutdown(incoming, shutdown)
+                .await
+                .map_err(|_| AgentError::InvalidConfiguration("control plane failed"))
+        }
     }
 }
 
