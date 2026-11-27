@@ -25,9 +25,9 @@ Before installing, operators who want to verify the release separately can
 download the signed digest manifest, Sigstore bundle, provenance, installer,
 and archive, then verify the manifest's GitHub Actions identity and the
 downloaded payload hashes. For a release tag, set `TAG` to its exact tag (for
-example, `v0.4.1-rc.1`):
+example, `v0.4.1-rc.1`). Run this block with Bash:
 
-```sh
+```bash
 set -euo pipefail
 TAG=v0.4.1-rc.1
 BASE="https://github.com/o3kio/o3k/releases/download/$TAG"
