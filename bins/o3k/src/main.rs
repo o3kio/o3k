@@ -183,6 +183,15 @@ enum Commands {
         agent_epoch: String,
         #[arg(long)]
         certificate: std::path::PathBuf,
+        /// Loopback TLS endpoint reached through an authenticated SSH tunnel.
+        #[arg(long)]
+        enrollment_endpoint: Option<String>,
+        /// Installation-local CA used to authenticate the enrollment listener.
+        #[arg(long)]
+        enrollment_ca: Option<std::path::PathBuf>,
+        /// Host-local private key output path (created mode 0600).
+        #[arg(long)]
+        private_key: Option<std::path::PathBuf>,
         #[arg(long)]
         region: Option<String>,
         #[arg(long)]
@@ -623,24 +632,46 @@ fn main() -> ExitCode {
             agent_id,
             agent_epoch,
             certificate,
+            enrollment_endpoint,
+            enrollment_ca,
+            private_key,
             region,
             availability_domain,
             failure_domain_id,
             vcpus,
             memory_mb,
             disk_gb,
-        } => handle_result(native_cli::join(
-            token.as_deref(),
-            &agent_id,
-            &agent_epoch,
-            &certificate,
-            region.as_deref(),
-            availability_domain.as_deref(),
-            failure_domain_id.as_deref(),
-            vcpus,
-            memory_mb,
-            disk_gb,
-        )),
+        } => handle_result((|| {
+            if let Some(endpoint) = enrollment_endpoint.as_deref() {
+                let ca = enrollment_ca
+                    .as_deref()
+                    .ok_or("--enrollment-ca is required with --enrollment-endpoint")?;
+                let key = private_key
+                    .as_deref()
+                    .ok_or("--private-key is required with --enrollment-endpoint")?;
+                native_cli::enroll_host(
+                    token.as_deref(),
+                    &agent_id,
+                    &agent_epoch,
+                    endpoint,
+                    ca,
+                    key,
+                    &certificate,
+                )?;
+            }
+            native_cli::join(
+                token.as_deref(),
+                &agent_id,
+                &agent_epoch,
+                &certificate,
+                region.as_deref(),
+                availability_domain.as_deref(),
+                failure_domain_id.as_deref(),
+                vcpus,
+                memory_mb,
+                disk_gb,
+            )
+        })()),
         #[cfg(target_os = "linux")]
         Commands::Restore { command } => match command {
             RestoreCommand::Preflight { artifact, target } => {

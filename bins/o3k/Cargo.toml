@@ -27,10 +27,13 @@ chrono.workspace = true
 hex.workspace = true
 zeroize.workspace = true
 o3k-store = { path = "../../crates/o3k-store" }
+o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
+o3k-provider-contract = { path = "../../crates/o3k-provider-contract" }
 rustix = { workspace = true, features = ["fs", "process"] }
 uuid.workspace = true
 sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 tokio = { workspace = true, features = ["time"] }
+tonic.workspace = true
 tar = { version = "0.4", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 

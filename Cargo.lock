@@ -1820,6 +1820,8 @@ dependencies = [
  "hex",
  "hpke",
  "jsonschema",
+ "o3k-compute-agent",
+ "o3k-provider-contract",
  "o3k-store",
  "openssl",
  "ring",
@@ -1831,6 +1833,7 @@ dependencies = [
  "sqlx",
  "tar",
  "tokio",
+ "tonic",
  "uuid",
  "zeroize",
 ]

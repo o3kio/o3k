@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 use crate::HttpClient;
 use crate::context::HttpResponse;
 use crate::sys::{RequestError, SystemHttpClient, request_with_key};
+use o3k_compute_agent::types::EnrollmentIdentity;
+use o3k_provider_contract::compute_proto::{
+    EnrollRequest, ProtocolVersion, compute_enrollment_client::ComputeEnrollmentClient,
+};
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 
 /// Default native API base URL.
 const DEFAULT_API_BASE: &str = "http://127.0.0.1:18080/o3k/v1";
@@ -73,6 +78,91 @@ fn secret_from(env_value: Option<String>, file_path: Option<String>) -> Result<S
         return Err(format!("secret file at {path} is empty"));
     }
     Ok(value)
+}
+
+/// Enrolls a new compute host through the loopback TLS endpoint exposed by the
+/// controller. Operators reach this endpoint through an authenticated SSH
+/// tunnel; the token and private key never cross that tunnel. The key remains
+/// on the joining host and the returned certificate is installed atomically.
+pub fn enroll_host(
+    token: Option<&str>,
+    agent_id: &str,
+    agent_epoch: &str,
+    endpoint: &str,
+    ca_certificate: &Path,
+    private_key: &Path,
+    certificate: &Path,
+) -> Result<(), String> {
+    let token = match token.map(str::trim) {
+        Some(v) if !v.is_empty() => v.to_owned(),
+        _ => secret_from_env_or_file("O3K_ENROLLMENT_TOKEN")?,
+    };
+    let identity = EnrollmentIdentity::generate(agent_id, agent_epoch)
+        .map_err(|e| format!("cannot generate enrollment identity: {e}"))?;
+    identity
+        .write_private_key(private_key)
+        .map_err(|e| format!("cannot persist private key: {e}"))?;
+    let ca =
+        std::fs::read(ca_certificate).map_err(|e| format!("cannot read enrollment CA: {e}"))?;
+    let csr = identity.csr_pem().to_vec();
+    let endpoint = endpoint.to_owned();
+    let response = runtime()?.block_on(async move {
+        let tls = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca))
+            .domain_name(
+                std::env::var("O3K_ENROLLMENT_TLS_SERVER_NAME")
+                    .unwrap_or_else(|_| "o3k-controller".to_owned()),
+            );
+        let channel = Endpoint::from_shared(endpoint)
+            .map_err(|e| format!("invalid enrollment endpoint: {e}"))?
+            .tls_config(tls)
+            .map_err(|e| format!("invalid enrollment TLS configuration: {e}"))?
+            .connect()
+            .await
+            .map_err(|e| format!("enrollment tunnel unavailable: {e}"))?;
+        let mut client = ComputeEnrollmentClient::new(channel);
+        client
+            .enroll(tonic::Request::new(EnrollRequest {
+                bootstrap_token: token,
+                certificate_signing_request_pem: csr,
+                requested_host_label: agent_id.to_owned(),
+                supported_versions: vec![ProtocolVersion {
+                    major: 1,
+                    minor: 0,
+                    wire_revision: 1,
+                }],
+            }))
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| format!("enrollment rejected: {e}"))
+    })?;
+    if response.agent_id != agent_id || response.client_certificate_chain_pem.is_empty() {
+        return Err("enrollment response identity or certificate is invalid".to_owned());
+    }
+    let parent = certificate
+        .parent()
+        .ok_or("certificate path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("cannot create certificate directory: {e}"))?;
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        certificate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("agent.pem"),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&tmp, &response.client_certificate_chain_pem)
+        .map_err(|e| format!("cannot write issued certificate: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot protect issued certificate: {e}"))?;
+    }
+    std::fs::rename(&tmp, certificate)
+        .map_err(|e| format!("cannot install issued certificate: {e}"))?;
+    Ok(())
 }
 
 /// One recorded `bootstrap/init` attempt outcome for stderr diagnostics.
