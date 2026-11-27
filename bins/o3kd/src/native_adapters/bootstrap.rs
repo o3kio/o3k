@@ -683,6 +683,16 @@ impl BootstrapWorkflow for BootstrapAdapter {
             if old != &fingerprint {
                 return Err(BootstrapFailure::Conflict);
             }
+            let certificate_der =
+                o3k_compute_agent::certificate_der(request.certificate.as_bytes())
+                    .map_err(|_| BootstrapFailure::Unauthorized)?;
+            self.agents
+                .authorize_agent(o3k_compute_agent::AuthorizedAgent::new(
+                    &request.agent_id,
+                    &certificate_der,
+                ))
+                .await
+                .map_err(|_| BootstrapFailure::Internal)?;
             // Re-project the durable enrolled identity into the live agent
             // registry when no live registration exists — e.g. after an
             // o3kd restart or an uninstall/reinstall cycle, where the
@@ -822,17 +832,38 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .and_then(|r| serde_json::from_str(&r.enrolled_agent_epochs).ok())
             .unwrap_or_default();
         epochs.insert(request.agent_id.clone(), request.agent_epoch.clone());
-        durable.enrolled_agent_epochs = serde_json::to_string(&epochs)
-            .map_err(|_| BootstrapFailure::Internal)?;
+        durable.enrolled_agent_epochs =
+            serde_json::to_string(&epochs).map_err(|_| BootstrapFailure::Internal)?;
         let mut revoked: BTreeMap<String, bool> = durable_record
             .as_ref()
             .and_then(|r| serde_json::from_str(&r.revoked_agents).ok())
             .unwrap_or_default();
         revoked.remove(&request.agent_id);
-        durable.revoked_agents = serde_json::to_string(&revoked)
-            .map_err(|_| BootstrapFailure::Internal)?;
+        durable.revoked_agents =
+            serde_json::to_string(&revoked).map_err(|_| BootstrapFailure::Internal)?;
         self.store
             .upsert_bootstrap_state(&durable)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?;
+        // Publish the canonical certificate fingerprint to the live admission
+        // map only after the durable join projection commits. This closes the
+        // crash window between bootstrap persistence and compute-listener
+        // authorization while keeping durable state authoritative.
+        let mut fingerprint_bytes = [0u8; 32];
+        if fingerprint.len() != 64 {
+            return Err(BootstrapFailure::Internal);
+        }
+        for (index, pair) in fingerprint.as_bytes().chunks_exact(2).enumerate() {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or(BootstrapFailure::Internal)? as u8;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or(BootstrapFailure::Internal)? as u8;
+            fingerprint_bytes[index] = (high << 4) | low;
+        }
+        self.agents
+            .authorize_agent_fingerprint(&request.agent_id, fingerprint_bytes)
             .await
             .map_err(|_| BootstrapFailure::Internal)?;
         self.readiness.set_bootstrap_ready(state.is_ready());
