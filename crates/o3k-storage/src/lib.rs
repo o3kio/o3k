@@ -86,6 +86,8 @@ impl StorageJournal {
         agent_id: &str,
         agent_epoch: u64,
     ) -> Result<StorageObservation, StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
         envelope
             .validate()
             .map_err(|_| StorageJournalError::Stale)?;
@@ -166,6 +168,8 @@ impl StorageJournal {
         idempotency_key: &str,
         observation: StorageObservation,
     ) -> Result<(), StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
         observation
             .validate()
             .map_err(|_| StorageJournalError::Conflict)?;
@@ -200,6 +204,36 @@ impl StorageJournal {
         *records = candidate;
         Ok(())
     }
+
+    fn reload_locked(&self) -> Result<(), StorageJournalError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let snapshot: JournalSnapshot = serde_json::from_slice(&std::fs::read(&self.path)?)?;
+        if snapshot.format_version != 1 {
+            return Err(StorageJournalError::Conflict);
+        }
+        *self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = snapshot.records;
+        *self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = snapshot.controller_epoch;
+        Ok(())
+    }
+}
+
+fn journal_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!(
+            ".{}.lock",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("journal")
+        ))
 }
 
 fn persist_journal(
@@ -214,13 +248,6 @@ fn persist_journal(
         .ok_or_else(|| std::io::Error::other("journal has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".journal-{}.tmp", uuid::Uuid::new_v4()));
-    let lock_path = parent.join(format!(
-        ".{}.lock",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("journal")
-    ));
-    let _lock = acquire_journal_lock(&lock_path)?;
     let bytes = serde_json::to_vec(&JournalSnapshot {
         format_version: 1,
         controller_epoch,
@@ -405,6 +432,23 @@ mod journal_tests {
                 .expect("lookup"),
             Some(terminal)
         );
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn independent_instances_preserve_overlapping_updates() {
+        let journal_path = path();
+        let first = StorageJournal::open(&journal_path).expect("journal");
+        let second = StorageJournal::open(&journal_path).expect("journal");
+        first
+            .accept(envelope("op-a", &"e".repeat(64)), "storage-a", 7)
+            .expect("first");
+        second
+            .accept(envelope("op-b", &"f".repeat(64)), "storage-a", 7)
+            .expect("second");
+        let reloaded = StorageJournal::open(&journal_path).expect("reload");
+        assert!(reloaded.get("op-a").expect("lookup").is_some());
+        assert!(reloaded.get("op-b").expect("lookup").is_some());
         let _ = std::fs::remove_file(journal_path);
     }
 }
