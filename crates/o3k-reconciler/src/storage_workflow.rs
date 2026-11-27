@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use o3k_domain::{
     AttachmentAccessMode, StorageAction, StorageCommandEnvelope, VolumeAttachment,
-    VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
+    VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState, storage_payload_fingerprint,
 };
 use o3k_storage::{
     PreparedAttachment, StorageAttachmentRequest, StorageProvider, StorageProviderError,
@@ -20,7 +20,6 @@ use o3k_store::{
     StorageRepository, StoreError, VolumeAttachmentRecordV1,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
@@ -62,8 +61,7 @@ impl StorageAttachmentIntent {
     }
 
     fn fingerprint(&self) -> Result<String, StorageWorkflowError> {
-        let bytes = serde_json::to_vec(self).map_err(|_| StorageWorkflowError::InvalidIntent)?;
-        Ok(hex_digest(&bytes))
+        storage_payload_fingerprint(self).map_err(|_| StorageWorkflowError::InvalidIntent)
     }
 }
 
@@ -1022,13 +1020,6 @@ fn intent_from_attachment(
         trace_id: envelope.trace_id.clone(),
         deadline: envelope.deadline.clone(),
     }
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 fn deterministic_storage_id(kind: &str, idempotency_key: &str) -> Uuid {

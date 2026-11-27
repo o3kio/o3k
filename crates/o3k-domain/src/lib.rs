@@ -21,6 +21,7 @@ pub use storage::{
     StorageCapabilities, StorageCommandEnvelope, StorageErrorCategory, StorageExecutionScope,
     StorageObservation, StorageOperationState, StorageTransitionError, StorageValidationError,
     Volume, VolumeAttachment, VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
+    storage_payload_fingerprint,
 };
 
 use serde::{Deserialize, Serialize};

@@ -6,6 +6,7 @@
 //! observations, never to these resources.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
@@ -139,6 +140,18 @@ impl StorageCommandEnvelope {
         }
         Ok(())
     }
+}
+
+/// Compute the fingerprint used to bind a wire payload to its command
+/// envelope.  Callers must pass the typed payload's serde representation;
+/// keeping this helper in the domain crate prevents controller and executor
+/// implementations from silently choosing different digest encodings.
+pub fn storage_payload_fingerprint<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(payload)?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
