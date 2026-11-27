@@ -19,6 +19,7 @@ o3k-provider = { path = "../o3k-provider" }
 o3k-provider-contract = { path = "../o3k-provider-contract" }
 o3k-image = { path = "../o3k-image" }
 o3k-store = { path = "../o3k-store" }
+openssl.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,3 +33,6 @@ tonic.workspace = true
 tower.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
