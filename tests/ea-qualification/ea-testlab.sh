@@ -81,6 +81,7 @@ usage() {
 
 owned() {
   [[ -f "$STATE" && ! -L "$STATE" ]] \
+    && [[ "$(head -n 1 "$STATE")" == "o3k-ea-qualification-owned-v1" ]] \
     && grep -Fxq "run=$EA_RUN_ID" "$STATE" \
     && grep -Fxq "network=$EA_NETWORK" "$STATE" \
     && grep -Fxq "network_uuid=$EA_NETWORK_UUID" "$STATE" \
@@ -91,6 +92,26 @@ owned() {
 verify_ids() {
   [[ "$(virsh net-uuid "$EA_NETWORK" 2>/dev/null || true)" == "$EA_NETWORK_UUID" ]] \
     && [[ "$(virsh pool-uuid "$EA_POOL" 2>/dev/null || true)" == "$EA_POOL_UUID" ]]
+}
+
+verify_cleanup_ids() {
+  local names
+  names="$(virsh net-list --all --name)" || {
+    echo "refusing cleanup: cannot inspect libvirt networks" >&2; return 1;
+  }
+  if grep -Fxq "$EA_NETWORK" <<<"$names"; then
+    [[ "$(virsh net-uuid "$EA_NETWORK")" == "$EA_NETWORK_UUID" ]] || {
+      echo "refusing cleanup: campaign network name has a different UUID" >&2; return 1;
+    }
+  fi
+  names="$(virsh pool-list --all --name)" || {
+    echo "refusing cleanup: cannot inspect libvirt storage pools" >&2; return 1;
+  }
+  if grep -Fxq "$EA_POOL" <<<"$names"; then
+    [[ "$(virsh pool-uuid "$EA_POOL")" == "$EA_POOL_UUID" ]] || {
+      echo "refusing cleanup: campaign pool name has a different UUID" >&2; return 1;
+    }
+  fi
 }
 
 verify_base_image() {
@@ -203,12 +224,11 @@ provision() {
   local hosts=(a)
   [[ "$requested_hosts" == 1 ]] || hosts=(a b c)
   verify_base_image
-  for tool in virsh virt-install qemu-img virt-customize genisoimage ssh ssh-keygen; do
+  for tool in virsh virt-install qemu-img virt-customize genisoimage ssh ssh-keygen uuidgen; do
     command -v "$tool" >/dev/null || { echo "required host tool is missing: $tool" >&2; exit 1; }
   done
   [[ -c /dev/kvm ]] || { echo "/dev/kvm is unavailable" >&2; exit 1; }
   [[ ! -e "$STATE" ]] || { echo "campaign marker already exists; use inventory or cleanup first" >&2; exit 1; }
-  define_network_and_pool
   for letter in a b c; do
     local domain disk seed hostkey ip user_pub
     domain="${EA_DOMAIN_PREFIX}${letter}"
@@ -222,19 +242,25 @@ provision() {
       echo "refusing preexisting domain $domain" >&2; exit 1;
     fi
   done
+  [[ ! -d "$EA_POOL_ROOT" || -z "$(find "$EA_POOL_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+    echo "refusing nonempty campaign directory without its ownership marker" >&2; exit 1;
+  }
+  local -A host_uuids=()
+  for letter in a b c; do
+    local uuid
+    uuid="$(uuidgen)"
+    [[ "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+      echo "uuidgen returned an invalid domain UUID" >&2; exit 1;
+    }
+    host_uuids[$letter]="$uuid"
+  done
   # qemu's confined worker account must be able to traverse the pool path;
   # private credentials and evidence stay in separate 0700/0600 files.
   install -d -m 0755 "$EA_POOL_ROOT"
   chmod 0755 "$EA_POOL_ROOT"
-  install -d -m 0700 "$EA_POOL_ROOT/credentials"
-  [[ ! -e "$SSH_KEY" ]] || { echo "refusing preexisting SSH client key" >&2; exit 1; }
-  ssh-keygen -q -t ed25519 -N '' -C "$EA_RUN_ID operator" -f "$SSH_KEY"
-  chmod 0600 "$SSH_KEY"
-  user_pub="$(cat "$SSH_KEY.pub")"
-  : >"$KNOWN_HOSTS"
-  chmod 0600 "$KNOWN_HOSTS"
+  local state_contents
   umask 077
-  cat >"$STATE" <<EOF
+  state_contents="$(cat <<EOF
 o3k-ea-qualification-owned-v1
 run=$EA_RUN_ID
 network=$EA_NETWORK
@@ -242,17 +268,27 @@ network_uuid=$EA_NETWORK_UUID
 pool=$EA_POOL
 pool_uuid=$EA_POOL_UUID
 EOF
-  chmod 0600 "$STATE"
-
+  )"
   for letter in a b c; do
     local domain disk seed uuid
     domain="${EA_DOMAIN_PREFIX}${letter}"
     disk="$EA_POOL_ROOT/${domain}.qcow2"
     seed="$EA_POOL_ROOT/${domain}-seed.iso"
-    uuid="$(uuidgen)"
-    printf 'host_%s=%s|%s|%s|%s\n' "$letter" "$domain" "$uuid" "$disk" "$seed" >>"$STATE"
+    uuid="${host_uuids[$letter]}"
+    state_contents+=$'\n'"host_${letter}=${domain}|${uuid}|${disk}|${seed}"
   done
+  printf '%s\n' "$state_contents" >"$STATE"
+  chmod 0600 "$STATE"
 
+  # Persist campaign ownership before the first libvirt network/pool mutation.
+  define_network_and_pool
+  install -d -m 0700 "$EA_POOL_ROOT/credentials"
+  [[ ! -e "$SSH_KEY" ]] || { echo "refusing preexisting SSH client key" >&2; exit 1; }
+  ssh-keygen -q -t ed25519 -N '' -C "$EA_RUN_ID operator" -f "$SSH_KEY"
+  chmod 0600 "$SSH_KEY"
+  user_pub="$(cat "$SSH_KEY.pub")"
+  : >"$KNOWN_HOSTS"
+  chmod 0600 "$KNOWN_HOSTS"
   for letter in "${hosts[@]}"; do
     local domain disk seed hostkey hostpub hostcfg userdata metadata uuid ram_mb
     domain="${EA_DOMAIN_PREFIX}${letter}"
@@ -324,7 +360,7 @@ EOF
 
 cleanup() {
   owned || { echo "refusing cleanup: campaign ownership marker is missing or mismatched" >&2; exit 1; }
-  verify_ids || { echo "refusing cleanup: network/pool UUID mismatch" >&2; exit 1; }
+  verify_cleanup_ids || { echo "refusing cleanup: network/pool ownership mismatch" >&2; exit 1; }
   for letter in a b c; do
     local record domain expected_uuid disk seed current_uuid sources
     record="$(sed -n "s/^host_${letter}=//p" "$STATE")"
