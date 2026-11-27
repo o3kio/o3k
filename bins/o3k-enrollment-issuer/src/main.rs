@@ -145,10 +145,18 @@ fn ensure_ca(key_path: &Path, cert_path: &Path) -> Result<(PKey<Private>, X509),
             .map_err(|_| "CA key write")?;
         let mut c = std::fs::OpenOptions::new();
         c.write(true).create_new(true).mode(0o644);
-        c.open(cert_path)
-            .map_err(|_| "CA cert create")?
-            .write_all(&cert_bytes)
-            .map_err(|_| "CA cert write")?;
+        let mut cert_file = match c.open(cert_path) {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = std::fs::remove_file(key_path);
+                return Err("CA cert create".into());
+            }
+        };
+        if cert_file.write_all(&cert_bytes).is_err() {
+            let _ = std::fs::remove_file(key_path);
+            let _ = std::fs::remove_file(cert_path);
+            return Err("CA cert write".into());
+        }
     }
     Ok((key, cert))
 }
@@ -160,6 +168,9 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
         || req.agent_epoch.is_empty()
     {
         return Err("incomplete request".into());
+    }
+    if !safe_component(&req.agent_id) || !safe_component(&req.agent_epoch) {
+        return Err("invalid enrollment identity".into());
     }
     let csr = X509Req::from_pem(&req.csr_pem).map_err(|_| "invalid CSR")?;
     let subject = csr.subject_name();
@@ -201,14 +212,10 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
     b.set_issuer_name(ca.subject_name())
         .map_err(|_| "cert issuer")?;
     b.set_pubkey(&pubkey).map_err(|_| "cert key")?;
-    let serial = openssl::bn::BigNum::from_u32(
-        (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos())
-            | 1,
-    )
-    .map_err(|_| "cert serial")?;
+    let mut serial_bytes = [0u8; 16];
+    openssl::rand::rand_bytes(&mut serial_bytes).map_err(|_| "cert serial")?;
+    serial_bytes[0] &= 0x7f;
+    let serial = openssl::bn::BigNum::from_slice(&serial_bytes).map_err(|_| "cert serial")?;
     let serial = serial.to_asn1_integer().map_err(|_| "cert serial")?;
     b.set_serial_number(&serial).map_err(|_| "cert serial")?;
     let san = X509Extension::new_nid(
@@ -255,6 +262,14 @@ fn issue(req: Request, key: &PKey<Private>, ca: &X509) -> Result<Response, Strin
         certificate_expires_at_unix_ms: expires,
         rotation_deadline_unix_ms: rotation,
     })
+}
+
+fn safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key = PathBuf::from(
@@ -343,5 +358,12 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         validate_issued_enrollment(&issued, now).unwrap();
+    }
+
+    #[test]
+    fn enrollment_components_reject_extension_injection() {
+        assert!(safe_component("agent-01.example"));
+        assert!(!safe_component("agent,URI:DNS:evil"));
+        assert!(!safe_component("epoch\nURI:DNS:evil"));
     }
 }
