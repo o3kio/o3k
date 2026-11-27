@@ -120,24 +120,6 @@ O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/down
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
 die() { printf 'O3K installer: %s\n' "$1" >&2; exit 1; }
-ensure_bundle_inspection_tools() {
-  APT_UPDATED=0
-  if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
-    printf 'installing binutils for authenticated bundle inspection\n'
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update || return 1
-    apt-get install -y binutils || return 1
-    APT_UPDATED=1
-  fi
-  command -v nm >/dev/null 2>&1 || {
-    printf 'O3K installer: nm (binutils) is required to inspect release executables\n' >&2
-    return 1
-  }
-  command -v readelf >/dev/null 2>&1 || {
-    printf 'O3K installer: readelf (binutils) is required to inspect release executables\n' >&2
-    return 1
-  }
-}
 step() { printf '✓ %s\n' "$1"; }
 
 # ---- PP.4 timing ledger -------------------------------------------------------
@@ -691,16 +673,13 @@ if internal.get("version") not in (sys.argv[3], "v" + sys.argv[3]):
 PY
 
 # ---- bundled integrity and preflight ------------------------------------------
-# The bundle's executable inspection uses nm/readelf from binutils. Fresh
-# Ubuntu 24.04 hosts may not have those tools. At this point the signed
-# release-digest manifest has authenticated the archive bytes, the archive
-# digest has matched, and extraction has rejected unsafe entries. Install only
-# the inspection dependency now; full bundle checksum and executable checks
-# still run before any bundled application code is executed.
-ensure_bundle_inspection_tools || die 'binutils installation failed before authenticated bundle inspection'
-bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
-  || die "release bundle verification failed for o3k-$VERSION_NO_V"
-step "O3K v$VERSION_NO_V verified"
+# First verify every extracted file against the authenticated archive's own
+# manifest without needing host inspection tools. The release archive and
+# provenance have already passed Sigstore verification above. The full check
+# runs after EA preflight and installation of the declared binutils package;
+# minimal Ubuntu cloud images do not include readelf/nm/strings by default.
+bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" --integrity-only \
+  || die "release bundle file integrity verification failed for o3k-$VERSION_NO_V"
 
 # The authenticated manifest selects the bounded EA installer explicitly.
 # Duplicate JSON keys and partial/conflicting authority selectors fail closed.
@@ -770,12 +749,23 @@ case "$ID:$VERSION_CODENAME" in
 esac
 if [ "$EA_INSTALL" = 1 ]; then
   [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || die 'Early Access supports Ubuntu 24.04 LTS only'
-  APT_PACKAGES="$APT_PACKAGES postgresql-16"
+  # Native Volume execution uses the bounded storage executor's LVM provider.
+  # The controller remains unprivileged; the dedicated storage service owns
+  # the narrow device-mapper capability boundary.
+  APT_PACKAGES="$APT_PACKAGES postgresql-16 lvm2"
 fi
 export DEBIAN_FRONTEND=noninteractive
-if [ "$APT_UPDATED" -eq 0 ]; then apt-get update; fi
+apt-get update
 # shellcheck disable=SC2086
 apt-get install -y $APT_PACKAGES
+
+# Inspect the authenticated executables only after installing the declared
+# binutils dependency. No O3K service or binary is installed or started before
+# the full checksum, glibc-floor, and publisher-disabled checks succeed.
+bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
+  || die "release bundle executable verification failed for o3k-$VERSION_NO_V"
+step "O3K v$VERSION_NO_V verified"
+
 systemctl enable --now libvirtd
 if [ "$EA_INSTALL" = 1 ]; then systemctl enable --now postgresql; fi
 step 'dependencies ready'

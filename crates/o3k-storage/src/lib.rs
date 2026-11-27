@@ -21,6 +21,44 @@ mod ceph;
 #[cfg(all(test, unix))]
 mod command_drain_tests;
 
+#[cfg(test)]
+mod command_allowlist_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn system_runner_rejects_non_lvm_programs_before_spawn() {
+        let runner = SystemLvmCommandRunner::default();
+        let result = runner
+            .run("sh", &["-c".to_owned(), "touch /tmp/o3k-escape".to_owned()])
+            .await;
+        assert!(matches!(result, Err(LvmCommandError::Failed)));
+    }
+
+    #[tokio::test]
+    async fn system_runner_rejects_path_prefixed_lvm_names() {
+        let runner = SystemLvmCommandRunner::default();
+        for program in ["/tmp/vgs", "./lvcreate", "../lvremove"] {
+            let result = runner.run(program, &[]).await;
+            assert!(matches!(result, Err(LvmCommandError::Failed)), "{program}");
+        }
+    }
+
+    #[tokio::test]
+    async fn system_runner_uses_trusted_absolute_path_for_allowed_name() {
+        let runner = SystemLvmCommandRunner::default();
+        // The command is allowed by name, but the process is always launched
+        // from /usr/sbin rather than resolved through PATH. An invalid option
+        // proves the real binary was reached without mutating any VG.
+        let result = runner
+            .run("vgs", &["--o3k-invalid-option".to_owned()])
+            .await;
+        assert!(
+            result.as_ref().is_ok_and(|output| output.status != 0),
+            "trusted vgs should spawn and reject the deliberately invalid option"
+        );
+    }
+}
+
 pub use ceph::{
     CephCommandError, CephCommandOutput, CephCommandRunner, CephRbdConfig, CephRbdStorageProvider,
     SystemCephCommandRunner,
@@ -374,9 +412,19 @@ struct LvmCommandTasks {
 #[derive(Debug, Default, Clone)]
 pub struct SystemLvmCommandRunner {
     owned: Arc<LvmCommandTasks>,
+    #[cfg(test)]
+    test_program: Option<String>,
 }
 
 impl SystemLvmCommandRunner {
+    #[cfg(test)]
+    fn for_test_program(program: &str) -> Self {
+        Self {
+            owned: Arc::new(LvmCommandTasks::default()),
+            test_program: Some(program.to_owned()),
+        }
+    }
+
     /// Close command admission and await every submitted subprocess. Commands
     /// are never aborted here: cancellation of their caller cannot make a
     /// still-running storage mutation disappear from the drain predicate.
@@ -424,8 +472,26 @@ impl LvmCommandRunner for SystemLvmCommandRunner {
         program: &str,
         args: &[String],
     ) -> Result<LvmCommandOutput, LvmCommandError> {
+        // The system runner is intended for the dedicated storage executor.
+        // Keep the executable surface closed even if a future provider call
+        // accidentally forwards an attacker-controlled program name.
+        let trusted_program = match program {
+            "vgs" => "/usr/sbin/vgs",
+            "lvs" => "/usr/sbin/lvs",
+            "lvcreate" => "/usr/sbin/lvcreate",
+            "lvremove" => "/usr/sbin/lvremove",
+            "lvchange" => "/usr/sbin/lvchange",
+            // Reject path-prefixed names as well as arbitrary executables. The
+            // fixed absolute paths below prevent PATH shadowing by the service
+            // environment or a writable working directory.
+            #[cfg(test)]
+            _ if self.test_program.as_deref() == Some(program) => program,
+            _ => return Err(LvmCommandError::Failed),
+        };
+        #[cfg(test)]
+        let trusted_program = self.test_program.as_deref().unwrap_or(trusted_program);
         use std::sync::atomic::Ordering;
-        let program = program.to_owned();
+        let program = trusted_program.to_owned();
         let args = args.to_vec();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         {

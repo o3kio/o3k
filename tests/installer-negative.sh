@@ -236,7 +236,7 @@ EOF
   cat >"$SRC_BUNDLE/packaging/verify-release-bundle.sh" <<'EOF'
 #!/usr/bin/env bash
 # TEST FIXTURE — records the invocation and exits with O3K_TEST_VERIFY_EXIT.
-printf 'verify-release-bundle %s\n' "$1" >>"${O3K_TEST_SCRIPT_LOG:?}"
+printf 'verify-release-bundle %s %s\n' "$1" "${2:-full}" >>"${O3K_TEST_SCRIPT_LOG:?}"
 exit "${O3K_TEST_VERIFY_EXIT:-0}"
 EOF
   cat >"$SRC_BUNDLE/packaging/preflight.sh" <<'EOF'
@@ -644,7 +644,7 @@ PY
   publish_tarball "$MATRIX/good.tar.gz"
   O3K_TEST_VERIFY_EXIT=1 \
     expect_abort "malformed bundle aborts at verify-release-bundle.sh" \
-    "release bundle verification failed" "$out" "$err"
+    "release bundle file integrity verification failed" "$out" "$err"
   assert_no_install_run "install never ran for a malformed bundle"
 
   # 7+8. unsafe extraction: "../" and absolute entries, matching hash.

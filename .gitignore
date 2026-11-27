@@ -33,3 +33,6 @@
 
 # python bytecode cache
 __pycache__/
+# Dedicated physical-host qualification inventory contains local UUIDs, paths,
+# SSH material locations, and mutable campaign state. Commit only the example.
+tests/ea-qualification/ea-config.env
