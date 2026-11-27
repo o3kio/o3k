@@ -647,6 +647,15 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .get_bootstrap_state(STATE_ID)
             .await
             .map_err(|_| BootstrapFailure::Internal)?;
+        // Validate durable admission metadata before consuming a grant or
+        // mutating the live agent/placement registries.
+        let (mut epochs, mut revoked) = match durable_record.as_ref() {
+            Some(record) => (
+                parse_agent_epochs(&record.enrolled_agent_epochs)?,
+                parse_revoked_agents(&record.revoked_agents)?,
+            ),
+            None => (BTreeMap::new(), BTreeMap::new()),
+        };
         let mut state = durable_record
             .clone()
             .map(state_from_record)
@@ -848,17 +857,9 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .record_agent(&request.agent_id, &fingerprint)
             .map_err(|_| BootstrapFailure::Conflict)?;
         let mut durable = state_record(&state)?;
-        let mut epochs: BTreeMap<String, String> = match durable_record.as_ref() {
-            Some(record) => parse_agent_epochs(&record.enrolled_agent_epochs)?,
-            None => BTreeMap::new(),
-        };
         epochs.insert(request.agent_id.clone(), request.agent_epoch.clone());
         durable.enrolled_agent_epochs =
             serde_json::to_string(&epochs).map_err(|_| BootstrapFailure::Internal)?;
-        let mut revoked: BTreeMap<String, bool> = match durable_record.as_ref() {
-            Some(record) => parse_revoked_agents(&record.revoked_agents)?,
-            None => BTreeMap::new(),
-        };
         revoked.remove(&request.agent_id);
         durable.revoked_agents =
             serde_json::to_string(&revoked).map_err(|_| BootstrapFailure::Internal)?;
