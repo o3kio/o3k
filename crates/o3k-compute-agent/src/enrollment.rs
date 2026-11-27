@@ -55,6 +55,8 @@ impl RootHelperEnrollmentSigner {
 
 #[derive(Serialize)]
 struct SignRequest<'a> {
+    grant_id: &'a str,
+    token: &'a [u8],
     agent_id: &'a str,
     agent_epoch: &'a str,
     csr_pem: &'a [u8],
@@ -63,11 +65,18 @@ struct SignRequest<'a> {
 impl EnrollmentSigner for RootHelperEnrollmentSigner {
     fn sign_csr(
         &self,
+        grant_id: &str,
+        token: &[u8],
         agent_id: &str,
         agent_epoch: &str,
         csr_pem: &[u8],
     ) -> Result<IssuedEnrollment, String> {
+        if !self.command.starts_with("/usr/libexec/o3k/") {
+            return Err("signer path is outside packaged directory".to_owned());
+        }
         let request = serde_json::to_vec(&SignRequest {
+            grant_id,
+            token,
             agent_id,
             agent_epoch,
             csr_pem,
@@ -87,9 +96,24 @@ impl EnrollmentSigner for RootHelperEnrollmentSigner {
             .ok_or_else(|| "signer stdin unavailable".to_owned())?
             .write_all(&request)
             .map_err(|_| "cannot send signer request".to_owned())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child
+            .try_wait()
+            .map_err(|_| "signer failed".to_owned())?
+            .is_none()
+        {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                return Err("signer timed out".to_owned());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         let output = child
             .wait_with_output()
             .map_err(|_| "signer failed".to_owned())?;
+        if output.stdout.len() > 1024 * 1024 {
+            return Err("signer response too large".to_owned());
+        }
         if !output.status.success() {
             return Err("signer rejected request".to_owned());
         }
@@ -100,6 +124,8 @@ impl EnrollmentSigner for RootHelperEnrollmentSigner {
 pub trait EnrollmentSigner: Send + Sync {
     fn sign_csr(
         &self,
+        grant_id: &str,
+        token: &[u8],
         agent_id: &str,
         agent_epoch: &str,
         csr_pem: &[u8],
@@ -157,7 +183,13 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
         validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
         let issued = self
             .signer
-            .sign_csr(&grant.agent_id, &grant.agent_epoch, csr_pem)
+            .sign_csr(
+                grant_id,
+                token,
+                &grant.agent_id,
+                &grant.agent_epoch,
+                csr_pem,
+            )
             .map_err(|_| EnrollmentIssueError::Signer)?;
         if issued.agent_id != grant.agent_id
             || issued.agent_epoch != grant.agent_epoch
@@ -209,7 +241,14 @@ mod tests {
 
     struct Signer;
     impl EnrollmentSigner for Signer {
-        fn sign_csr(&self, agent_id: &str, _: &str, _: &[u8]) -> Result<IssuedEnrollment, String> {
+        fn sign_csr(
+            &self,
+            _: &str,
+            _: &[u8],
+            agent_id: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<IssuedEnrollment, String> {
             Ok(IssuedEnrollment {
                 agent_id: agent_id.into(),
                 agent_epoch: "epoch-1".into(),
