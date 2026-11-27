@@ -7,6 +7,7 @@ use o3k_storage::{
     LvmConfig, LvmStorageProvider, StorageAttachmentRequest, StorageJournal, StorageProvider,
     StorageVolumeRequest,
 };
+use openssl::x509::X509;
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -17,6 +18,7 @@ struct Executor {
     agent_id: String,
     agent_epoch: u64,
     provider: Arc<LvmStorageProvider>,
+    controller_identity: String,
 }
 
 #[tonic::async_trait]
@@ -25,6 +27,27 @@ impl StorageExecutor for Executor {
         &self,
         request: Request<StorageCommand>,
     ) -> Result<Response<ExecuteResponse>, Status> {
+        let peer_certs = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("controller client certificate missing"))?;
+        let peer = peer_certs
+            .first()
+            .ok_or_else(|| Status::unauthenticated("controller client certificate missing"))?;
+        let cert = X509::from_der(peer.as_ref())
+            .map_err(|_| Status::unauthenticated("invalid controller client certificate"))?;
+        let identity_ok = cert
+            .subject_alt_names()
+            .map(|names| {
+                names
+                    .iter()
+                    .any(|name| name.uri() == Some(self.controller_identity.as_str()))
+            })
+            .unwrap_or(false);
+        if !identity_ok {
+            return Err(Status::permission_denied(
+                "controller certificate identity mismatch",
+            ));
+        }
         let command = request.into_inner();
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.envelope_json)
             .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
@@ -197,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             thin_pool: env::var("O3K_STORAGE_THIN_POOL")?,
             provider_namespace: env::var("O3K_STORAGE_NAMESPACE").unwrap_or_else(|_| "o3k".into()),
         })?),
+        controller_identity: env::var("O3K_STORAGE_CONTROLLER_IDENTITY")?,
     };
     tracing_subscriber::fmt::init();
     let cert = std::fs::read(env::var("O3K_STORAGE_TLS_CERT")?)?;
