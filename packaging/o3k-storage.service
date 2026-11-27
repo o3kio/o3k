@@ -8,6 +8,8 @@ Type=simple
 User=root
 Group=root
 EnvironmentFile=/etc/o3k/o3k-storage.env
+# O3K_STORAGE_CONTROLLER_IDENTITY must be the exact URI SAN of the controller
+# certificate; CA membership alone is not sufficient authorization.
 ExecStart=/usr/local/bin/o3k-storage-bin
 Restart=on-failure
 NoNewPrivileges=false
