@@ -683,14 +683,16 @@ impl BootstrapWorkflow for BootstrapAdapter {
             if old != &fingerprint {
                 return Err(BootstrapFailure::Conflict);
             }
-            let certificate_der =
-                o3k_compute_agent::certificate_der(request.certificate.as_bytes())
-                    .map_err(|_| BootstrapFailure::Unauthorized)?;
             self.agents
-                .authorize_agent(o3k_compute_agent::AuthorizedAgent::new(
+                .authorize_agent_fingerprint_with_epoch(
                     &request.agent_id,
-                    &certificate_der,
-                ))
+                    Sha256::digest(
+                        &o3k_compute_agent::certificate_der(request.certificate.as_bytes())
+                            .map_err(|_| BootstrapFailure::Unauthorized)?,
+                    )
+                    .into(),
+                    &request.agent_epoch,
+                )
                 .await
                 .map_err(|_| BootstrapFailure::Internal)?;
             // Re-project the durable enrolled identity into the live agent
@@ -863,7 +865,11 @@ impl BootstrapWorkflow for BootstrapAdapter {
             fingerprint_bytes[index] = (high << 4) | low;
         }
         self.agents
-            .authorize_agent_fingerprint(&request.agent_id, fingerprint_bytes)
+            .authorize_agent_fingerprint_with_epoch(
+                &request.agent_id,
+                fingerprint_bytes,
+                &request.agent_epoch,
+            )
             .await
             .map_err(|_| BootstrapFailure::Internal)?;
         self.readiness.set_bootstrap_ready(state.is_ready());
