@@ -155,6 +155,7 @@ bash "$ROOT_DIR/packaging/install.sh" \
 grep -Fqx "o3k-installed-v1 prefix=$WORK_DIR/prefix" "$WORK_DIR/prefix/share/o3k/.o3k-installed"
 grep -Fqx 'bin/o3kd' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
 grep -Fqx 'bin/o3k' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+! grep -Fqx 'bin/o3k-enrollment-issuer' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
 [[ -x "$WORK_DIR/prefix/bin/o3k" ]]
 # Repo-tree installs have no release bundle: the bundle-root provenance files
 # (manifest.json, SHA256SUMS) are bundle-only and must not be invented here.
@@ -168,6 +169,26 @@ if grep -q '^O3K_PROVIDER=' "$WORK_DIR/config/o3kd.env"; then
   echo "fake-profile env unexpectedly overrides O3K_PROVIDER" >&2
   exit 1
 fi
+
+# EA enrollment artifacts are valid ownership entries and uninstall removes
+# only the files named by the bounded ownership manifest.
+EA_LEDGER_PREFIX="$WORK_DIR/ea-ledger-prefix"
+mkdir -p "$EA_LEDGER_PREFIX/bin" "$EA_LEDGER_PREFIX/share/o3k"
+printf 'issuer binary\n' >"$EA_LEDGER_PREFIX/bin/o3k-enrollment-issuer"
+printf 'issuer service\n' >"$EA_LEDGER_PREFIX/share/o3k/o3k-enrollment-issuer@.service"
+printf 'issuer socket\n' >"$EA_LEDGER_PREFIX/share/o3k/o3k-enrollment-issuer.socket"
+cat >"$EA_LEDGER_PREFIX/share/o3k/.o3k-installed" <<EOF
+o3k-installed-v1 prefix=$EA_LEDGER_PREFIX
+bin/o3k-enrollment-issuer
+share/o3k/o3k-enrollment-issuer@.service
+share/o3k/o3k-enrollment-issuer.socket
+EOF
+bash "$ROOT_DIR/packaging/uninstall.sh" \
+  --prefix "$EA_LEDGER_PREFIX" --data-dir "$WORK_DIR/ea-ledger-data" \
+  --config-dir "$WORK_DIR/ea-ledger-config" --log-dir "$WORK_DIR/ea-ledger-log"
+[[ ! -e "$EA_LEDGER_PREFIX/bin/o3k-enrollment-issuer" ]]
+[[ ! -e "$EA_LEDGER_PREFIX/share/o3k/o3k-enrollment-issuer@.service" ]]
+[[ ! -e "$EA_LEDGER_PREFIX/share/o3k/o3k-enrollment-issuer.socket" ]]
 
 # An operator-provided backup trust document is validated fail-closed before
 # any installation state is created. The installer never writes the document.

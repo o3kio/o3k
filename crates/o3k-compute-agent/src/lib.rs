@@ -52,6 +52,7 @@ use uuid::Uuid;
 
 mod artifact;
 mod config_drive;
+mod enrollment;
 mod events;
 mod image;
 mod provider;
@@ -64,6 +65,13 @@ pub use artifact::{
 pub use config_drive::{
     ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
     config_drive_materialization_request, config_drive_requested,
+};
+pub use enrollment::{AsyncDurableEnrollmentGrants, DurableComputeEnrollmentService};
+pub use enrollment::{
+    ComputeEnrollmentService, DurableEnrollmentIssue, EnrollmentGrantBinding, EnrollmentIssueError,
+    EnrollmentIssuer, EnrollmentSigner, IssuedEnrollment, RootHelperEnrollmentSigner,
+    UnixSocketEnrollmentSigner, certificate_fingerprint_sha256, validate_issued_enrollment,
+    validate_issuer_peer_uid,
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
@@ -140,6 +148,7 @@ pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
     epoch_gates: Arc<RwLock<HashMap<String, Arc<RwLock<()>>>>>,
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
+    authorized_agent_epochs: Arc<RwLock<HashMap<String, String>>>,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     artifact_transfer_slots: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
     events: broadcast::Sender<ProviderAgentEvent>,
@@ -177,6 +186,7 @@ impl Default for NodeRegistry {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             epoch_gates: Arc::new(RwLock::new(HashMap::new())),
             authorized_agents: Arc::new(RwLock::new(HashMap::new())),
+            authorized_agent_epochs: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
             events,
@@ -991,6 +1001,44 @@ impl NodeRegistry {
         Ok(())
     }
 
+    /// Rehydrates a canonical joined identity from durable bootstrap state.
+    /// The value is already a SHA-256 certificate fingerprint; accepting it
+    /// directly avoids requiring private certificate material at restart.
+    pub async fn authorize_agent_fingerprint(
+        &self,
+        agent_id: &str,
+        certificate_fingerprint: [u8; 32],
+    ) -> Result<(), AgentError> {
+        if agent_id.trim().is_empty() || agent_id.len() > MAX_AGENT_ID {
+            return Err(AgentError::InvalidConfiguration(
+                "authorized agent identity is invalid",
+            ));
+        }
+        self.authorized_agents
+            .write()
+            .await
+            .insert(agent_id.to_owned(), certificate_fingerprint);
+        Ok(())
+    }
+
+    /// Rehydrates an identity together with the durable epoch that currently
+    /// owns it.  Epochs are checked before registration, so a stale host
+    /// certificate cannot regain admission after replacement.
+    pub async fn authorize_agent_fingerprint_with_epoch(
+        &self,
+        agent_id: &str,
+        certificate_fingerprint: [u8; 32],
+        epoch: &str,
+    ) -> Result<(), AgentError> {
+        self.authorize_agent_fingerprint(agent_id, certificate_fingerprint)
+            .await?;
+        self.authorized_agent_epochs
+            .write()
+            .await
+            .insert(agent_id.to_owned(), epoch.to_owned());
+        Ok(())
+    }
+
     async fn is_authorized(&self, agent_id: &str, certificate: &[u8]) -> bool {
         let digest = Sha256::digest(certificate);
         self.authorized_agents
@@ -998,6 +1046,39 @@ impl NodeRegistry {
             .await
             .get(agent_id)
             .is_some_and(|expected| expected.as_slice() == digest.as_slice())
+    }
+
+    async fn is_authorized_for_epoch(
+        &self,
+        agent_id: &str,
+        certificate: &[u8],
+        epoch: &str,
+    ) -> bool {
+        if !self.is_authorized(agent_id, certificate).await {
+            return false;
+        }
+        self.authorized_agent_epochs
+            .read()
+            .await
+            .get(agent_id)
+            .is_none_or(|expected| expected == epoch)
+    }
+
+    /// Revokes a joined identity from live admission and fences its active
+    /// stream. The public host-removal workflow owns when this is invoked;
+    /// this primitive does not create a new removal authority.
+    pub async fn revoke_agent_identity(&self, agent_id: &str) {
+        self.authorized_agents.write().await.remove(agent_id);
+        self.authorized_agent_epochs.write().await.remove(agent_id);
+        self.connections.write().await.remove(agent_id);
+    }
+
+    async fn is_current_connection(&self, agent_id: &str, epoch: &str) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(agent_id)
+            .is_some_and(|connection| connection.epoch == epoch)
     }
 
     pub async fn register(
@@ -2255,6 +2336,83 @@ fn peer_matches_agent(certificate: &[u8], agent_id: &str) -> bool {
     certificate_has_uri_san(certificate, expected.as_bytes())
 }
 
+/// Validates a self-signed enrollment CSR's exact identity SAN contract.
+/// There must be one SAN extension containing exactly the agent and epoch URI
+/// names, with no unrelated or duplicate GeneralNames.
+pub fn validate_csr_uri_sans(
+    csr: &[u8],
+    expected_agent_uri: &str,
+    expected_epoch_uri: &str,
+) -> Result<(), &'static str> {
+    let request = openssl::x509::X509Req::from_pem(csr).map_err(|_| "malformed CSR")?;
+    let key = request.public_key().map_err(|_| "CSR key unavailable")?;
+    if !request.verify(&key).unwrap_or(false) {
+        return Err("CSR signature invalid");
+    }
+    const SAN_OID: &[u8] = &[0x55, 0x1d, 0x11];
+    let extensions = request
+        .extensions()
+        .map_err(|_| "CSR extensions unavailable")?;
+    let mut san_count = 0;
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    for extension in extensions.iter() {
+        let encoded = extension.to_der().map_err(|_| "invalid CSR extension")?;
+        let Some((0x30, mut body, rest)) = der_tlv(&encoded) else {
+            return Err("invalid CSR extension");
+        };
+        if !rest.is_empty() {
+            return Err("invalid CSR extension");
+        }
+        let Some((0x06, oid, remaining)) = der_tlv(body) else {
+            return Err("invalid CSR extension");
+        };
+        body = remaining;
+        if oid != SAN_OID {
+            continue;
+        }
+        san_count += 1;
+        if san_count != 1 {
+            return Err("duplicate CSR SAN extension");
+        }
+        if let Some((0x01, _, remaining)) = der_tlv(body) {
+            body = remaining;
+        }
+        let Some((0x04, value, remaining)) = der_tlv(body) else {
+            return Err("invalid CSR SAN extension");
+        };
+        if !remaining.is_empty() {
+            return Err("invalid CSR SAN extension");
+        }
+        let Some((0x30, mut general_names, rest)) = der_tlv(value) else {
+            return Err("invalid CSR SAN extension");
+        };
+        if !rest.is_empty() {
+            return Err("invalid CSR SAN extension");
+        }
+        while !general_names.is_empty() {
+            let Some((tag, name, remaining)) = der_tlv(general_names) else {
+                return Err("invalid CSR SAN name");
+            };
+            if tag != 0x86 {
+                return Err("CSR SAN contains non-URI name");
+            }
+            names.push(name.to_vec());
+            general_names = remaining;
+        }
+    }
+    if san_count != 1 || names.len() != 2 {
+        return Err("CSR SAN identity is not exact");
+    }
+    let agent = expected_agent_uri.as_bytes();
+    let epoch = expected_epoch_uri.as_bytes();
+    if names.iter().filter(|name| name.as_slice() == agent).count() != 1
+        || names.iter().filter(|name| name.as_slice() == epoch).count() != 1
+    {
+        return Err("CSR SAN identity does not match");
+    }
+    Ok(())
+}
+
 /// Finds the URI GeneralName in the Subject Alternative Name extension.
 /// TLS has already authenticated the chain and validity period; the strict
 /// structural parser performs the protocol's additional identity binding
@@ -2451,7 +2609,11 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         if !peer_matches_agent(certificate.as_ref(), &register.agent_id)
             || !self
                 .registry
-                .is_authorized(&register.agent_id, certificate.as_ref())
+                .is_authorized_for_epoch(
+                    &register.agent_id,
+                    certificate.as_ref(),
+                    &register.agent_epoch,
+                )
                 .await
         {
             return Err(Status::permission_denied(
@@ -2473,6 +2635,12 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         let agent_epoch = register.agent_epoch;
         self.registry.spawn_owned_task(async move {
             while let Ok(Some(message)) = inbound.get_mut().message().await {
+                if !registry
+                    .is_current_connection(&agent_id, &agent_epoch)
+                    .await
+                {
+                    break;
+                }
                 match message.body {
                     Some(proto::control_request::Body::Heartbeat(heartbeat)) => {
                         if !matches_stream_identity(
@@ -2724,7 +2892,90 @@ pub struct ControlPlaneServer {
     pub authorized_agents: Vec<AuthorizedAgent>,
 }
 
+#[derive(Clone)]
+pub struct EnrollmentServiceHandle {
+    inner: std::sync::Arc<dyn proto::compute_enrollment_server::ComputeEnrollment>,
+}
+
+impl EnrollmentServiceHandle {
+    pub fn new<S, R>(service: DurableComputeEnrollmentService<S, R>) -> Self
+    where
+        S: EnrollmentSigner + 'static,
+        R: AsyncDurableEnrollmentGrants + 'static,
+    {
+        Self {
+            inner: std::sync::Arc::new(service),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl proto::compute_enrollment_server::ComputeEnrollment for EnrollmentServiceHandle {
+    async fn enroll(
+        &self,
+        request: tonic::Request<proto::EnrollRequest>,
+    ) -> Result<tonic::Response<proto::EnrollResponse>, tonic::Status> {
+        self.inner.enroll(request).await
+    }
+    async fn rotate_certificate(
+        &self,
+        request: tonic::Request<proto::RotateCertificateRequest>,
+    ) -> Result<tonic::Response<proto::RotateCertificateResponse>, tonic::Status> {
+        self.inner.rotate_certificate(request).await
+    }
+}
+
 impl ControlPlaneServer {
+    /// Serve enrollment on a loopback/server-auth TLS listener.  This endpoint
+    /// is intended to be reached through an authenticated SSH tunnel before a
+    /// compute host has a client certificate; it deliberately does not request
+    /// a client certificate.
+    pub async fn serve_enrollment_listener(
+        listener: tokio::net::TcpListener,
+        tls: ControlPlaneTls,
+        service: EnrollmentServiceHandle,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), AgentError> {
+        let bound = listener.local_addr().map_err(|_| {
+            AgentError::InvalidConfiguration("enrollment listener address unavailable")
+        })?;
+        if !bound.ip().is_loopback() {
+            return Err(AgentError::InvalidConfiguration(
+                "enrollment listener must bind to loopback",
+            ));
+        }
+        install_crypto_provider();
+        let cert = pem_certificates(
+            &fs::read(&tls.server_certificate).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let key = pem_private_key(
+            &fs::read(&tls.server_private_key).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let config = ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| AgentError::TlsMaterial)?
+        .with_no_client_auth()
+        .with_single_cert(cert, key)
+        .map_err(|_| AgentError::TlsMaterial)?;
+        let acceptor = TlsAcceptor::from(std::sync::Arc::new(config));
+        let incoming = TcpListenerStream::new(listener).then(move |connection| {
+            let acceptor = acceptor.clone();
+            async move {
+                match connection {
+                    Ok(stream) => acceptor.accept(stream).await.map_err(io::Error::other),
+                    Err(error) => Err(error),
+                }
+            }
+        });
+        Server::builder()
+            .add_service(proto::compute_enrollment_server::ComputeEnrollmentServer::new(service))
+            .serve_with_incoming_shutdown(incoming, shutdown)
+            .await
+            .map_err(AgentError::Transport)
+    }
+
     pub async fn serve(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -2798,7 +3049,7 @@ impl ControlPlaneServer {
             )
             .serve_with_incoming_shutdown(incoming, shutdown)
             .await
-            .map_err(AgentError::Transport)
+            .map_err(|_| AgentError::InvalidConfiguration("control plane failed"))
     }
 }
 
@@ -5023,6 +5274,35 @@ mod tests {
         let node = registry.snapshot("node").await.ok_or("node retained")?;
         assert_eq!(node.availability, Availability::Unavailable);
         assert_eq!(node.capabilities.architecture, "x86_64");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_epoch_authorization_rejects_stale_epoch_and_revocation()
+    -> Result<(), AgentError> {
+        let registry = NodeRegistry::default();
+        let certificate = b"test-certificate";
+        let fingerprint: [u8; 32] = Sha256::digest(certificate).into();
+        registry
+            .authorize_agent_fingerprint_with_epoch("node", fingerprint, "epoch-2")
+            .await?;
+        assert!(
+            registry
+                .is_authorized_for_epoch("node", certificate, "epoch-2")
+                .await
+        );
+        assert!(
+            !registry
+                .is_authorized_for_epoch("node", certificate, "epoch-1")
+                .await
+        );
+
+        registry.revoke_agent_identity("node").await;
+        assert!(
+            !registry
+                .is_authorized_for_epoch("node", certificate, "epoch-2")
+                .await
+        );
         Ok(())
     }
 

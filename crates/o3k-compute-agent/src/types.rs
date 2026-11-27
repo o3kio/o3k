@@ -11,9 +11,130 @@ use thiserror::Error;
 
 use o3k_provider_contract::compute_proto as proto;
 
+use openssl::{
+    ec::EcKey,
+    nid::Nid,
+    pkey::PKey,
+    x509::{X509Extension, X509NameBuilder, X509Req},
+};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 pub(crate) const MAX_HOST_LABEL: usize = 255;
+
+/// Locally generated enrollment identity. Private key bytes are intentionally
+/// not exposed or serializable; only the CSR is sent to the controller.
+pub struct EnrollmentIdentity {
+    agent_id: String,
+    agent_epoch: String,
+    private_key_pem: Vec<u8>,
+    csr_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for EnrollmentIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollmentIdentity")
+            .field("agent_id", &self.agent_id)
+            .field("agent_epoch", &self.agent_epoch)
+            .field("private_key_pem", &"<redacted>")
+            .field("csr_pem", &"<redacted>")
+            .finish()
+    }
+}
+
+impl EnrollmentIdentity {
+    pub fn generate(agent_id: &str, agent_epoch: &str) -> Result<Self, AgentError> {
+        if !valid_enrollment_component(agent_id) || !valid_enrollment_component(agent_epoch) {
+            return Err(AgentError::InvalidConfiguration(
+                "invalid enrollment identity",
+            ));
+        }
+        let group = openssl::ec::EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
+            .map_err(|_| AgentError::TlsMaterial)?;
+        let key = EcKey::generate(&group).map_err(|_| AgentError::TlsMaterial)?;
+        let pkey = PKey::from_ec_key(key).map_err(|_| AgentError::TlsMaterial)?;
+        let mut name = X509NameBuilder::new().map_err(|_| AgentError::TlsMaterial)?;
+        name.append_entry_by_text("CN", agent_id)
+            .map_err(|_| AgentError::TlsMaterial)?;
+        let name = name.build();
+        let mut req = X509Req::builder().map_err(|_| AgentError::TlsMaterial)?;
+        req.set_subject_name(&name)
+            .map_err(|_| AgentError::TlsMaterial)?;
+        req.set_pubkey(&pkey).map_err(|_| AgentError::TlsMaterial)?;
+        #[allow(deprecated)]
+        let san = X509Extension::new_nid(
+            None,
+            None,
+            Nid::SUBJECT_ALT_NAME,
+            &format!(
+                "URI:urn:o3k:compute:agent:{agent_id},URI:urn:o3k:compute:epoch:{agent_epoch}"
+            ),
+        )
+        .map_err(|_| AgentError::TlsMaterial)?;
+        let mut extensions = openssl::stack::Stack::new().map_err(|_| AgentError::TlsMaterial)?;
+        extensions.push(san).map_err(|_| AgentError::TlsMaterial)?;
+        req.add_extensions(&extensions)
+            .map_err(|_| AgentError::TlsMaterial)?;
+        req.sign(&pkey, openssl::hash::MessageDigest::sha256())
+            .map_err(|_| AgentError::TlsMaterial)?;
+        Ok(Self {
+            agent_id: agent_id.to_owned(),
+            agent_epoch: agent_epoch.to_owned(),
+            private_key_pem: pkey
+                .private_key_to_pem_pkcs8()
+                .map_err(|_| AgentError::TlsMaterial)?,
+            csr_pem: req.build().to_pem().map_err(|_| AgentError::TlsMaterial)?,
+        })
+    }
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+    pub fn agent_epoch(&self) -> &str {
+        &self.agent_epoch
+    }
+    pub fn csr_pem(&self) -> &[u8] {
+        &self.csr_pem
+    }
+    pub fn write_private_key(&self, path: &std::path::Path) -> Result<(), AgentError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let parent = path.parent().ok_or(AgentError::InvalidConfiguration(
+            "private-key path has no parent",
+        ))?;
+        std::fs::create_dir_all(parent).map_err(AgentError::IdentityStore)?;
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("key"),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        use std::io::Write;
+        let result = (|| {
+            let mut file = options.open(&tmp).map_err(AgentError::IdentityStore)?;
+            file.write_all(&self.private_key_pem)
+                .map_err(AgentError::IdentityStore)?;
+            file.sync_all().map_err(AgentError::IdentityStore)?;
+            std::fs::hard_link(&tmp, path).map_err(AgentError::IdentityStore)?;
+            std::fs::remove_file(&tmp).map_err(AgentError::IdentityStore)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+}
+
+impl Drop for EnrollmentIdentity {
+    fn drop(&mut self) {
+        self.private_key_pem.zeroize();
+    }
+}
+
+fn valid_enrollment_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
 
 #[derive(Debug, Error)]
 pub enum AgentError {

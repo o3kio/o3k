@@ -22,6 +22,19 @@ use uuid::Uuid;
 
 struct NativeAttachmentWorkflowAdapter(Arc<dyn o3k_api::NativeAttachmentWorkflow>);
 
+fn decode_certificate_fingerprint(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)? as u8;
+        let low = (pair[1] as char).to_digit(16)? as u8;
+        out[index] = (high << 4) | low;
+    }
+    Some(out)
+}
+
 #[async_trait::async_trait]
 impl o3k_native_api::resource::VolumeAttachmentWorkflow for NativeAttachmentWorkflowAdapter {
     async fn attach(&self, attachment_id: Uuid) -> Result<(), String> {
@@ -1230,6 +1243,40 @@ pub async fn build_composition_with_guard(
             controller_id.clone(),
             controller_epoch.clone(),
         );
+    // Rehydrate the live mTLS admission map from canonical joined identities
+    // before exposing the control-plane listener. The bootstrap state stores
+    // only certificate fingerprints, so no private or certificate material is
+    // loaded at restart and environment configuration cannot override it.
+    if let Some(bootstrap) = store.get_bootstrap_state("default").await? {
+        let enrolled: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&bootstrap.enrolled_agents).unwrap_or_default();
+        let epochs: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&bootstrap.enrolled_agent_epochs).unwrap_or_default();
+        let revoked: std::collections::BTreeMap<String, bool> =
+            serde_json::from_str(&bootstrap.revoked_agents).unwrap_or_default();
+        for (agent_id, fingerprint) in enrolled {
+            if revoked.get(&agent_id).copied().unwrap_or(false) {
+                tracing::info!(agent_id = %agent_id, "not rehydrating revoked compute identity");
+                continue;
+            }
+            let Some(bytes) = decode_certificate_fingerprint(&fingerprint) else {
+                tracing::warn!(agent_id = %agent_id, "ignoring malformed durable compute certificate fingerprint");
+                continue;
+            };
+            if let Some(epoch) = epochs.get(&agent_id) {
+                registry
+                    .authorize_agent_fingerprint_with_epoch(&agent_id, bytes, epoch)
+                    .await?;
+            } else {
+                // Pre-migration records have no epoch metadata. Preserve
+                // compatibility for those records until the next join writes
+                // the additive metadata.
+                registry
+                    .authorize_agent_fingerprint(&agent_id, bytes)
+                    .await?;
+            }
+        }
+    }
     // The console-log consumer keeps its own durable liveness handle: the
     // `store` arc itself is moved into the compute service below.
     let console_store: Arc<dyn o3k_store::DurableStore> = store.clone();
@@ -2190,6 +2237,68 @@ pub async fn build_composition_with_guard(
             );
             None
         }
+    };
+    let _enrollment_task = match (
+        std::env::var("O3K_ENROLLMENT_LISTEN_ADDR").ok(),
+        config.compute_server_certificate.clone(),
+        config.compute_server_private_key.clone(),
+        config.compute_client_ca.clone(),
+        std::env::var_os("O3K_ENROLLMENT_SIGNER"),
+    ) {
+        (
+            Some(address),
+            Some(server_certificate),
+            Some(server_private_key),
+            Some(client_ca_certificate),
+            Some(signer_path),
+        ) => {
+            let address: std::net::SocketAddr = match address.parse() {
+                Ok(value) => value,
+                Err(_) => {
+                    tracing::error!("invalid O3K_ENROLLMENT_LISTEN_ADDR");
+                    return Err("invalid enrollment listener address".into());
+                }
+            };
+            if !address.ip().is_loopback() {
+                tracing::error!(%address, "enrollment listener must be loopback-only");
+                return Err("enrollment listener must bind to loopback".into());
+            }
+            let service = o3k_compute_agent::EnrollmentServiceHandle::new(
+                o3k_compute_agent::DurableComputeEnrollmentService::new(
+                    o3k_compute_agent::EnrollmentIssuer::new(
+                        Vec::new(),
+                        o3k_compute_agent::UnixSocketEnrollmentSigner::new(signer_path),
+                    ),
+                    crate::native_adapters::StoreEnrollmentGrants(store.clone()),
+                ),
+            );
+            let tls = o3k_compute_agent::ControlPlaneTls {
+                server_certificate,
+                server_private_key,
+                client_ca_certificate,
+            };
+            Some(tokio::spawn(async move {
+                let listener = match tokio::net::TcpListener::bind(address).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!(%error, "enrollment listener bind failed");
+                        return;
+                    }
+                };
+                if let Err(error) =
+                    o3k_compute_agent::ControlPlaneServer::serve_enrollment_listener(
+                        listener,
+                        tls,
+                        service,
+                        control_shutdown_signal(),
+                    )
+                    .await
+                {
+                    tracing::error!(%error, "enrollment listener stopped");
+                }
+            }))
+        }
+        _ => None,
     };
     let inspect_probe_task = agent_inspect_probe_from_env(inspect_compute_service);
     let fabric_recovery_task = fabric_reconciler.as_ref().map(|reconciler| {

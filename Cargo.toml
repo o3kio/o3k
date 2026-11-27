@@ -4,6 +4,7 @@ members = [
     "bins/o3k",
     "bins/o3k-compute",
     "bins/o3k-network",
+    "bins/o3k-enrollment-issuer",
     "crates/o3k-api",
     "crates/o3k-config",
     "crates/o3k-domain",
@@ -73,6 +74,7 @@ hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "migrate", "chrono", "uuid"] }
 thiserror = "2"
+tempfile = "3"
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["net"] }

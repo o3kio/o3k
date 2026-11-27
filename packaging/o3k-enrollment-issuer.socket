@@ -1,0 +1,13 @@
+[Unit]
+Description=O3K Early Access enrollment issuer socket
+
+[Socket]
+ListenStream=/run/o3k/enrollment-issuer.sock
+Accept=yes
+SocketUser=o3k
+SocketGroup=o3k
+SocketMode=0600
+DirectoryMode=0750
+
+[Install]
+WantedBy=sockets.target

@@ -120,6 +120,12 @@ pub struct BootstrapStateRecord {
     pub cloud_identity_id: String,
     pub cloud_profile_id: String,
     pub enrolled_agents: String,
+    /// JSON map of agent id to the currently admitted epoch. Kept separate
+    /// from the legacy fingerprint projection for backward-compatible reads.
+    pub enrolled_agent_epochs: String,
+    /// JSON set/map of revoked agent ids. Revocation is durable and
+    /// fail-closed during restart rehydration.
+    pub revoked_agents: String,
     pub updated_at: String,
 }
 
@@ -127,10 +133,31 @@ pub struct BootstrapStateRecord {
 pub struct EnrollmentGrantRecord {
     pub grant_id: String,
     pub agent_id: String,
+    pub agent_epoch: String,
     pub token_digest: String,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
     pub used_at_unix_ms: Option<u64>,
+}
+
+/// Public result of one successful grant-bound certificate issuance. The
+/// target private key is never persisted; the certificate chain is public and
+/// is retained so an interrupted response can be replayed exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentResultRecord {
+    pub grant_id: String,
+    pub agent_id: String,
+    pub agent_epoch: String,
+    pub token_digest: String,
+    pub csr_sha256: String,
+    pub certificate_fingerprint_sha256: String,
+    pub client_certificate_chain_pem: String,
+    pub ca_certificate_pem: String,
+    pub ca_fingerprint_sha256: String,
+    pub certificate_expires_at_unix_ms: u64,
+    pub rotation_deadline_unix_ms: u64,
+    pub issued_at_unix_ms: u64,
+    pub registered_at_unix_ms: Option<u64>,
 }
 
 impl BuildingBlockRecord {

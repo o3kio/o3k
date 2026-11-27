@@ -1820,6 +1820,8 @@ dependencies = [
  "hex",
  "hpke",
  "jsonschema",
+ "o3k-compute-agent",
+ "o3k-provider-contract",
  "o3k-store",
  "openssl",
  "ring",
@@ -1831,6 +1833,7 @@ dependencies = [
  "sqlx",
  "tar",
  "tokio",
+ "tonic",
  "uuid",
  "zeroize",
 ]
@@ -1946,11 +1949,14 @@ dependencies = [
  "o3k-provider",
  "o3k-provider-contract",
  "o3k-store",
+ "openssl",
  "prost",
+ "rustix 0.38.44",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -1959,6 +1965,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2059,6 +2066,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "o3k-enrollment-issuer"
+version = "0.4.1-rc.1"
+dependencies = [
+ "hex",
+ "o3k-compute-agent",
+ "openssl",
+ "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -248,7 +248,7 @@ pub const REPOSITORY_FAMILIES: &[RepositoryFamily] = &[
     RepositoryFamily {
         repository_id: "bootstrap",
         state_family: "bootstrap_enrollment_and_revocation",
-        tables: &["bootstrap_state", "enrollment_grants"],
+        tables: &["bootstrap_state", "enrollment_grants", "enrollment_results"],
     },
     RepositoryFamily {
         repository_id: "canonical_network",
@@ -4187,7 +4187,7 @@ mod tests {
             assert_eq!(postgres_tables, family.tables.to_vec());
             total_tables += tables.len();
         }
-        assert_eq!(total_tables, 77);
+        assert_eq!(total_tables, 78);
 
         let release = inventory
             .iter()

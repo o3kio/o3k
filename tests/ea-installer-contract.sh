@@ -73,13 +73,35 @@ docker = (root / "deployments/docker/Dockerfile.o3kd").read_text()
 docker_version = re.search(r'^ARG VERSION="([^"]+)"$', docker, re.M).group(1)
 docker_local = (root / "deployments/docker/Dockerfile.o3kd-local").read_text()
 docker_local_version = re.search(r'^ARG VERSION="([^"]+)"$', docker_local, re.M).group(1)
+wrapper = (root / "packaging/get-o3k.sh").read_text()
 assert version == "0.4.1-rc.1", version
 assert pin == version, pin
 assert app_version == version, app_version
 assert chart_version == version, chart_version
 assert docker_version == version, docker_version
 assert docker_local_version == version, docker_local_version
+integrity = wrapper.index('verify-release-bundle.sh" "$BUNDLE_DIR" --integrity-only')
+ea_preflight = wrapper.index('ea-preflight.sh')
+install_tools = wrapper.index('apt-get install -y $APT_PACKAGES')
+executable_check = wrapper.index('release bundle executable verification failed')
+service_start = wrapper.index('systemctl enable --now libvirtd')
+assert integrity < ea_preflight < install_tools < executable_check < service_start
+assert 'openssh-client binutils libvirt-daemon-system' in wrapper
 PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
+
+grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
+grep -Fq 'share/o3k/o3k-enrollment-issuer@.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh"
+grep -Fq 'systemctl disable --now o3k-enrollment-issuer.socket' "$ROOT/packaging/uninstall.sh"
+grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
+! grep -Fq 'O3K_ENROLLMENT_SIGNER=/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
+grep -Fq '/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
+grep -Fq 'EA_INSTALL' "$ROOT/packaging/install.sh"
+if grep -Fq 'O3K_ENROLLMENT_SIGNER=' "$ROOT/packaging/install.sh" && \
+  ! grep -Fq 'if [[ "$EA_INSTALL" == 1' "$ROOT/packaging/install.sh"; then
+  echo "EA enrollment settings are not gated by the authenticated EA installer" >&2
+  exit 1
+fi
 
 echo 'Early Access installer contract: PASS'

@@ -1,0 +1,19 @@
+[package]
+name = "o3k-enrollment-issuer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
+openssl.workspace = true
+rustix = { workspace = true, features = ["net", "fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+

@@ -199,6 +199,8 @@ mod tests {
             cloud_identity_id: "cloud-default".into(),
             cloud_profile_id: "default".into(),
             enrolled_agents: "{}".into(),
+            enrolled_agent_epochs: "{}".into(),
+            revoked_agents: "{}".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         };
         store.upsert_bootstrap_state(&state).await?;
@@ -206,6 +208,7 @@ mod tests {
         let grant = EnrollmentGrantRecord {
             grant_id: "grant-1".into(),
             agent_id: "node-1".into(),
+            agent_epoch: "epoch-1".into(),
             token_digest: "digest".into(),
             issued_at_unix_ms: 10,
             expires_at_unix_ms: 100,
@@ -213,14 +216,124 @@ mod tests {
         };
         store.insert_enrollment_grant(&grant).await?;
         let consumed = store
-            .consume_enrollment_grant("grant-1", "digest", 20)
+            .consume_enrollment_grant("grant-1", "epoch-1", "digest", 20)
             .await?;
         assert_eq!(consumed.used_at_unix_ms, Some(20));
         assert!(
             store
-                .consume_enrollment_grant("grant-1", "digest", 21)
+                .consume_enrollment_grant("grant-1", "epoch-1", "digest", 21)
                 .await
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_enrollment_issue_is_atomic_retryable_and_result_is_identity_bound()
+    -> Result<(), Box<dyn Error>> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let grant = EnrollmentGrantRecord {
+            grant_id: "issue-grant".into(),
+            agent_id: "*".into(),
+            agent_epoch: String::new(),
+            token_digest: "token-digest".into(),
+            issued_at_unix_ms: 10,
+            expires_at_unix_ms: 100,
+            used_at_unix_ms: None,
+        };
+        store.insert_enrollment_grant(&grant).await?;
+        let result = EnrollmentResultRecord {
+            grant_id: "issue-grant".into(),
+            agent_id: "node-1".into(),
+            agent_epoch: "epoch-1".into(),
+            token_digest: "token-digest".into(),
+            csr_sha256: "csr-digest".into(),
+            certificate_fingerprint_sha256: "cert-fingerprint".into(),
+            client_certificate_chain_pem: "public-cert-chain".into(),
+            ca_certificate_pem: "public-ca-cert".into(),
+            ca_fingerprint_sha256: "ca-fingerprint".into(),
+            certificate_expires_at_unix_ms: 1_000,
+            rotation_deadline_unix_ms: 900,
+            issued_at_unix_ms: 20,
+            registered_at_unix_ms: None,
+        };
+        let persisted = store.complete_enrollment_issue(&result, 20).await?;
+        assert_eq!(persisted, result);
+        assert_eq!(
+            store.get_enrollment_result("issue-grant").await?,
+            Some(result.clone())
+        );
+        let used_grant = store
+            .get_enrollment_grant("issue-grant")
+            .await?
+            .ok_or("grant persisted")?;
+        assert_eq!(used_grant.agent_id, "node-1");
+        assert_eq!(used_grant.agent_epoch, "epoch-1");
+        assert_eq!(used_grant.used_at_unix_ms, Some(20));
+
+        // Exact replay returns the same public certificate result. A different
+        // CSR or identity cannot reuse the consumed grant.
+        assert_eq!(store.complete_enrollment_issue(&result, 21).await?, result);
+        let mut altered = result.clone();
+        altered.csr_sha256 = "different-csr".into();
+        assert!(store.complete_enrollment_issue(&altered, 21).await.is_err());
+        assert!(
+            store
+                .consume_enrollment_result(
+                    "issue-grant",
+                    "token-digest",
+                    "node-2",
+                    "epoch-1",
+                    "cert-fingerprint",
+                    30,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .consume_enrollment_result(
+                    "issue-grant",
+                    "token-digest",
+                    "node-1",
+                    "epoch-1",
+                    "cert-fingerprint",
+                    30,
+                )
+                .await?,
+            EnrollmentResultRecord {
+                registered_at_unix_ms: Some(30),
+                ..result.clone()
+            }
+        );
+        // Registration replay is safe only with the original grant token and
+        // the same issued certificate.
+        assert!(
+            store
+                .consume_enrollment_result(
+                    "issue-grant",
+                    "wrong-token-digest",
+                    "node-1",
+                    "epoch-1",
+                    "cert-fingerprint",
+                    31,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .consume_enrollment_result(
+                    "issue-grant",
+                    "token-digest",
+                    "node-1",
+                    "epoch-1",
+                    "cert-fingerprint",
+                    31,
+                )
+                .await?
+                .registered_at_unix_ms,
+            Some(30)
         );
         Ok(())
     }

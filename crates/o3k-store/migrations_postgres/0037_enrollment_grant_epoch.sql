@@ -1,0 +1,1 @@
+ALTER TABLE enrollment_grants ADD COLUMN IF NOT EXISTS agent_epoch TEXT NOT NULL DEFAULT '';

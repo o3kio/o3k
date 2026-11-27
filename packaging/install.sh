@@ -245,6 +245,18 @@ if [[ -z "$BINARY" ]]; then
   fi
 fi
 [[ -x "$BINARY" ]] || { echo "binary is not executable: $BINARY" >&2; exit 1; }
+ENROLLMENT_ISSUER_BINARY=""
+if [[ "$EA_INSTALL" == 1 ]]; then
+  if [[ -x "$ROOT_DIR/bin/o3k-enrollment-issuer" ]]; then
+    ENROLLMENT_ISSUER_BINARY="$ROOT_DIR/bin/o3k-enrollment-issuer"
+  elif [[ "$RELEASE_BUNDLE" == 1 ]]; then
+    bundle_missing_binary "$ROOT_DIR/bin/o3k-enrollment-issuer (o3k-enrollment-issuer)"
+  else
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-enrollment-issuer
+    ENROLLMENT_ISSUER_BINARY="$ROOT_DIR/target/release/o3k-enrollment-issuer"
+  fi
+  [[ -x "$ENROLLMENT_ISSUER_BINARY" ]] || { echo "enrollment issuer binary is not executable" >&2; exit 1; }
+fi
 if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then
   if [[ -x "$ROOT_DIR/bin/o3k-compute" ]]; then
     COMPUTE_BINARY="$ROOT_DIR/bin/o3k-compute"
@@ -547,6 +559,20 @@ INSTALLED_FILES=(
 )
 install_owned_file "$BINARY" "$PREFIX/bin/o3kd" bin/o3kd 0755
 install_owned_file "$O3K_BINARY" "$PREFIX/bin/o3k" bin/o3k 0755
+if [[ "$EA_INSTALL" == 1 ]]; then
+  INSTALLED_FILES+=(
+    bin/o3k-enrollment-issuer
+    share/o3k/o3k-enrollment-issuer@.service
+    share/o3k/o3k-enrollment-issuer.socket
+  )
+  install_owned_file "$ENROLLMENT_ISSUER_BINARY" "$PREFIX/bin/o3k-enrollment-issuer" bin/o3k-enrollment-issuer 0755
+  install_owned_file "$ROOT_DIR/packaging/o3k-enrollment-issuer@.service" \
+    "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" \
+    share/o3k/o3k-enrollment-issuer@.service 0644
+  install_owned_file "$ROOT_DIR/packaging/o3k-enrollment-issuer.socket" \
+    "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" \
+    share/o3k/o3k-enrollment-issuer.socket 0644
+fi
 install_owned_file "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service" share/o3k/o3kd.service 0644
 for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh bootstrap-testlab.sh; do
   install_owned_file "$ROOT_DIR/packaging/$file" "$PREFIX/share/o3k/$file" "share/o3k/$file" 0755
@@ -852,6 +878,20 @@ if [[ "$PROFILE" == libvirt ]]; then
     key="${setting%%=*}"
     grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
   done
+  # Only authenticated EA installs have the root-owned issuer socket. C1
+  # must never inherit these listener settings from a shared environment.
+  if [[ "$EA_INSTALL" == 1 ]]; then
+    O3K_ENROLLMENT_SIGNER="${O3K_ENROLLMENT_SIGNER:-/run/o3k/enrollment-issuer.sock}"
+    [[ "$O3K_ENROLLMENT_SIGNER" == /* && "$O3K_ENROLLMENT_SIGNER" != *$'\n'* ]] || {
+      echo "O3K_ENROLLMENT_SIGNER must be an absolute local issuer socket path" >&2; exit 2;
+    }
+    for setting in \
+      "O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443" \
+      "O3K_ENROLLMENT_SIGNER=$O3K_ENROLLMENT_SIGNER"; do
+      key="${setting%%=*}"
+      grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
+    done
+  fi
   # The compute agent reads its identity from ITS data directory
   # (bins/o3k-compute/src/main.rs: identity_file = data_dir.join("agent-id")),
   # so the identity must be installed there, owned by the compute account —
@@ -1097,6 +1137,13 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
     fi
   fi
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
+  if [[ "$EA_INSTALL" == 1 ]]; then
+    install_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" \
+      /etc/systemd/system/o3k-enrollment-issuer@.service 0644
+    install_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" \
+      /etc/systemd/system/o3k-enrollment-issuer.socket 0644
+    install -d -m 0750 -o root -g o3k /etc/o3k/ea
+  fi
   if [[ "$PROFILE" == libvirt ]]; then
     install_owned_system_file "$ROOT_DIR/packaging/o3k-compute.service" \
       /etc/systemd/system/o3k-compute.service 0644
@@ -1109,6 +1156,10 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
       /etc/systemd/system/o3k-network.service 0644
   fi
   systemctl daemon-reload
+  if [[ "$EA_INSTALL" == 1 && "$C1_PREPARE_ONLY" != 1 ]]; then
+    systemctl enable --now o3k-enrollment-issuer.socket
+    systemctl is-active --quiet o3k-enrollment-issuer.socket || die "enrollment issuer socket failed to start"
+  fi
   if [[ "$C1_PREPARE_ONLY" != 1 ]]; then
     systemctl enable --now o3kd.service
   fi
