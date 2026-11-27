@@ -39,10 +39,7 @@ mod command_allowlist_tests {
         let runner = SystemLvmCommandRunner::default();
         for program in ["/tmp/vgs", "./lvcreate", "../lvremove"] {
             let result = runner.run(program, &[]).await;
-            assert!(
-                matches!(result, Err(LvmCommandError::Failed)),
-                "{program}"
-            );
+            assert!(matches!(result, Err(LvmCommandError::Failed)), "{program}");
         }
     }
 
@@ -56,9 +53,7 @@ mod command_allowlist_tests {
             .run("vgs", &["--o3k-invalid-option".to_owned()])
             .await;
         assert!(
-            result
-                .as_ref()
-                .is_ok_and(|output| output.status != 0),
+            result.as_ref().is_ok_and(|output| output.status != 0),
             "trusted vgs should spawn and reject the deliberately invalid option"
         );
     }
