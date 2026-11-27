@@ -5,6 +5,8 @@
 //! daemon receives only the signed result.
 
 use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -27,6 +29,89 @@ pub struct EnrollmentGrantBinding {
     pub agent_epoch: String,
     pub expires_at_unix_ms: u64,
     pub consumed_at_unix_ms: Option<u64>,
+}
+
+/// Client for the root-owned, systemd-activated enrollment issuer. The
+/// issuer owns the CA key; this client sends only the bounded CSR request and
+/// receives the public certificate result. The socket is deliberately local
+/// and must be a mode-0600 socket owned by the o3kd service UID.
+#[derive(Clone, Debug)]
+pub struct UnixSocketEnrollmentSigner {
+    socket: PathBuf,
+}
+
+impl UnixSocketEnrollmentSigner {
+    pub fn new(socket: impl Into<PathBuf>) -> Self {
+        Self {
+            socket: socket.into(),
+        }
+    }
+
+    fn validate_socket(&self) -> Result<(), String> {
+        let meta = std::fs::symlink_metadata(&self.socket)
+            .map_err(|_| "enrollment issuer socket is unavailable".to_owned())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{FileTypeExt, MetadataExt};
+            let self_uid = std::fs::metadata("/proc/self")
+                .map_err(|_| "cannot inspect service uid".to_owned())?
+                .uid();
+            if !meta.file_type().is_socket() || (meta.mode() & 0o777) != 0o600 {
+                return Err("enrollment issuer socket type or mode is unsafe".to_owned());
+            }
+            if meta.uid() != self_uid {
+                return Err("enrollment issuer socket owner is unexpected".to_owned());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl EnrollmentSigner for UnixSocketEnrollmentSigner {
+    fn sign_csr(
+        &self,
+        grant_id: &str,
+        token: &[u8],
+        agent_id: &str,
+        agent_epoch: &str,
+        csr_pem: &[u8],
+    ) -> Result<IssuedEnrollment, String> {
+        self.validate_socket()?;
+        let request = serde_json::to_vec(&SignRequest {
+            grant_id,
+            token,
+            agent_id,
+            agent_epoch,
+            csr_pem,
+        })
+        .map_err(|_| "cannot encode signer request".to_owned())?;
+        if request.len() > 1024 * 1024 {
+            return Err("signer request too large".to_owned());
+        }
+        let mut stream = UnixStream::connect(&self.socket)
+            .map_err(|_| "cannot connect to enrollment issuer".to_owned())?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .ok();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+            .ok();
+        stream
+            .write_all(&request)
+            .map_err(|_| "cannot send signer request".to_owned())?;
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|_| "cannot finish signer request".to_owned())?;
+        let mut output = Vec::with_capacity(4096);
+        stream
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut output)
+            .map_err(|_| "cannot read signer response".to_owned())?;
+        if output.len() > 1024 * 1024 {
+            return Err("signer response too large".to_owned());
+        }
+        serde_json::from_slice(&output).map_err(|_| "invalid signer response".to_owned())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
