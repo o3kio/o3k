@@ -869,7 +869,11 @@ if [[ "$PROFILE" == libvirt ]]; then
   # Enrollment is enabled only when the operator supplies the approved
   # root-issuer socket path.  Do not guess a socket or silently enable a
   # listener whose issuer has not been installed and permission-checked.
-  if [[ -n "${O3K_ENROLLMENT_SIGNER:-}" ]]; then
+  # EA release bundles install the root-owned, socket-activated issuer at
+  # this canonical path. Operators may override it only for an explicitly
+  # provisioned campaign-owned issuer.
+  O3K_ENROLLMENT_SIGNER="${O3K_ENROLLMENT_SIGNER:-/run/o3k/enrollment-issuer.sock}"
+  if [[ -n "$O3K_ENROLLMENT_SIGNER" ]]; then
     [[ "$O3K_ENROLLMENT_SIGNER" == /* && "$O3K_ENROLLMENT_SIGNER" != *$'\n'* ]] || {
       echo "O3K_ENROLLMENT_SIGNER must be an absolute local issuer socket path" >&2; exit 2;
     }
