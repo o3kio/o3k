@@ -220,11 +220,7 @@ fn persist_journal(
             .and_then(|n| n.to_str())
             .unwrap_or("journal")
     ));
-    let lock = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&lock_path)?;
+    let _lock = acquire_journal_lock(&lock_path)?;
     let bytes = serde_json::to_vec(&JournalSnapshot {
         format_version: 1,
         controller_epoch,
@@ -239,9 +235,40 @@ fn persist_journal(
     file.sync_all()?;
     std::fs::rename(temporary, path)?;
     std::fs::File::open(parent)?.sync_all()?;
-    drop(lock);
-    std::fs::remove_file(lock_path)?;
     Ok(())
+}
+
+struct JournalLock(std::path::PathBuf);
+impl Drop for JournalLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+fn acquire_journal_lock(path: &std::path::Path) -> Result<JournalLock, StorageJournalError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(JournalLock(path.to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(300));
+            if stale {
+                std::fs::remove_file(path)?;
+                acquire_journal_lock(path)
+            } else {
+                Err(error.into())
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn acceptance_time() -> String {
