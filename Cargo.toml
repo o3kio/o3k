@@ -4,6 +4,7 @@ members = [
     "bins/o3k",
     "bins/o3k-compute",
     "bins/o3k-network",
+    "bins/o3k-enrollment-issuer",
     "crates/o3k-api",
     "crates/o3k-config",
     "crates/o3k-domain",

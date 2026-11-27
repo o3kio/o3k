@@ -119,6 +119,7 @@ else
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute-bin
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-compute-bin"
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-network-bin
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-enrollment-issuer
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-network-bin"
   fi
 fi
@@ -137,6 +138,7 @@ else
   if [[ "$PROFILE" == libvirt ]]; then
     install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"
     install -m 0755 "$ROOT_DIR/target/release/o3k-network-bin" "$OUT_DIR/bin/o3k-network"
+    install -m 0755 "$ROOT_DIR/target/release/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-enrollment-issuer"
   fi
 fi
 # The release artifact must never contain the debug-only A10.1 publication
@@ -148,6 +150,7 @@ bash "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$OUT_DIR/bin/o3k" "$
 # travel with the artifacts they download; the wrapper itself never consults
 # the channel table).
 cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/ea-preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$ROOT_DIR/packaging/bootstrap-testlab.sh" "$ROOT_DIR/packaging/get-o3k.sh" "$ROOT_DIR/packaging/o3k-araf-demo.sh" "$ROOT_DIR/packaging/channels.yaml" "$ROOT_DIR/packaging/release-gate.sh" "$ROOT_DIR/packaging/validate-human-review.sh" "$ROOT_DIR/packaging/scan-release-evidence.sh" "$ROOT_DIR/packaging/generate-candidate-evidence-manifest.py" "$ROOT_DIR/packaging/verify-release-bundle.sh" "$ROOT_DIR/packaging/check-a10-publisher-disabled.sh" "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/packaging/o3k-compute.service" "$ROOT_DIR/packaging/o3k-network.service" "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$ROOT_DIR/packaging/backup-trust.example.json" "$OUT_DIR/packaging/"
+cp "$ROOT_DIR/packaging/o3k-enrollment-issuer.service" "$ROOT_DIR/packaging/o3k-enrollment-issuer.socket" "$OUT_DIR/packaging/"
 cp -r "$ROOT_DIR/packaging/araf-demo" "$OUT_DIR/packaging/araf-demo"
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/scripts/validate-release-e2e-evidence.py" "$OUT_DIR/scripts/"

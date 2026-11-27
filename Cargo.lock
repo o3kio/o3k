@@ -2069,6 +2069,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-enrollment-issuer"
+version = "0.4.1-rc.1"
+dependencies = [
+ "hex",
+ "o3k-compute-agent",
+ "openssl",
+ "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "o3k-identity"
 version = "0.4.1-rc.1"
 dependencies = [
