@@ -162,17 +162,19 @@ impl PostgresStore {
         .map_err(StoreError::Database)?
         .ok_or(StoreError::ResourceNotFound)?;
         let g = grant(row)?;
-        if g.agent_epoch.is_empty()
-            || g.agent_epoch != epoch
+        if epoch.trim().is_empty()
+            || (!g.agent_epoch.is_empty() && g.agent_epoch != epoch)
             || g.token_digest != digest
             || g.used_at_unix_ms.is_some()
             || now >= g.expires_at_unix_ms
         {
             return Err(StoreError::OwnershipConflict);
         }
-        let updated = sqlx::query("UPDATE enrollment_grants SET used_at_unix_ms=$1 WHERE grant_id=$2 AND used_at_unix_ms IS NULL")
+        let updated = sqlx::query("UPDATE enrollment_grants SET agent_epoch=$1, used_at_unix_ms=$2 WHERE grant_id=$3 AND token_digest=$4 AND used_at_unix_ms IS NULL AND expires_at_unix_ms>$2 AND (agent_epoch='' OR agent_epoch=$1)")
+            .bind(epoch)
             .bind(i64::try_from(now).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?)
             .bind(id)
+            .bind(digest)
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
@@ -181,6 +183,7 @@ impl PostgresStore {
         }
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(EnrollmentGrantRecord {
+            agent_epoch: epoch.to_owned(),
             used_at_unix_ms: Some(now),
             ..g
         })

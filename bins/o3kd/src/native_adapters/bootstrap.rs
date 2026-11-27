@@ -339,6 +339,14 @@ fn state_record(state: &BootstrapState) -> Result<BootstrapStateRecord, Bootstra
     })
 }
 
+fn parse_agent_epochs(value: &str) -> Result<BTreeMap<String, String>, BootstrapFailure> {
+    serde_json::from_str(value).map_err(|_| BootstrapFailure::Internal)
+}
+
+fn parse_revoked_agents(value: &str) -> Result<BTreeMap<String, bool>, BootstrapFailure> {
+    serde_json::from_str(value).map_err(|_| BootstrapFailure::Internal)
+}
+
 fn parse_inventory(values: &BTreeMap<String, u64>) -> BTreeMap<String, Inventory> {
     values
         .iter()
@@ -502,19 +510,30 @@ impl BootstrapWorkflow for BootstrapAdapter {
             profile
         };
         let cloud_identity_id = "cloud-default";
-        let mut state = self
+        let previous_record = self
             .store
             .get_bootstrap_state(STATE_ID)
             .await
-            .map_err(|_| BootstrapFailure::Internal)?
+            .map_err(|_| BootstrapFailure::Internal)?;
+        let mut state = previous_record
+            .clone()
             .map(state_from_record)
             .transpose()?
             .unwrap_or_else(BootstrapState::uninitialized);
         state
             .initialize(cloud_identity_id, &profile.profile_id)
             .map_err(|_| BootstrapFailure::Conflict)?;
+        let mut durable = state_record(&state)?;
+        if let Some(previous) = previous_record {
+            // Reinitialization must preserve durable epoch fencing and
+            // revocation state; malformed metadata fails closed.
+            parse_agent_epochs(&previous.enrolled_agent_epochs)?;
+            parse_revoked_agents(&previous.revoked_agents)?;
+            durable.enrolled_agent_epochs = previous.enrolled_agent_epochs;
+            durable.revoked_agents = previous.revoked_agents;
+        }
         self.store
-            .upsert_bootstrap_state(&state_record(&state)?)
+            .upsert_bootstrap_state(&durable)
             .await
             .map_err(|_| BootstrapFailure::Internal)?;
         self.readiness.set_bootstrap_ready(state.is_ready());
@@ -646,7 +665,7 @@ impl BootstrapWorkflow for BootstrapAdapter {
                 .get(&request.agent_id)
                 .is_some_and(|old| old == &fingerprint);
             if (grant.agent_id != "*" && grant.agent_id != request.agent_id)
-                || grant.agent_epoch != request.agent_epoch
+                || (!grant.agent_epoch.is_empty() && grant.agent_epoch != request.agent_epoch)
                 || grant.token_digest != token_digest
                 || (grant.used_at_unix_ms.is_some() && !old_identity_matches)
                 || (grant.used_at_unix_ms.is_none() && now_ms() >= grant.expires_at_unix_ms)
@@ -829,17 +848,17 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .record_agent(&request.agent_id, &fingerprint)
             .map_err(|_| BootstrapFailure::Conflict)?;
         let mut durable = state_record(&state)?;
-        let mut epochs: BTreeMap<String, String> = durable_record
-            .as_ref()
-            .and_then(|r| serde_json::from_str(&r.enrolled_agent_epochs).ok())
-            .unwrap_or_default();
+        let mut epochs: BTreeMap<String, String> = match durable_record.as_ref() {
+            Some(record) => parse_agent_epochs(&record.enrolled_agent_epochs)?,
+            None => BTreeMap::new(),
+        };
         epochs.insert(request.agent_id.clone(), request.agent_epoch.clone());
         durable.enrolled_agent_epochs =
             serde_json::to_string(&epochs).map_err(|_| BootstrapFailure::Internal)?;
-        let mut revoked: BTreeMap<String, bool> = durable_record
-            .as_ref()
-            .and_then(|r| serde_json::from_str(&r.revoked_agents).ok())
-            .unwrap_or_default();
+        let mut revoked: BTreeMap<String, bool> = match durable_record.as_ref() {
+            Some(record) => parse_revoked_agents(&record.revoked_agents)?,
+            None => BTreeMap::new(),
+        };
         revoked.remove(&request.agent_id);
         durable.revoked_agents =
             serde_json::to_string(&revoked).map_err(|_| BootstrapFailure::Internal)?;
@@ -913,6 +932,12 @@ impl BootstrapWorkflow for BootstrapAdapter {
 mod tests {
     use super::*;
     use o3k_store::BootstrapRepository;
+
+    #[test]
+    fn corrupt_agent_fencing_metadata_fails_closed() {
+        assert!(parse_agent_epochs("not-json").is_err());
+        assert!(parse_revoked_agents("not-json").is_err());
+    }
 
     #[tokio::test]
     async fn init_join_projects_live_and_restart_readiness()
@@ -1069,6 +1094,21 @@ mod tests {
             })
             .await
             .map_err(|error| format!("second join failed: {error:?}"))?;
+
+        let after_second_join = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing after second join")?;
+        let epochs: BTreeMap<String, String> =
+            serde_json::from_str(&after_second_join.enrolled_agent_epochs)?;
+        assert_eq!(epochs.get("node-test").map(String::as_str), Some("epoch-1"));
+        assert_eq!(
+            epochs.get("node-second").map(String::as_str),
+            Some("epoch-2")
+        );
+        let revoked: BTreeMap<String, bool> =
+            serde_json::from_str(&after_second_join.revoked_agents)?;
+        assert!(revoked.is_empty());
 
         // A newly created runtime reconstructs the bootstrap gate from the
         // durable phase; no restart is needed for the preceding transition,
