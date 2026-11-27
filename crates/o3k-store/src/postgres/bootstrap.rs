@@ -25,6 +25,8 @@ fn state(row: sqlx::postgres::PgRow) -> Result<BootstrapStateRecord, StoreError>
         enrolled_agents: row
             .try_get("enrolled_agents")
             .map_err(StoreError::Database)?,
+        enrolled_agent_epochs: row.try_get("enrolled_agent_epochs").map_err(StoreError::Database)?,
+        revoked_agents: row.try_get("revoked_agents").map_err(StoreError::Database)?,
         updated_at: row.try_get("updated_at").map_err(StoreError::Database)?,
     })
 }
@@ -93,7 +95,7 @@ fn enrollment_result(row: sqlx::postgres::PgRow) -> Result<EnrollmentResultRecor
     })
 }
 const STATE_COLUMNS: &str =
-    "state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,updated_at";
+    "state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,enrolled_agent_epochs,revoked_agents,updated_at";
 const GRANT_COLUMNS: &str = "grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms";
 const ENROLLMENT_RESULT_COLUMNS: &str = "grant_id,agent_id,agent_epoch,token_digest,csr_sha256,certificate_fingerprint_sha256,client_certificate_chain_pem,ca_certificate_pem,ca_fingerprint_sha256,certificate_expires_at_unix_ms,rotation_deadline_unix_ms,issued_at_unix_ms,registered_at_unix_ms";
 
@@ -116,7 +118,7 @@ impl PostgresStore {
         &self,
         s: &BootstrapStateRecord,
     ) -> Result<BootstrapStateRecord, StoreError> {
-        sqlx::query("INSERT INTO bootstrap_state(state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(state_id) DO UPDATE SET generation=EXCLUDED.generation,phase=EXCLUDED.phase,cloud_identity_id=EXCLUDED.cloud_identity_id,cloud_profile_id=EXCLUDED.cloud_profile_id,enrolled_agents=EXCLUDED.enrolled_agents,updated_at=EXCLUDED.updated_at").bind(&s.state_id).bind(i64::try_from(s.generation).map_err(|_| StoreError::Corrupt("bootstrap generation overflow".into()))?).bind(&s.phase).bind(&s.cloud_identity_id).bind(&s.cloud_profile_id).bind(&s.enrolled_agents).bind(&s.updated_at).execute(&self.pool).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO bootstrap_state(state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,enrolled_agent_epochs,revoked_agents,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(state_id) DO UPDATE SET generation=EXCLUDED.generation,phase=EXCLUDED.phase,cloud_identity_id=EXCLUDED.cloud_identity_id,cloud_profile_id=EXCLUDED.cloud_profile_id,enrolled_agents=EXCLUDED.enrolled_agents,enrolled_agent_epochs=EXCLUDED.enrolled_agent_epochs,revoked_agents=EXCLUDED.revoked_agents,updated_at=EXCLUDED.updated_at").bind(&s.state_id).bind(i64::try_from(s.generation).map_err(|_| StoreError::Corrupt("bootstrap generation overflow".into()))?).bind(&s.phase).bind(&s.cloud_identity_id).bind(&s.cloud_profile_id).bind(&s.enrolled_agents).bind(&s.enrolled_agent_epochs).bind(&s.revoked_agents).bind(&s.updated_at).execute(&self.pool).await.map_err(StoreError::Database)?;
         Ok(s.clone())
     }
     pub async fn get_enrollment_grant(

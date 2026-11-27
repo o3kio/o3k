@@ -199,6 +199,8 @@ mod tests {
             cloud_identity_id: "cloud-default".into(),
             cloud_profile_id: "default".into(),
             enrolled_agents: "{}".into(),
+            enrolled_agent_epochs: "{}".into(),
+            revoked_agents: "{}".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         };
         store.upsert_bootstrap_state(&state).await?;

@@ -120,6 +120,12 @@ pub struct BootstrapStateRecord {
     pub cloud_identity_id: String,
     pub cloud_profile_id: String,
     pub enrolled_agents: String,
+    /// JSON map of agent id to the currently admitted epoch. Kept separate
+    /// from the legacy fingerprint projection for backward-compatible reads.
+    pub enrolled_agent_epochs: String,
+    /// JSON set/map of revoked agent ids. Revocation is durable and
+    /// fail-closed during restart rehydration.
+    pub revoked_agents: String,
     pub updated_at: String,
 }
 

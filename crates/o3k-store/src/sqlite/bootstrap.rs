@@ -25,6 +25,8 @@ fn state(row: sqlx::sqlite::SqliteRow) -> Result<BootstrapStateRecord, StoreErro
         enrolled_agents: row
             .try_get("enrolled_agents")
             .map_err(StoreError::Database)?,
+        enrolled_agent_epochs: row.try_get("enrolled_agent_epochs").map_err(StoreError::Database)?,
+        revoked_agents: row.try_get("revoked_agents").map_err(StoreError::Database)?,
         updated_at: row.try_get("updated_at").map_err(StoreError::Database)?,
     })
 }
@@ -109,8 +111,8 @@ impl SqliteStore {
         &self,
         s: &BootstrapStateRecord,
     ) -> Result<BootstrapStateRecord, StoreError> {
-        sqlx::query("INSERT INTO bootstrap_state(state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(state_id) DO UPDATE SET generation=excluded.generation,phase=excluded.phase,cloud_identity_id=excluded.cloud_identity_id,cloud_profile_id=excluded.cloud_profile_id,enrolled_agents=excluded.enrolled_agents,updated_at=excluded.updated_at")
-            .bind(&s.state_id).bind(i64::try_from(s.generation).map_err(|_| StoreError::Corrupt("bootstrap generation overflow".into()))?).bind(&s.phase).bind(&s.cloud_identity_id).bind(&s.cloud_profile_id).bind(&s.enrolled_agents).bind(&s.updated_at).execute(&self.pool).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO bootstrap_state(state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,enrolled_agent_epochs,revoked_agents,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(state_id) DO UPDATE SET generation=excluded.generation,phase=excluded.phase,cloud_identity_id=excluded.cloud_identity_id,cloud_profile_id=excluded.cloud_profile_id,enrolled_agents=excluded.enrolled_agents,enrolled_agent_epochs=excluded.enrolled_agent_epochs,revoked_agents=excluded.revoked_agents,updated_at=excluded.updated_at")
+            .bind(&s.state_id).bind(i64::try_from(s.generation).map_err(|_| StoreError::Corrupt("bootstrap generation overflow".into()))?).bind(&s.phase).bind(&s.cloud_identity_id).bind(&s.cloud_profile_id).bind(&s.enrolled_agents).bind(&s.enrolled_agent_epochs).bind(&s.revoked_agents).bind(&s.updated_at).execute(&self.pool).await.map_err(StoreError::Database)?;
         Ok(s.clone())
     }
     pub async fn get_enrollment_grant(
