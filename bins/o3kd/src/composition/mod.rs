@@ -2204,7 +2204,7 @@ pub async fn build_composition_with_guard(
             None
         }
     };
-    let enrollment_task = match (
+    let _enrollment_task = match (
         std::env::var("O3K_ENROLLMENT_LISTEN_ADDR").ok(),
         config.compute_server_certificate.clone(),
         config.compute_server_private_key.clone(),
