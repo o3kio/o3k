@@ -6,6 +6,7 @@ use o3k_domain::StorageCommandEnvelope;
 use o3k_storage::{
     LvmConfig, LvmStorageProvider, StorageJournal, StorageProvider, StorageVolumeRequest,
 };
+use sha2::{Digest, Sha256};
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -27,12 +28,41 @@ impl StorageExecutor for Executor {
         let command = request.into_inner();
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.envelope_json)
             .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
+        let payload: StorageVolumeRequest = serde_json::from_slice(&command.payload_json)
+            .map_err(|_| Status::invalid_argument("invalid storage payload"))?;
+        if payload.volume_id.to_string() != envelope.resource_id
+            || payload.project_id != envelope.project_id
+            || payload.generation != envelope.resource_generation
+            || hex::encode(Sha256::digest(&command.payload_json))
+                != envelope.canonical_payload_fingerprint
+        {
+            return Err(Status::invalid_argument(
+                "storage payload does not match command envelope",
+            ));
+        }
+        if let Some(existing) = self
+            .journal
+            .get(&envelope.idempotency_key)
+            .map_err(|_| Status::internal("journal lookup failed"))?
+            && !matches!(
+                existing.operation_state,
+                o3k_domain::StorageOperationState::Accepted
+                    | o3k_domain::StorageOperationState::Running
+            )
+        {
+            let bytes = serde_json::to_vec(&existing)
+                .map_err(|_| Status::internal("observation encoding failed"))?;
+            return Ok(Response::new(ExecuteResponse {
+                observation: Some(WireObservation {
+                    observation_json: bytes,
+                }),
+                error: String::new(),
+            }));
+        }
         let observation = self
             .journal
             .accept(envelope.clone(), &self.agent_id, self.agent_epoch)
             .map_err(|_| Status::failed_precondition("storage command fenced or conflicting"))?;
-        let payload: StorageVolumeRequest = serde_json::from_slice(&command.payload_json)
-            .map_err(|_| Status::invalid_argument("invalid storage payload"))?;
         let result = match envelope.action {
             o3k_domain::StorageAction::CreateVolume => {
                 self.provider.create_volume(&payload).await.map(|_| ())
@@ -43,12 +73,23 @@ impl StorageExecutor for Executor {
             o3k_domain::StorageAction::DeleteVolume => self.provider.delete_volume(&payload).await,
             _ => Err(o3k_storage::StorageProviderError::InvalidRequest),
         };
-        if result.is_err() {
-            return Err(Status::failed_precondition(
-                "bounded storage operation failed",
-            ));
+        let mut terminal = observation;
+        terminal.observation_sequence = 2;
+        terminal.operation_state = if result.is_ok() {
+            o3k_domain::StorageOperationState::Succeeded
+        } else {
+            o3k_domain::StorageOperationState::Failed
+        };
+        terminal.resource_state = if result.is_ok() {
+            "available"
+        } else {
+            "unknown"
         }
-        let bytes = serde_json::to_vec(&observation)
+        .to_owned();
+        self.journal
+            .record_observation(&envelope.idempotency_key, terminal.clone())
+            .map_err(|_| Status::internal("journal outcome persistence failed"))?;
+        let bytes = serde_json::to_vec(&terminal)
             .map_err(|_| Status::internal("observation encoding failed"))?;
         Ok(Response::new(ExecuteResponse {
             observation: Some(WireObservation {
