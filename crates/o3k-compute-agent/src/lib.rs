@@ -71,6 +71,7 @@ pub use enrollment::{
     ComputeEnrollmentService, DurableEnrollmentIssue, EnrollmentGrantBinding, EnrollmentIssueError,
     EnrollmentIssuer, EnrollmentSigner, IssuedEnrollment, RootHelperEnrollmentSigner,
     UnixSocketEnrollmentSigner, certificate_fingerprint_sha256, validate_issued_enrollment,
+    validate_issuer_peer_uid,
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,

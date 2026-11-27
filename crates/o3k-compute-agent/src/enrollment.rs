@@ -40,6 +40,22 @@ pub struct UnixSocketEnrollmentSigner {
     socket: PathBuf,
 }
 
+/// Validate the kernel-provided peer identity of the root issuer socket.
+/// Callers must pass the numeric uid of the `o3k` service account configured
+/// as `SocketUser`; a pathname or socket mode check alone is insufficient.
+#[cfg(target_os = "linux")]
+pub fn validate_issuer_peer_uid<S: std::os::fd::AsFd>(
+    stream: &S,
+    expected_uid: u32,
+) -> Result<(), String> {
+    let peer = rustix::net::sockopt::get_socket_peercred(stream)
+        .map_err(|_| "cannot inspect enrollment issuer peer credentials".to_owned())?;
+    if peer.uid.as_raw() != expected_uid {
+        return Err("enrollment issuer peer uid is unauthorized".to_owned());
+    }
+    Ok(())
+}
+
 impl UnixSocketEnrollmentSigner {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
