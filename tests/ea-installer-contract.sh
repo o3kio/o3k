@@ -11,6 +11,8 @@ PROMOTE_WORKFLOW="$ROOT/.github/workflows/promote-ea-release.yml"
 PROMOTE_SCRIPT="$ROOT/packaging/promote-ea-release.sh"
 
 bash -n "$WRAPPER" "$INSTALLER" "$PREFLIGHT" "$RELEASE"
+bash -n "$ROOT/packaging/config-env.sh" "$ROOT/tests/config-env.sh"
+bash "$ROOT/tests/config-env.sh"
 grep -Fq 'postgresql-16' "$WRAPPER"
 grep -Fq 'installation-security-profile early-access-v1' "$WRAPPER"
 grep -Fq 'installation-local-provision --data-root' "$INSTALLER"
@@ -96,6 +98,14 @@ grep -Fq 'o3k-enrollment-issuer" --export-ca' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA' "$ROOT/packaging/install.sh"
 grep -Fq 'compute-client-ca.pem' "$ROOT/packaging/install.sh"
 grep -Fq 'Some("--export-ca")' "$ROOT/bins/o3k-enrollment-issuer/src/main.rs"
+grep -Fq 'o3k_upsert_env_setting' "$ROOT/packaging/install.sh"
+grep -Fq '"$ROOT_DIR/packaging/config-env.sh"' "$ROOT/packaging/make-release.sh"
+python3 - "$ROOT/packaging/install.sh" <<'PY'
+from pathlib import Path
+import sys
+installer = Path(sys.argv[1]).read_text()
+assert installer.index('o3k_verify_config_ledger "$CONFIG_DIR"') < installer.index('bash "$ROOT_DIR/scripts/generate-passwords.sh"')
+PY
 grep -Fq 'share/o3k/o3k-enrollment-issuer@.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh"
 grep -Fq 'systemctl disable --now o3k-enrollment-issuer.socket' "$ROOT/packaging/uninstall.sh"
 grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
