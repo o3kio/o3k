@@ -38,6 +38,7 @@ o3k-scheduler = { path = "../../crates/o3k-scheduler" }
 o3k-service-sdk = { path = "../../crates/o3k-service-sdk" }
 o3k-store = { path = "../../crates/o3k-store" }
 o3k-storage = { path = "../../crates/o3k-storage" }
+o3k-controller-protocol = { path = "../../crates/o3k-controller-protocol" }
 tokio.workspace = true
 tonic.workspace = true
 serde_json.workspace = true

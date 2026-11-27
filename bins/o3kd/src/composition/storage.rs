@@ -1,7 +1,18 @@
 use async_trait::async_trait;
+use o3k_controller_protocol::storage::{
+    StorageCommand, storage_executor_client::StorageExecutorClient,
+};
+use o3k_domain::{
+    StorageAction, StorageCapabilities, StorageCommandEnvelope, StorageObservation,
+    StorageOperationState, storage_payload_fingerprint,
+};
 use o3k_provider::BlockDeviceAttachment;
 use o3k_reconciler;
-use o3k_storage;
+use o3k_storage::{
+    self, PreparedAttachment, StorageAttachmentObservation, StorageAttachmentRequest,
+    StorageProvider, StorageProviderError, StorageSnapshotObservation, StorageSnapshotRequest,
+    StorageVolumeObservation, StorageVolumeRequest,
+};
 use o3k_store;
 use o3k_store::{DurableStore, StorageRepository};
 use rustix::fs::{FlockOperation, flock};
@@ -14,6 +25,273 @@ use std::sync::{
 use std::time::Duration;
 use tracing;
 use uuid::Uuid;
+
+/// Controller-side client for the privileged storage executor.  Construction
+/// requires all mTLS material and an explicit endpoint; CA-only operation is
+/// deliberately rejected because the executor must authenticate this
+/// controller as a specific installation identity.
+pub(crate) struct RemoteStorageProvider {
+    endpoint: String,
+    ca: Vec<u8>,
+    cert: Vec<u8>,
+    key: Vec<u8>,
+    expected_server_name: String,
+    agent_id: String,
+    agent_epoch: u64,
+}
+
+impl RemoteStorageProvider {
+    pub(crate) fn from_env(agent_id: String, agent_epoch: u64) -> Result<Self, String> {
+        let endpoint = std::env::var("O3K_STORAGE_ENDPOINT")
+            .map_err(|_| "O3K_STORAGE_ENDPOINT is required".to_owned())?;
+        let ca = std::fs::read(
+            std::env::var("O3K_STORAGE_TLS_CA")
+                .map_err(|_| "O3K_STORAGE_TLS_CA is required".to_owned())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let cert = std::fs::read(
+            std::env::var("O3K_STORAGE_TLS_CERT")
+                .map_err(|_| "O3K_STORAGE_TLS_CERT is required".to_owned())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let key = std::fs::read(
+            std::env::var("O3K_STORAGE_TLS_KEY")
+                .map_err(|_| "O3K_STORAGE_TLS_KEY is required".to_owned())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let expected_server_name = std::env::var("O3K_STORAGE_SERVER_NAME")
+            .map_err(|_| "O3K_STORAGE_SERVER_NAME is required".to_owned())?;
+        if endpoint.is_empty()
+            || expected_server_name.is_empty()
+            || ca.is_empty()
+            || cert.is_empty()
+            || key.is_empty()
+            || agent_id.is_empty()
+            || agent_epoch == 0
+        {
+            return Err("incomplete storage executor identity configuration".to_owned());
+        }
+        Ok(Self {
+            endpoint,
+            ca,
+            cert,
+            key,
+            expected_server_name,
+            agent_id,
+            agent_epoch,
+        })
+    }
+
+    async fn execute<T: serde::Serialize>(
+        &self,
+        action: StorageAction,
+        resource_id: String,
+        project_id: String,
+        generation: u64,
+        payload: &T,
+    ) -> Result<StorageObservation, o3k_storage::StorageProviderError> {
+        let envelope = StorageCommandEnvelope {
+            protocol_version: 1,
+            command_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            idempotency_key: format!("remote-{resource_id}-{generation}"),
+            resource_id,
+            resource_generation: generation,
+            project_id,
+            controller_epoch: self.agent_epoch,
+            target_agent_id: self.agent_id.clone(),
+            target_agent_epoch: self.agent_epoch,
+            deadline: "2099-01-01T00:00:00Z".into(),
+            trace_id: "o3kd-storage".into(),
+            action,
+            canonical_payload_fingerprint: storage_payload_fingerprint(payload)
+                .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?,
+        };
+        let endpoint = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
+            .map_err(|_| o3k_storage::StorageProviderError::Unavailable)?;
+        let tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(tonic::transport::Certificate::from_pem(self.ca.clone()))
+            .identity(tonic::transport::Identity::from_pem(
+                self.cert.clone(),
+                self.key.clone(),
+            ))
+            .domain_name(self.expected_server_name.clone());
+        let channel = endpoint
+            .tls_config(tls)
+            .map_err(|_| o3k_storage::StorageProviderError::InvalidConfiguration)?
+            .connect()
+            .await
+            .map_err(|_| o3k_storage::StorageProviderError::Unavailable)?;
+        let mut client = StorageExecutorClient::new(channel);
+        let response = client
+            .execute(StorageCommand {
+                envelope_json: serde_json::to_vec(&envelope)
+                    .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?,
+                payload_json: serde_json::to_vec(payload)
+                    .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?,
+            })
+            .await
+            .map_err(|_| o3k_storage::StorageProviderError::Unavailable)?
+            .into_inner();
+        let bytes = response
+            .observation
+            .ok_or(o3k_storage::StorageProviderError::CommandFailed)?
+            .observation_json;
+        let observation: StorageObservation = serde_json::from_slice(&bytes)
+            .map_err(|_| o3k_storage::StorageProviderError::CommandFailed)?;
+        observation
+            .validate()
+            .map_err(|_| o3k_storage::StorageProviderError::CommandFailed)?;
+        match observation.operation_state {
+            StorageOperationState::Succeeded => Ok(observation),
+            StorageOperationState::UnknownOutcome => {
+                Err(o3k_storage::StorageProviderError::UnknownOutcome)
+            }
+            StorageOperationState::Failed => Err(o3k_storage::StorageProviderError::CommandFailed),
+            _ => Err(o3k_storage::StorageProviderError::Unavailable),
+        }
+    }
+}
+
+#[async_trait]
+impl StorageProvider for RemoteStorageProvider {
+    async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
+        Err(StorageProviderError::Unavailable)
+    }
+    async fn create_volume(
+        &self,
+        request: &StorageVolumeRequest,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let o = self
+            .execute(
+                StorageAction::CreateVolume,
+                request.volume_id.to_string(),
+                request.project_id.clone(),
+                request.generation,
+                request,
+            )
+            .await?;
+        Ok(StorageVolumeObservation {
+            provider_reference: o
+                .provider_resource_id
+                .map(|resource_id| o3k_domain::StorageProviderReference {
+                    provider: "o3k-storage".into(),
+                    resource_id,
+                })
+                .ok_or(StorageProviderError::CommandFailed)?,
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: o.resource_state == "available",
+        })
+    }
+    async fn inspect_volume(
+        &self,
+        request: &StorageVolumeRequest,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let o = self
+            .execute(
+                StorageAction::InspectVolume,
+                request.volume_id.to_string(),
+                request.project_id.clone(),
+                request.generation,
+                request,
+            )
+            .await?;
+        Ok(StorageVolumeObservation {
+            provider_reference: o
+                .provider_resource_id
+                .map(|resource_id| o3k_domain::StorageProviderReference {
+                    provider: "o3k-storage".into(),
+                    resource_id,
+                })
+                .ok_or(StorageProviderError::CommandFailed)?,
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: o.resource_state == "available",
+        })
+    }
+    async fn delete_volume(
+        &self,
+        request: &StorageVolumeRequest,
+    ) -> Result<(), StorageProviderError> {
+        self.execute(
+            StorageAction::DeleteVolume,
+            request.volume_id.to_string(),
+            request.project_id.clone(),
+            request.generation,
+            request,
+        )
+        .await
+        .map(|_| ())
+    }
+    async fn prepare_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<PreparedAttachment, StorageProviderError> {
+        let payload = serde_json::json!({"attachment_id": request.attachment_id, "volume_id": request.volume_id, "project_id": request.project_id, "volume_generation": request.volume_generation, "host_id": request.host_id, "access_mode": request.access_mode});
+        let o = self
+            .execute(
+                StorageAction::PrepareAttachment,
+                request.attachment_id.to_string(),
+                request.project_id.clone(),
+                request.volume_generation,
+                &payload,
+            )
+            .await?;
+        PreparedAttachment::from_provider(
+            o3k_domain::StorageProviderReference {
+                provider: "o3k-storage".into(),
+                resource_id: o.provider_resource_id.unwrap_or_default(),
+            },
+            "/dev/unknown".into(),
+            request.attachment_id,
+            request.volume_id,
+        )
+    }
+    async fn inspect_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        let payload = serde_json::json!({"attachment_id": request.attachment_id, "volume_id": request.volume_id, "project_id": request.project_id, "volume_generation": request.volume_generation, "host_id": request.host_id, "access_mode": request.access_mode});
+        let o = self
+            .execute(
+                StorageAction::Reconcile,
+                request.attachment_id.to_string(),
+                request.project_id.clone(),
+                request.volume_generation,
+                &payload,
+            )
+            .await?;
+        Ok(StorageAttachmentObservation {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            host_id: request.host_id.clone(),
+            attached: o.resource_state == "attached",
+            provider_reference: o3k_domain::StorageProviderReference {
+                provider: "o3k-storage".into(),
+                resource_id: o.provider_resource_id.unwrap_or_default(),
+            },
+        })
+    }
+    async fn terminate_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        self.inspect_attachment(request).await
+    }
+    async fn create_snapshot(
+        &self,
+        _request: &StorageSnapshotRequest,
+    ) -> Result<StorageSnapshotObservation, StorageProviderError> {
+        Err(StorageProviderError::Unavailable)
+    }
+    async fn delete_snapshot(
+        &self,
+        _request: &StorageSnapshotRequest,
+    ) -> Result<(), StorageProviderError> {
+        Err(StorageProviderError::Unavailable)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LocalStorageFence {
