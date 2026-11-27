@@ -24,6 +24,9 @@ pub struct InitRequest {
     /// Omitting it is an explicit operator-mediated wildcard enrollment flow.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// When known, bind the one-time grant to the prepared host epoch.
+    #[serde(default)]
+    pub agent_epoch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +50,10 @@ pub struct ClientConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinRequest {
+    #[serde(default)]
     pub enrollment_token: String,
+    #[serde(default)]
+    pub enrollment_grant_id: Option<String>,
     pub agent_id: String,
     pub agent_epoch: String,
     pub certificate: String,

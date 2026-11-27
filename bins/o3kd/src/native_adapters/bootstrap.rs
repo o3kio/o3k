@@ -18,7 +18,10 @@ use o3k_native_api::bootstrap::{
 };
 use o3k_native_api::building_block::BuildingBlockReader;
 use o3k_placement::{Inventory, PlacementLedger};
-use o3k_store::{BootstrapRepository, BootstrapStateRecord, EnrollmentGrantRecord, O3kStore};
+use o3k_store::{
+    BootstrapRepository, BootstrapStateRecord, EnrollmentGrantRecord, EnrollmentResultRecord,
+    O3kStore,
+};
 
 /// Durable enrollment-grant adapter.  The store retains only the token digest;
 /// plaintext bearer material is never passed to or returned by this boundary.
@@ -26,7 +29,7 @@ pub struct StoreEnrollmentGrants(pub Arc<O3kStore>);
 
 #[async_trait]
 impl o3k_compute_agent::AsyncDurableEnrollmentGrants for StoreEnrollmentGrants {
-    async fn consume(
+    async fn lookup(
         &self,
         grant_id: &str,
         token_digest_hex: &str,
@@ -35,21 +38,101 @@ impl o3k_compute_agent::AsyncDurableEnrollmentGrants for StoreEnrollmentGrants {
     {
         let record = self
             .0
-            .consume_enrollment_grant(grant_id, "", token_digest_hex, now_unix_ms)
+            .get_enrollment_grant(grant_id)
             .await
-            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::State)?;
+            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::State)?
+            .ok_or(o3k_compute_agent::EnrollmentIssueError::UnauthorizedGrant)?;
+        if record.token_digest != token_digest_hex || now_unix_ms >= record.expires_at_unix_ms {
+            return Err(o3k_compute_agent::EnrollmentIssueError::UnauthorizedGrant);
+        }
         Ok(o3k_compute_agent::EnrollmentGrantBinding {
             grant_id: record.grant_id,
             token_digest: decode_digest(&record.token_digest)
                 .ok_or(o3k_compute_agent::EnrollmentIssueError::State)?,
             agent_id: record.agent_id,
-            // Existing bootstrap grants bind agent identity and expiry. Epoch is
-            // supplied by the joining CSR and is therefore intentionally empty
-            // until the durable schema carries an epoch column.
-            agent_epoch: String::new(),
+            agent_epoch: record.agent_epoch,
             expires_at_unix_ms: record.expires_at_unix_ms,
             consumed_at_unix_ms: record.used_at_unix_ms,
         })
+    }
+
+    async fn existing_issue(
+        &self,
+        grant_id: &str,
+        token_digest_hex: &str,
+        agent_id: &str,
+        agent_epoch: &str,
+        csr_sha256: &str,
+        now_unix_ms: u64,
+    ) -> Result<Option<o3k_compute_agent::IssuedEnrollment>, o3k_compute_agent::EnrollmentIssueError>
+    {
+        let result = self
+            .0
+            .get_enrollment_result(grant_id)
+            .await
+            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::State)?;
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        if result.token_digest != token_digest_hex
+            || result.agent_id != agent_id
+            || result.agent_epoch != agent_epoch
+            || result.csr_sha256 != csr_sha256
+            || result.certificate_expires_at_unix_ms <= now_unix_ms
+        {
+            return Err(o3k_compute_agent::EnrollmentIssueError::UnauthorizedGrant);
+        }
+        let issued = issued_from_result(&result);
+        let fingerprint = o3k_compute_agent::validate_issued_enrollment(&issued, now_unix_ms)
+            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::UnauthorizedGrant)?;
+        if fingerprint != result.certificate_fingerprint_sha256 {
+            return Err(o3k_compute_agent::EnrollmentIssueError::UnauthorizedGrant);
+        }
+        Ok(Some(issued))
+    }
+
+    async fn complete_issue(
+        &self,
+        issue: &o3k_compute_agent::DurableEnrollmentIssue,
+        now_unix_ms: u64,
+    ) -> Result<o3k_compute_agent::IssuedEnrollment, o3k_compute_agent::EnrollmentIssueError> {
+        let result = EnrollmentResultRecord {
+            grant_id: issue.grant_id.clone(),
+            agent_id: issue.agent_id.clone(),
+            agent_epoch: issue.agent_epoch.clone(),
+            token_digest: issue.token_digest_hex.clone(),
+            csr_sha256: issue.csr_sha256.clone(),
+            certificate_fingerprint_sha256: issue.certificate_fingerprint_sha256.clone(),
+            client_certificate_chain_pem: String::from_utf8(
+                issue.issued.client_certificate_chain_pem.clone(),
+            )
+            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::Signer)?,
+            ca_certificate_pem: String::from_utf8(issue.issued.ca_certificate_pem.clone())
+                .map_err(|_| o3k_compute_agent::EnrollmentIssueError::Signer)?,
+            ca_fingerprint_sha256: issue.issued.ca_fingerprint_sha256.clone(),
+            certificate_expires_at_unix_ms: issue.issued.certificate_expires_at_unix_ms,
+            rotation_deadline_unix_ms: issue.issued.rotation_deadline_unix_ms,
+            issued_at_unix_ms: issue.issued_at_unix_ms,
+            registered_at_unix_ms: None,
+        };
+        let persisted = self
+            .0
+            .complete_enrollment_issue(&result, now_unix_ms)
+            .await
+            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::UnauthorizedGrant)?;
+        Ok(issued_from_result(&persisted))
+    }
+}
+
+fn issued_from_result(result: &EnrollmentResultRecord) -> o3k_compute_agent::IssuedEnrollment {
+    o3k_compute_agent::IssuedEnrollment {
+        agent_id: result.agent_id.clone(),
+        agent_epoch: result.agent_epoch.clone(),
+        client_certificate_chain_pem: result.client_certificate_chain_pem.as_bytes().to_vec(),
+        ca_certificate_pem: result.ca_certificate_pem.as_bytes().to_vec(),
+        ca_fingerprint_sha256: result.ca_fingerprint_sha256.clone(),
+        certificate_expires_at_unix_ms: result.certificate_expires_at_unix_ms,
+        rotation_deadline_unix_ms: result.rotation_deadline_unix_ms,
     }
 }
 
@@ -90,9 +173,6 @@ fn digest(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-fn cert_digest(value: &str) -> String {
-    digest(value)
 }
 fn client_config(profile: &str) -> ClientConfig {
     ClientConfig {
@@ -458,7 +538,7 @@ impl BootstrapWorkflow for BootstrapAdapter {
                 agent_id: request.agent_id.unwrap_or_else(|| "*".into()),
                 // Init precedes host registration; the epoch is bound when the
                 // grant is consumed by the enrollment RPC.
-                agent_epoch: String::new(),
+                agent_epoch: request.agent_epoch.unwrap_or_default(),
                 token_digest: digest(&raw),
                 issued_at_unix_ms: issued_at,
                 expires_at_unix_ms: expires_at,
@@ -489,7 +569,58 @@ impl BootstrapWorkflow for BootstrapAdapter {
             return Err(BootstrapFailure::Invalid);
         }
         let _guard = self.lock.lock().await;
-        let fingerprint = cert_digest(&request.certificate);
+        let fingerprint =
+            o3k_compute_agent::certificate_fingerprint_sha256(request.certificate.as_bytes())
+                .map_err(|_| BootstrapFailure::Invalid)?;
+        let (grant_id, _) = request
+            .enrollment_token
+            .split_once('.')
+            .ok_or(BootstrapFailure::Unauthorized)?;
+        let grant_id = if let Some(id) = request.enrollment_grant_id.as_deref() {
+            if id.trim().is_empty() || id != grant_id {
+                return Err(BootstrapFailure::Invalid);
+            }
+            Some(id.to_owned())
+        } else {
+            Some(grant_id.to_owned())
+        };
+        let token_digest = digest(&request.enrollment_token);
+        let stored_issue = self
+            .store
+            .get_enrollment_result(grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?;
+        let issued_enrollment = if let Some(result) = stored_issue {
+            if result.token_digest != token_digest
+                || result.agent_id != request.agent_id
+                || result.agent_epoch != request.agent_epoch
+                || result.certificate_fingerprint_sha256 != fingerprint
+            {
+                return Err(BootstrapFailure::Unauthorized);
+            }
+            let issued = issued_from_result(&result);
+            let verified_fingerprint =
+                o3k_compute_agent::validate_issued_enrollment(&issued, now_ms())
+                    .map_err(|_| BootstrapFailure::Unauthorized)?;
+            if verified_fingerprint != result.certificate_fingerprint_sha256 {
+                return Err(BootstrapFailure::Unauthorized);
+            }
+            Some(
+                self.store
+                    .consume_enrollment_result(
+                        grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?,
+                        &token_digest,
+                        &request.agent_id,
+                        &request.agent_epoch,
+                        &fingerprint,
+                        now_ms(),
+                    )
+                    .await
+                    .map_err(|_| BootstrapFailure::Unauthorized)?,
+            )
+        } else {
+            None
+        };
         let mut state = self
             .store
             .get_bootstrap_state(STATE_ID)
@@ -498,6 +629,30 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .map(state_from_record)
             .transpose()?
             .ok_or(BootstrapFailure::Unavailable)?;
+        let legacy_grant = if issued_enrollment.is_none() {
+            let id = grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?;
+            let grant = self
+                .store
+                .get_enrollment_grant(id)
+                .await
+                .map_err(|_| BootstrapFailure::Internal)?
+                .ok_or(BootstrapFailure::Unauthorized)?;
+            let old_identity_matches = state
+                .enrolled_agents
+                .get(&request.agent_id)
+                .is_some_and(|old| old == &fingerprint);
+            if (grant.agent_id != "*" && grant.agent_id != request.agent_id)
+                || grant.agent_epoch != request.agent_epoch
+                || grant.token_digest != token_digest
+                || (grant.used_at_unix_ms.is_some() && !old_identity_matches)
+                || (grant.used_at_unix_ms.is_none() && now_ms() >= grant.expires_at_unix_ms)
+            {
+                return Err(BootstrapFailure::Unauthorized);
+            }
+            true
+        } else {
+            false
+        };
         if let Some(region) = request.region.as_deref() {
             if !self.locations.contains_region(region) {
                 return Err(BootstrapFailure::Invalid);
@@ -585,23 +740,9 @@ impl BootstrapWorkflow for BootstrapAdapter {
                 config: client_config(&state.cloud_profile_id),
             });
         }
-        let (grant_id, _) = request
-            .enrollment_token
-            .split_once('.')
-            .ok_or(BootstrapFailure::Unauthorized)?;
-        let grant = self
-            .store
-            .get_enrollment_grant(grant_id)
-            .await
-            .map_err(|_| BootstrapFailure::Internal)?
-            .ok_or(BootstrapFailure::Unauthorized)?;
-        if grant.agent_id != "*" && grant.agent_id != request.agent_id {
-            return Err(BootstrapFailure::Unauthorized);
-        }
-        if grant.token_digest != digest(&request.enrollment_token)
-            || grant.used_at_unix_ms.is_some()
-            || now_ms() >= grant.expires_at_unix_ms
-        {
+        if issued_enrollment.as_ref().is_some_and(|issued| {
+            issued.agent_id != request.agent_id || issued.agent_epoch != request.agent_epoch
+        }) {
             return Err(BootstrapFailure::Unauthorized);
         }
         let capabilities = parse_capabilities(&request.capabilities)?;
@@ -680,15 +821,17 @@ impl BootstrapWorkflow for BootstrapAdapter {
         // side effects and the durable enrolled projection have succeeded.
         // A crash before this point can safely replay through the durable
         // agent projection; a replay after it is rejected as single-use.
-        self.store
-            .consume_enrollment_grant(
-                grant_id,
-                &request.agent_epoch,
-                &digest(&request.enrollment_token),
-                now_ms(),
-            )
-            .await
-            .map_err(|_| BootstrapFailure::Unauthorized)?;
+        if legacy_grant {
+            self.store
+                .consume_enrollment_grant(
+                    grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?,
+                    &request.agent_epoch,
+                    &digest(&request.enrollment_token),
+                    now_ms(),
+                )
+                .await
+                .map_err(|_| BootstrapFailure::Unauthorized)?;
+        }
         record_bootstrap_audit(
             &self.store,
             format!("bootstrap-join-{}", request.agent_id),
@@ -743,6 +886,7 @@ mod tests {
                     profile_id: None,
                     request_id: Some("test-init".to_owned()),
                     agent_id: Some("node-test".to_owned()),
+                    agent_epoch: Some("epoch-1".to_owned()),
                 },
                 Some("secret"),
             )
@@ -750,10 +894,34 @@ mod tests {
             .map_err(|error| format!("init failed: {error:?}"))?;
         assert_eq!(init.phase, "initialized");
         assert!(!readiness.is_ready());
+        let enrollment_token = init.enrollment_token.ok_or("missing grant")?;
+        let grant_id = enrollment_token
+            .split_once('.')
+            .map(|(id, _)| id.to_owned())
+            .ok_or("malformed grant token")?;
+
+        // A public certificate and grant identifier are insufficient to join;
+        // the one-use grant token must also be presented.
+        assert!(adapter
+            .join(JoinRequest {
+                enrollment_token: String::new(),
+                enrollment_grant_id: Some(grant_id.clone()),
+                agent_id: "node-test".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([(String::from("VCPU"), 2), (String::from("MEMORY_MB"), 1024)]),
+            })
+            .await
+            .is_err());
 
         let join = adapter
             .join(JoinRequest {
-                enrollment_token: init.enrollment_token.ok_or("missing grant")?,
+                enrollment_token: enrollment_token.clone(),
+                enrollment_grant_id: None,
                 agent_id: "node-test".to_owned(),
                 agent_epoch: "epoch-1".to_owned(),
                 certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
@@ -778,10 +946,19 @@ mod tests {
             .await?
             .ok_or("bootstrap state missing")?;
         assert_eq!(durable.phase, "ready");
+        let consumed_grant = store
+            .get_enrollment_grant(&grant_id)
+            .await?
+            .ok_or("grant missing")?;
+        assert_eq!(consumed_grant.agent_id, "node-test");
+        assert_eq!(consumed_grant.agent_epoch, "epoch-1");
+        assert_eq!(consumed_grant.token_digest, digest(&enrollment_token));
+        assert!(consumed_grant.used_at_unix_ms.is_some());
 
         let replay = adapter
             .join(JoinRequest {
-                enrollment_token: "already-consumed-grant".into(),
+                enrollment_token: enrollment_token.clone(),
+                enrollment_grant_id: None,
                 agent_id: "node-test".into(),
                 agent_epoch: "epoch-1".into(),
                 certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
@@ -812,6 +989,7 @@ mod tests {
                     profile_id: None,
                     request_id: Some("test-init-repeat".to_owned()),
                     agent_id: Some("node-second".to_owned()),
+                    agent_epoch: Some("epoch-2".to_owned()),
                 },
                 Some("secret"),
             )
@@ -823,6 +1001,7 @@ mod tests {
         adapter
             .join(JoinRequest {
                 enrollment_token: second_token,
+                enrollment_grant_id: None,
                 agent_id: "node-second".to_owned(),
                 agent_epoch: "epoch-2".to_owned(),
                 certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
@@ -877,6 +1056,7 @@ mod tests {
         let failed_replay = restarted_adapter
             .join(JoinRequest {
                 enrollment_token: "malformed-replay".into(),
+                enrollment_grant_id: None,
                 agent_id: "node-test".into(),
                 agent_epoch: "epoch-3".into(),
                 certificate: String::from_utf8(
@@ -900,9 +1080,10 @@ mod tests {
         );
         let reinstall_replay = restarted_adapter
             .join(JoinRequest {
-                enrollment_token: "reinstall-replay-grant".into(),
+                enrollment_token: enrollment_token.clone(),
+                enrollment_grant_id: None,
                 agent_id: "node-test".into(),
-                agent_epoch: "epoch-3".into(),
+                agent_epoch: "epoch-1".into(),
                 certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
                 region: None,
                 availability_domain: None,
@@ -955,6 +1136,7 @@ mod tests {
             profile_id: None,
             request_id: Some("init-retry-replay".to_owned()),
             agent_id: Some("node-retry".to_owned()),
+            agent_epoch: Some("epoch-retry".to_owned()),
         };
         let committed = adapter
             .init(request(), Some("secret"))
@@ -1037,6 +1219,7 @@ mod tests {
         adapter
             .join(JoinRequest {
                 enrollment_token: second_token.clone(),
+                enrollment_grant_id: None,
                 agent_id: "node-retry".to_owned(),
                 agent_epoch: "epoch-retry".to_owned(),
                 certificate: String::from_utf8(
@@ -1062,6 +1245,7 @@ mod tests {
         let reuse = adapter
             .join(JoinRequest {
                 enrollment_token: second_token.clone(),
+                enrollment_grant_id: None,
                 agent_id: "node-other".to_owned(),
                 agent_epoch: "epoch-other".to_owned(),
                 certificate: String::from_utf8(

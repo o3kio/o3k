@@ -29,6 +29,18 @@ pub struct EnrollmentGrantBinding {
     pub consumed_at_unix_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableEnrollmentIssue {
+    pub grant_id: String,
+    pub agent_id: String,
+    pub agent_epoch: String,
+    pub token_digest_hex: String,
+    pub csr_sha256: String,
+    pub certificate_fingerprint_sha256: String,
+    pub issued: IssuedEnrollment,
+    pub issued_at_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuedEnrollment {
     pub agent_id: String,
@@ -165,26 +177,28 @@ pub enum EnrollmentIssueError {
     State,
 }
 
-/// Minimal durable grant boundary. Implementations must perform the
-/// token-digest check and consume transition in one transaction; the
-/// authority never receives the plaintext token from the store.
-pub trait DurableEnrollmentGrants: Send + Sync {
-    fn consume(
-        &self,
-        grant_id: &str,
-        token_digest_hex: &str,
-        now_unix_ms: u64,
-    ) -> Result<EnrollmentGrantBinding, EnrollmentIssueError>;
-}
-
 #[async_trait::async_trait]
 pub trait AsyncDurableEnrollmentGrants: Send + Sync {
-    async fn consume(
+    async fn lookup(
         &self,
         grant_id: &str,
         token_digest_hex: &str,
         now_unix_ms: u64,
     ) -> Result<EnrollmentGrantBinding, EnrollmentIssueError>;
+    async fn existing_issue(
+        &self,
+        grant_id: &str,
+        token_digest_hex: &str,
+        agent_id: &str,
+        agent_epoch: &str,
+        csr_sha256: &str,
+        now_unix_ms: u64,
+    ) -> Result<Option<IssuedEnrollment>, EnrollmentIssueError>;
+    async fn complete_issue(
+        &self,
+        issue: &DurableEnrollmentIssue,
+        now_unix_ms: u64,
+    ) -> Result<IssuedEnrollment, EnrollmentIssueError>;
 }
 
 pub struct EnrollmentIssuer<S> {
@@ -367,7 +381,7 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
         {
             return Err(EnrollmentIssueError::UnauthorizedGrant);
         }
-        validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
+        let _ = validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
         let issued = self
             .signer
             .sign_csr(
@@ -397,37 +411,6 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
         Ok(issued)
     }
 
-    /// Issue using a controller-owned durable grant transaction. This path is
-    /// intended for production composition; the in-memory constructor remains
-    /// useful only for isolated unit tests.
-    pub fn issue_durable<R: DurableEnrollmentGrants>(
-        &self,
-        grants: &R,
-        grant_id: &str,
-        token: &[u8],
-        csr_pem: &[u8],
-        now_unix_ms: u64,
-    ) -> Result<IssuedEnrollment, EnrollmentIssueError> {
-        if token.len() > 4096 || csr_pem.len() > 128 * 1024 {
-            return Err(EnrollmentIssueError::UnauthorizedGrant);
-        }
-        let token_digest = hex_lower(&Sha256::digest(token));
-        let grant = grants.consume(grant_id, &token_digest, now_unix_ms)?;
-        validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
-        let issued = self
-            .signer
-            .sign_csr(
-                grant_id,
-                token,
-                &grant.agent_id,
-                &grant.agent_epoch,
-                csr_pem,
-            )
-            .map_err(|_| EnrollmentIssueError::Signer)?;
-        validate_issued_binding(&issued, csr_pem, now_unix_ms)?;
-        Ok(issued)
-    }
-
     pub async fn issue_durable_async<R: AsyncDurableEnrollmentGrants>(
         &self,
         grants: &R,
@@ -440,20 +423,49 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
             return Err(EnrollmentIssueError::UnauthorizedGrant);
         }
         let token_digest = hex_lower(&Sha256::digest(token));
-        let grant = grants.consume(grant_id, &token_digest, now_unix_ms).await?;
-        validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
+        let grant = grants.lookup(grant_id, &token_digest, now_unix_ms).await?;
+        let (agent_id, agent_epoch) = validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
+        let csr_sha256 = hex_lower(&Sha256::digest(csr_pem));
+        if let Some(prior) = grants
+            .existing_issue(
+                grant_id,
+                &token_digest,
+                &agent_id,
+                &agent_epoch,
+                &csr_sha256,
+                now_unix_ms,
+            )
+            .await?
+        {
+            if prior.certificate_expires_at_unix_ms > now_unix_ms {
+                return Ok(prior);
+            }
+            return Err(EnrollmentIssueError::UnauthorizedGrant);
+        }
         let issued = self
             .signer
-            .sign_csr(
-                grant_id,
-                token,
-                &grant.agent_id,
-                &grant.agent_epoch,
-                csr_pem,
-            )
+            .sign_csr(grant_id, token, &agent_id, &agent_epoch, csr_pem)
             .map_err(|_| EnrollmentIssueError::Signer)?;
-        validate_issued_binding(&issued, csr_pem, now_unix_ms)?;
-        Ok(issued)
+        let certificate_fingerprint_sha256 =
+            validate_issued_binding(&issued, csr_pem, now_unix_ms)?;
+        if issued.agent_id != agent_id || issued.agent_epoch != agent_epoch {
+            return Err(EnrollmentIssueError::Signer);
+        }
+        grants
+            .complete_issue(
+                &DurableEnrollmentIssue {
+                    grant_id: grant_id.to_owned(),
+                    agent_id,
+                    agent_epoch,
+                    token_digest_hex: token_digest,
+                    csr_sha256,
+                    certificate_fingerprint_sha256,
+                    issued,
+                    issued_at_unix_ms: now_unix_ms,
+                },
+                now_unix_ms,
+            )
+            .await
     }
 }
 
@@ -461,11 +473,10 @@ fn validate_issued_binding(
     issued: &IssuedEnrollment,
     csr_pem: &[u8],
     now_unix_ms: u64,
-) -> Result<(), EnrollmentIssueError> {
+) -> Result<String, EnrollmentIssueError> {
+    let fingerprint = validate_issued_enrollment(issued, now_unix_ms)?;
     let chain = X509::stack_from_pem(&issued.client_certificate_chain_pem)
         .map_err(|_| EnrollmentIssueError::Signer)?;
-    let ca =
-        X509::from_pem(&issued.ca_certificate_pem).map_err(|_| EnrollmentIssueError::Signer)?;
     let leaf = chain.first().ok_or(EnrollmentIssueError::Signer)?;
     let key = X509Req::from_pem(csr_pem)
         .and_then(|r| r.public_key())
@@ -474,6 +485,35 @@ fn validate_issued_binding(
         .public_key()
         .map_err(|_| EnrollmentIssueError::Signer)?
         .public_eq(&key)
+    {
+        return Err(EnrollmentIssueError::Signer);
+    }
+    Ok(fingerprint)
+}
+
+/// Validate a returned or persisted issuance against the installation-local
+/// CA, agent/epoch URI SANs and declared time bounds.
+pub fn validate_issued_enrollment(
+    issued: &IssuedEnrollment,
+    now_unix_ms: u64,
+) -> Result<String, EnrollmentIssueError> {
+    let chain = X509::stack_from_pem(&issued.client_certificate_chain_pem)
+        .map_err(|_| EnrollmentIssueError::Signer)?;
+    let ca =
+        X509::from_pem(&issued.ca_certificate_pem).map_err(|_| EnrollmentIssueError::Signer)?;
+    let leaf = chain.first().ok_or(EnrollmentIssueError::Signer)?;
+    let subject_alt_names = leaf
+        .subject_alt_names()
+        .ok_or(EnrollmentIssueError::Signer)?;
+    let expected_agent_uri = format!("urn:o3k:compute:agent:{}", issued.agent_id);
+    let expected_epoch_uri = format!("urn:o3k:compute:epoch:{}", issued.agent_epoch);
+    let uri_names: Vec<&str> = subject_alt_names
+        .iter()
+        .filter_map(|name| name.uri())
+        .collect();
+    if uri_names.len() != 2
+        || !uri_names.contains(&expected_agent_uri.as_str())
+        || !uri_names.contains(&expected_epoch_uri.as_str())
     {
         return Err(EnrollmentIssueError::Signer);
     }
@@ -497,7 +537,20 @@ fn validate_issued_binding(
     {
         return Err(EnrollmentIssueError::Signer);
     }
-    Ok(())
+    Ok(hex_lower(&Sha256::digest(
+        leaf.to_der().map_err(|_| EnrollmentIssueError::Signer)?,
+    )))
+}
+
+/// Return the SHA-256 fingerprint of the DER leaf certificate in a PEM chain.
+/// This keeps enrollment-result binding independent of PEM whitespace and
+/// line-ending choices made by callers.
+pub fn certificate_fingerprint_sha256(pem: &[u8]) -> Result<String, EnrollmentIssueError> {
+    let chain = X509::stack_from_pem(pem).map_err(|_| EnrollmentIssueError::Signer)?;
+    let leaf = chain.first().ok_or(EnrollmentIssueError::Signer)?;
+    Ok(hex_lower(&Sha256::digest(
+        leaf.to_der().map_err(|_| EnrollmentIssueError::Signer)?,
+    )))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -510,7 +563,11 @@ fn hex_lower(bytes: &[u8]) -> String {
     output
 }
 
-fn validate_csr(csr_pem: &[u8], agent_id: &str, epoch: &str) -> Result<(), EnrollmentIssueError> {
+fn validate_csr(
+    csr_pem: &[u8],
+    agent_id: &str,
+    epoch: &str,
+) -> Result<(String, String), EnrollmentIssueError> {
     let csr = X509Req::from_pem(csr_pem).map_err(|_| EnrollmentIssueError::InvalidCsr)?;
     let public_key = csr
         .public_key()
@@ -528,15 +585,30 @@ fn validate_csr(csr_pem: &[u8], agent_id: &str, epoch: &str) -> Result<(), Enrol
         .lines()
         .flat_map(|line| line.split_whitespace())
         .filter_map(|token| token.strip_prefix("URI:"))
+        // OpenSSL's human-readable rendering may print comma separators at
+        // line ends when multiple GeneralNames share one extension. Remove
+        // only that presentation delimiter before exact identity matching.
+        .map(|uri| uri.trim_end_matches(','))
         .collect();
-    let expected_agent = format!("urn:o3k:compute:agent:{agent_id}");
-    let expected_epoch = format!("urn:o3k:compute:epoch:{epoch}");
-    if !uris.iter().any(|uri| *uri == expected_agent)
-        || (!epoch.is_empty() && !uris.iter().any(|uri| *uri == expected_epoch))
+    let agent_ids: Vec<&str> = uris
+        .iter()
+        .filter_map(|uri| uri.strip_prefix("urn:o3k:compute:agent:"))
+        .collect();
+    let epochs: Vec<&str> = uris
+        .iter()
+        .filter_map(|uri| uri.strip_prefix("urn:o3k:compute:epoch:"))
+        .collect();
+    if agent_ids.len() != 1 || epochs.len() != 1 || agent_ids[0].is_empty() || epochs[0].is_empty()
     {
         return Err(EnrollmentIssueError::InvalidCsr);
     }
-    Ok(())
+    let parsed_agent = agent_ids[0].to_owned();
+    let parsed_epoch = epochs[0].to_owned();
+    if (agent_id != "*" && parsed_agent != agent_id) || (!epoch.is_empty() && parsed_epoch != epoch)
+    {
+        return Err(EnrollmentIssueError::InvalidCsr);
+    }
+    Ok((parsed_agent, parsed_epoch))
 }
 
 #[cfg(test)]

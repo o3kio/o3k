@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use super::PostgresStore;
-use crate::{BootstrapRepository, BootstrapStateRecord, EnrollmentGrantRecord, StoreError};
+use crate::{
+    BootstrapRepository, BootstrapStateRecord, EnrollmentGrantRecord, EnrollmentResultRecord,
+    StoreError,
+};
 
 fn state(row: sqlx::postgres::PgRow) -> Result<BootstrapStateRecord, StoreError> {
     Ok(BootstrapStateRecord {
@@ -51,9 +54,48 @@ fn grant(row: sqlx::postgres::PgRow) -> Result<EnrollmentGrantRecord, StoreError
             .transpose()?,
     })
 }
+fn enrollment_result(row: sqlx::postgres::PgRow) -> Result<EnrollmentResultRecord, StoreError> {
+    let timestamp = |name| -> Result<u64, StoreError> {
+        row.try_get::<i64, _>(name)
+            .map_err(StoreError::Database)?
+            .try_into()
+            .map_err(|_| StoreError::Corrupt("enrollment result timestamp overflow".into()))
+    };
+    Ok(EnrollmentResultRecord {
+        grant_id: row.try_get("grant_id").map_err(StoreError::Database)?,
+        agent_id: row.try_get("agent_id").map_err(StoreError::Database)?,
+        agent_epoch: row.try_get("agent_epoch").map_err(StoreError::Database)?,
+        token_digest: row.try_get("token_digest").map_err(StoreError::Database)?,
+        csr_sha256: row.try_get("csr_sha256").map_err(StoreError::Database)?,
+        certificate_fingerprint_sha256: row
+            .try_get("certificate_fingerprint_sha256")
+            .map_err(StoreError::Database)?,
+        client_certificate_chain_pem: row
+            .try_get("client_certificate_chain_pem")
+            .map_err(StoreError::Database)?,
+        ca_certificate_pem: row
+            .try_get("ca_certificate_pem")
+            .map_err(StoreError::Database)?,
+        ca_fingerprint_sha256: row
+            .try_get("ca_fingerprint_sha256")
+            .map_err(StoreError::Database)?,
+        certificate_expires_at_unix_ms: timestamp("certificate_expires_at_unix_ms")?,
+        rotation_deadline_unix_ms: timestamp("rotation_deadline_unix_ms")?,
+        issued_at_unix_ms: timestamp("issued_at_unix_ms")?,
+        registered_at_unix_ms: row
+            .try_get::<Option<i64>, _>("registered_at_unix_ms")
+            .map_err(StoreError::Database)?
+            .map(|v| {
+                v.try_into()
+                    .map_err(|_| StoreError::Corrupt("enrollment result timestamp overflow".into()))
+            })
+            .transpose()?,
+    })
+}
 const STATE_COLUMNS: &str =
     "state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,updated_at";
 const GRANT_COLUMNS: &str = "grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms";
+const ENROLLMENT_RESULT_COLUMNS: &str = "grant_id,agent_id,agent_epoch,token_digest,csr_sha256,certificate_fingerprint_sha256,client_certificate_chain_pem,ca_certificate_pem,ca_fingerprint_sha256,certificate_expires_at_unix_ms,rotation_deadline_unix_ms,issued_at_unix_ms,registered_at_unix_ms";
 
 impl PostgresStore {
     pub async fn get_bootstrap_state(
@@ -95,7 +137,7 @@ impl PostgresStore {
         &self,
         g: &EnrollmentGrantRecord,
     ) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO enrollment_grants(grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms) VALUES($1,$2,$3,$4,$5,$6)").bind(&g.grant_id).bind(&g.agent_id).bind(&g.agent_epoch).bind(&g.token_digest).bind(i64::try_from(g.issued_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(i64::try_from(g.expires_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(g.used_at_unix_ms.and_then(|v| i64::try_from(v).ok())).execute(&self.pool).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO enrollment_grants(grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(&g.grant_id).bind(&g.agent_id).bind(&g.agent_epoch).bind(&g.token_digest).bind(i64::try_from(g.issued_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(i64::try_from(g.expires_at_unix_ms).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?).bind(g.used_at_unix_ms.and_then(|v| i64::try_from(v).ok())).execute(&self.pool).await.map_err(StoreError::Database)?;
         Ok(())
     }
     pub async fn consume_enrollment_grant(
@@ -138,6 +180,117 @@ impl PostgresStore {
             ..g
         })
     }
+
+    pub async fn complete_enrollment_issue(
+        &self,
+        result: &EnrollmentResultRecord,
+        now: u64,
+    ) -> Result<EnrollmentResultRecord, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        if let Some(row) = sqlx::query(&format!(
+            "SELECT {ENROLLMENT_RESULT_COLUMNS} FROM enrollment_results WHERE grant_id=$1 FOR UPDATE"
+        ))
+        .bind(&result.grant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        {
+            let prior = enrollment_result(row)?;
+            if prior.agent_id != result.agent_id
+                || prior.agent_epoch != result.agent_epoch
+                || prior.token_digest != result.token_digest
+                || prior.csr_sha256 != result.csr_sha256
+            {
+                return Err(StoreError::OwnershipConflict);
+            }
+            tx.commit().await.map_err(StoreError::Database)?;
+            return Ok(prior);
+        }
+        let row = sqlx::query(&format!(
+            "SELECT {GRANT_COLUMNS} FROM enrollment_grants WHERE grant_id=$1 FOR UPDATE"
+        ))
+        .bind(&result.grant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        let grant = grant(row)?;
+        if (grant.agent_id != "*" && grant.agent_id != result.agent_id)
+            || (!grant.agent_epoch.is_empty() && grant.agent_epoch != result.agent_epoch)
+            || grant.token_digest != result.token_digest
+            || grant.used_at_unix_ms.is_some()
+            || now >= grant.expires_at_unix_ms
+            || result.agent_id.is_empty()
+            || result.agent_epoch.is_empty()
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let updated = sqlx::query("UPDATE enrollment_grants SET agent_id=$1,agent_epoch=$2,used_at_unix_ms=$3 WHERE grant_id=$4 AND used_at_unix_ms IS NULL")
+            .bind(&result.agent_id).bind(&result.agent_epoch).bind(i64::try_from(now).map_err(|_| StoreError::Corrupt("enrollment timestamp overflow".into()))?).bind(&result.grant_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query("INSERT INTO enrollment_results(grant_id,agent_id,agent_epoch,token_digest,csr_sha256,certificate_fingerprint_sha256,client_certificate_chain_pem,ca_certificate_pem,ca_fingerprint_sha256,certificate_expires_at_unix_ms,rotation_deadline_unix_ms,issued_at_unix_ms,registered_at_unix_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL)")
+            .bind(&result.grant_id).bind(&result.agent_id).bind(&result.agent_epoch).bind(&result.token_digest).bind(&result.csr_sha256).bind(&result.certificate_fingerprint_sha256).bind(&result.client_certificate_chain_pem).bind(&result.ca_certificate_pem).bind(&result.ca_fingerprint_sha256).bind(i64::try_from(result.certificate_expires_at_unix_ms).map_err(|_| StoreError::Corrupt("certificate timestamp overflow".into()))?).bind(i64::try_from(result.rotation_deadline_unix_ms).map_err(|_| StoreError::Corrupt("certificate timestamp overflow".into()))?).bind(i64::try_from(result.issued_at_unix_ms).map_err(|_| StoreError::Corrupt("certificate timestamp overflow".into()))?).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(result.clone())
+    }
+
+    pub async fn get_enrollment_result(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<EnrollmentResultRecord>, StoreError> {
+        sqlx::query(&format!(
+            "SELECT {ENROLLMENT_RESULT_COLUMNS} FROM enrollment_results WHERE grant_id=$1"
+        ))
+        .bind(grant_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+        .map(enrollment_result)
+        .transpose()
+    }
+
+    pub async fn consume_enrollment_result(
+        &self,
+        grant_id: &str,
+        token_digest: &str,
+        agent_id: &str,
+        agent_epoch: &str,
+        certificate_fingerprint: &str,
+        now: u64,
+    ) -> Result<EnrollmentResultRecord, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = sqlx::query(&format!(
+            "SELECT {ENROLLMENT_RESULT_COLUMNS} FROM enrollment_results WHERE grant_id=$1 FOR UPDATE"
+        ))
+        .bind(grant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        let mut result = enrollment_result(row)?;
+        if result.token_digest != token_digest
+            || result.agent_id != agent_id
+            || result.agent_epoch != agent_epoch
+            || result.certificate_fingerprint_sha256 != certificate_fingerprint
+            || result.certificate_expires_at_unix_ms <= now
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        if result.registered_at_unix_ms.is_some() {
+            tx.commit().await.map_err(StoreError::Database)?;
+            return Ok(result);
+        }
+        let updated = sqlx::query("UPDATE enrollment_results SET registered_at_unix_ms=$1 WHERE grant_id=$2 AND registered_at_unix_ms IS NULL AND certificate_fingerprint_sha256=$3")
+            .bind(i64::try_from(now).map_err(|_| StoreError::Corrupt("enrollment timestamp overflow".into()))?).bind(grant_id).bind(certificate_fingerprint).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::OwnershipConflict);
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        result.registered_at_unix_ms = Some(now);
+        Ok(result)
+    }
 }
 
 #[async_trait]
@@ -171,5 +324,30 @@ impl BootstrapRepository for PostgresStore {
         n: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError> {
         self.consume_enrollment_grant(id, epoch, d, n).await
+    }
+    async fn complete_enrollment_issue(
+        &self,
+        result: &EnrollmentResultRecord,
+        now: u64,
+    ) -> Result<EnrollmentResultRecord, StoreError> {
+        self.complete_enrollment_issue(result, now).await
+    }
+    async fn get_enrollment_result(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<EnrollmentResultRecord>, StoreError> {
+        self.get_enrollment_result(grant_id).await
+    }
+    async fn consume_enrollment_result(
+        &self,
+        grant_id: &str,
+        token_digest: &str,
+        agent_id: &str,
+        epoch: &str,
+        fingerprint: &str,
+        now: u64,
+    ) -> Result<EnrollmentResultRecord, StoreError> {
+        self.consume_enrollment_result(grant_id, token_digest, agent_id, epoch, fingerprint, now)
+            .await
     }
 }

@@ -8,15 +8,15 @@ use crate::domain::records::{
     CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
     CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord, CanonicalNetworkRecord,
     CanonicalOperationLifecycleUpdate, CanonicalRealmBindingRecord, CloudProfileRecord,
-    EnrollmentGrantRecord, FabricHostTransportIdentityRecord, FederatedBindingRecord,
-    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementCapacitySummary,
-    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
-    PlacementProviderStateRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    EnrollmentGrantRecord, EnrollmentResultRecord, FabricHostTransportIdentityRecord,
+    FederatedBindingRecord, ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
+    PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -76,6 +76,27 @@ pub trait BootstrapRepository: Send + Sync {
         token_digest: &str,
         now_unix_ms: u64,
     ) -> Result<EnrollmentGrantRecord, StoreError>;
+    /// Atomically consumes a grant and persists its issued public certificate
+    /// result, or returns the identical prior result for a safe retry.
+    async fn complete_enrollment_issue(
+        &self,
+        result: &EnrollmentResultRecord,
+        now_unix_ms: u64,
+    ) -> Result<EnrollmentResultRecord, StoreError>;
+    async fn get_enrollment_result(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<EnrollmentResultRecord>, StoreError>;
+    /// Consumes a matching issued result for canonical host registration.
+    async fn consume_enrollment_result(
+        &self,
+        grant_id: &str,
+        token_digest: &str,
+        agent_id: &str,
+        agent_epoch: &str,
+        certificate_fingerprint_sha256: &str,
+        now_unix_ms: u64,
+    ) -> Result<EnrollmentResultRecord, StoreError>;
 }
 
 /// Durable BuildingBlock lifecycle/link authority.  Implementations persist

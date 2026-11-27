@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS bootstrap_state (
 CREATE TABLE IF NOT EXISTS enrollment_grants (
     grant_id TEXT PRIMARY KEY NOT NULL,
     agent_id TEXT NOT NULL,
-    agent_epoch TEXT NOT NULL,
     token_digest TEXT NOT NULL,
     issued_at_unix_ms INTEGER NOT NULL CHECK (issued_at_unix_ms >= 0),
     expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms >= issued_at_unix_ms),

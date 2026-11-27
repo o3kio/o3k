@@ -134,6 +134,26 @@ pub struct EnrollmentGrantRecord {
     pub used_at_unix_ms: Option<u64>,
 }
 
+/// Public result of one successful grant-bound certificate issuance. The
+/// target private key is never persisted; the certificate chain is public and
+/// is retained so an interrupted response can be replayed exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentResultRecord {
+    pub grant_id: String,
+    pub agent_id: String,
+    pub agent_epoch: String,
+    pub token_digest: String,
+    pub csr_sha256: String,
+    pub certificate_fingerprint_sha256: String,
+    pub client_certificate_chain_pem: String,
+    pub ca_certificate_pem: String,
+    pub ca_fingerprint_sha256: String,
+    pub certificate_expires_at_unix_ms: u64,
+    pub rotation_deadline_unix_ms: u64,
+    pub issued_at_unix_ms: u64,
+    pub registered_at_unix_ms: Option<u64>,
+}
+
 impl BuildingBlockRecord {
     pub fn from_block(
         block: &o3k_kernel::BuildingBlock,
