@@ -879,7 +879,10 @@ if [[ "$PROFILE" == libvirt ]]; then
     # issuer, while the local bootstrap agent uses the bootstrap CA. Trust
     # both at the controller listener so both identities use the same
     # authenticated admission path.
-    install -d -m 0750 "$CONFIG_DIR/ea"
+    # The public CA bundle is read by the unprivileged o3kd service. Grant
+    # directory traversal to its group while keeping the issuer CA subdir
+    # itself private (root:root 0700).
+    install -d -m 0750 -o root -g o3k "$CONFIG_DIR/ea"
     issuer_ca="$("$PREFIX/bin/o3k-enrollment-issuer" --export-ca)" || die "cannot initialize EA enrollment CA"
     trust_tmp="$(mktemp "$CONFIG_DIR/ea/.compute-client-ca.XXXXXX")"
     chmod 0600 "$trust_tmp"
