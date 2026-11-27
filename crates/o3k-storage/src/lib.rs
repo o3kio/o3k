@@ -28,22 +28,21 @@ mod command_allowlist_tests {
     #[tokio::test]
     async fn system_runner_rejects_non_lvm_programs_before_spawn() {
         let runner = SystemLvmCommandRunner::default();
-        let error = runner
+        let result = runner
             .run("sh", &["-c".to_owned(), "touch /tmp/o3k-escape".to_owned()])
-            .await
-            .expect_err("non-LVM command must be rejected");
-        assert_eq!(error, LvmCommandError::Failed);
+            .await;
+        assert!(matches!(result, Err(LvmCommandError::Failed)));
     }
 
     #[tokio::test]
     async fn system_runner_rejects_path_prefixed_lvm_names() {
         let runner = SystemLvmCommandRunner::default();
         for program in ["/tmp/vgs", "./lvcreate", "../lvremove"] {
-            let error = runner
-                .run(program, &[])
-                .await
-                .expect_err("path-prefixed command must be rejected");
-            assert_eq!(error, LvmCommandError::Failed, "{program}");
+            let result = runner.run(program, &[]).await;
+            assert!(
+                matches!(result, Err(LvmCommandError::Failed)),
+                "{program}"
+            );
         }
     }
 
@@ -53,11 +52,15 @@ mod command_allowlist_tests {
         // The command is allowed by name, but the process is always launched
         // from /usr/sbin rather than resolved through PATH. An invalid option
         // proves the real binary was reached without mutating any VG.
-        let output = runner
+        let result = runner
             .run("vgs", &["--o3k-invalid-option".to_owned()])
-            .await
-            .expect("trusted vgs invocation should spawn");
-        assert_ne!(output.status, 0);
+            .await;
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|output| output.status != 0),
+            "trusted vgs should spawn and reject the deliberately invalid option"
+        );
     }
 }
 
