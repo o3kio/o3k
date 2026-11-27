@@ -25,8 +25,12 @@ fn state(row: sqlx::sqlite::SqliteRow) -> Result<BootstrapStateRecord, StoreErro
         enrolled_agents: row
             .try_get("enrolled_agents")
             .map_err(StoreError::Database)?,
-        enrolled_agent_epochs: row.try_get("enrolled_agent_epochs").map_err(StoreError::Database)?,
-        revoked_agents: row.try_get("revoked_agents").map_err(StoreError::Database)?,
+        enrolled_agent_epochs: row
+            .try_get("enrolled_agent_epochs")
+            .map_err(StoreError::Database)?,
+        revoked_agents: row
+            .try_get("revoked_agents")
+            .map_err(StoreError::Database)?,
         updated_at: row.try_get("updated_at").map_err(StoreError::Database)?,
     })
 }
@@ -104,7 +108,7 @@ impl SqliteStore {
         &self,
         id: &str,
     ) -> Result<Option<BootstrapStateRecord>, StoreError> {
-        sqlx::query("SELECT state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,updated_at FROM bootstrap_state WHERE state_id=?")
+        sqlx::query("SELECT state_id,generation,phase,cloud_identity_id,cloud_profile_id,enrolled_agents,enrolled_agent_epochs,revoked_agents,updated_at FROM bootstrap_state WHERE state_id=?")
             .bind(id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.map(state).transpose()
     }
     pub async fn upsert_bootstrap_state(
