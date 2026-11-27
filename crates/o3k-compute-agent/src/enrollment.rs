@@ -23,6 +23,7 @@ pub struct EnrollmentGrantBinding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IssuedEnrollment {
     pub agent_id: String,
+    pub agent_epoch: String,
     pub client_certificate_chain_pem: Vec<u8>,
     pub ca_certificate_pem: Vec<u8>,
     pub ca_fingerprint_sha256: String,
@@ -92,7 +93,18 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
             .signer
             .sign_csr(&grant.agent_id, &grant.agent_epoch, csr_pem)
             .map_err(|_| EnrollmentIssueError::Signer)?;
-        if issued.agent_id != grant.agent_id || issued.certificate_expires_at_unix_ms <= now_unix_ms
+        if issued.agent_id != grant.agent_id
+            || issued.agent_epoch != grant.agent_epoch
+            || issued.client_certificate_chain_pem.is_empty()
+            || issued.ca_certificate_pem.is_empty()
+            || issued.ca_fingerprint_sha256.len() != 64
+            || !issued
+                .ca_fingerprint_sha256
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+            || issued.certificate_expires_at_unix_ms <= now_unix_ms
+            || issued.rotation_deadline_unix_ms <= now_unix_ms
+            || issued.rotation_deadline_unix_ms > issued.certificate_expires_at_unix_ms
         {
             return Err(EnrollmentIssueError::Signer);
         }
@@ -124,6 +136,7 @@ fn validate_csr(csr_pem: &[u8], agent_id: &str, epoch: &str) -> Result<(), Enrol
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::needless_borrow)]
 mod tests {
     use super::*;
     use crate::EnrollmentIdentity;
@@ -133,9 +146,10 @@ mod tests {
         fn sign_csr(&self, agent_id: &str, _: &str, _: &[u8]) -> Result<IssuedEnrollment, String> {
             Ok(IssuedEnrollment {
                 agent_id: agent_id.into(),
+                agent_epoch: "epoch-1".into(),
                 client_certificate_chain_pem: vec![1],
                 ca_certificate_pem: vec![2],
-                ca_fingerprint_sha256: "fp".into(),
+                ca_fingerprint_sha256: "a".repeat(64),
                 certificate_expires_at_unix_ms: 10_000,
                 rotation_deadline_unix_ms: 9_000,
             })
