@@ -3,6 +3,11 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_DIR="${1:?usage: verify-release-bundle.sh BUNDLE_DIR}"
+VERIFY_MODE="${2:-full}"
+[[ "$VERIFY_MODE" == full || "$VERIFY_MODE" == --integrity-only ]] || {
+  echo "usage: verify-release-bundle.sh BUNDLE_DIR [--integrity-only]" >&2
+  exit 2
+}
 [[ -d "$BUNDLE_DIR" ]] || { echo "release bundle is not a directory: $BUNDLE_DIR" >&2; exit 2; }
 
 python3 - "$BUNDLE_DIR" <<'PY'
@@ -58,6 +63,16 @@ result = subprocess.run(
 if result.returncode:
     raise SystemExit(result.returncode)
 PY
+
+# The outer installer can verify archive contents before running its own
+# authenticated EA preflight, then install the declared host inspection tools,
+# and finally repeat this script in full mode before accepting the bundle.
+# This keeps executable analysis (readelf/nm/strings) available on a minimal
+# Ubuntu cloud image without mutating the host before EA preflight succeeds.
+if [[ "$VERIFY_MODE" == --integrity-only ]]; then
+  echo "verified release bundle file integrity: $BUNDLE_DIR"
+  exit 0
+fi
 
 # Release binaries must execute on every advertised target. Debian 12
 # (bookworm) ships glibc 2.36, so a binary requiring newer glibc symbols

@@ -673,9 +673,13 @@ if internal.get("version") not in (sys.argv[3], "v" + sys.argv[3]):
 PY
 
 # ---- bundled integrity and preflight ------------------------------------------
-bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
-  || die "release bundle verification failed for o3k-$VERSION_NO_V"
-step "O3K v$VERSION_NO_V verified"
+# First verify every extracted file against the authenticated archive's own
+# manifest without needing host inspection tools. The release archive and
+# provenance have already passed Sigstore verification above. The full check
+# runs after EA preflight and installation of the declared binutils package;
+# minimal Ubuntu cloud images do not include readelf/nm/strings by default.
+bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" --integrity-only \
+  || die "release bundle file integrity verification failed for o3k-$VERSION_NO_V"
 
 # The authenticated manifest selects the bounded EA installer explicitly.
 # Duplicate JSON keys and partial/conflicting authority selectors fail closed.
@@ -745,12 +749,23 @@ case "$ID:$VERSION_CODENAME" in
 esac
 if [ "$EA_INSTALL" = 1 ]; then
   [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || die 'Early Access supports Ubuntu 24.04 LTS only'
-  APT_PACKAGES="$APT_PACKAGES postgresql-16"
+  # Native Volume execution uses the bounded storage executor's LVM provider.
+  # The controller remains unprivileged; the dedicated storage service owns
+  # the narrow device-mapper capability boundary.
+  APT_PACKAGES="$APT_PACKAGES postgresql-16 lvm2"
 fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 # shellcheck disable=SC2086
 apt-get install -y $APT_PACKAGES
+
+# Inspect the authenticated executables only after installing the declared
+# binutils dependency. No O3K service or binary is installed or started before
+# the full checksum, glibc-floor, and publisher-disabled checks succeed.
+bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
+  || die "release bundle executable verification failed for o3k-$VERSION_NO_V"
+step "O3K v$VERSION_NO_V verified"
+
 systemctl enable --now libvirtd
 if [ "$EA_INSTALL" = 1 ]; then systemctl enable --now postgresql; fi
 step 'dependencies ready'
