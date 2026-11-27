@@ -4,9 +4,14 @@
 //! provide a narrow signer boundary (for example a root-owned helper); the
 //! daemon receives only the signed result.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::{Arc, Mutex},
+};
 
 use openssl::x509::X509Req;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -20,7 +25,7 @@ pub struct EnrollmentGrantBinding {
     pub consumed_at_unix_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuedEnrollment {
     pub agent_id: String,
     pub agent_epoch: String,
@@ -29,6 +34,67 @@ pub struct IssuedEnrollment {
     pub ca_fingerprint_sha256: String,
     pub certificate_expires_at_unix_ms: u64,
     pub rotation_deadline_unix_ms: u64,
+}
+
+/// Signer boundary for the installation-local root helper.  The helper is a
+/// fixed-purpose root-owned executable; this process sends only a bounded
+/// request over stdin and receives the signed response.  The CA private key
+/// therefore never enters the agent or controller address space.
+#[derive(Clone, Debug)]
+pub struct RootHelperEnrollmentSigner {
+    command: PathBuf,
+}
+
+impl RootHelperEnrollmentSigner {
+    pub fn new(command: impl Into<PathBuf>) -> Self {
+        Self {
+            command: command.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SignRequest<'a> {
+    agent_id: &'a str,
+    agent_epoch: &'a str,
+    csr_pem: &'a [u8],
+}
+
+impl EnrollmentSigner for RootHelperEnrollmentSigner {
+    fn sign_csr(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+        csr_pem: &[u8],
+    ) -> Result<IssuedEnrollment, String> {
+        let request = serde_json::to_vec(&SignRequest {
+            agent_id,
+            agent_epoch,
+            csr_pem,
+        })
+        .map_err(|_| "cannot encode signer request".to_owned())?;
+        let mut child = Command::new(&self.command)
+            .arg("sign-csr")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "cannot start enrollment signer".to_owned())?;
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "signer stdin unavailable".to_owned())?
+            .write_all(&request)
+            .map_err(|_| "cannot send signer request".to_owned())?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "signer failed".to_owned())?;
+        if !output.status.success() {
+            return Err("signer rejected request".to_owned());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| "invalid signer response".to_owned())
+    }
 }
 
 pub trait EnrollmentSigner: Send + Sync {
