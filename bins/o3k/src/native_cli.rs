@@ -254,19 +254,23 @@ fn validate_persisted_identity(
         .and_then(|entry| entry.data().as_utf8().ok().map(|v| v.to_string()));
     let agent_uri = format!("urn:o3k:compute:agent:{agent_id}");
     let epoch_uri = format!("urn:o3k:compute:epoch:{agent_epoch}");
-    if subject.as_deref() != Some(agent_id)
-        || !csr
+    let request_text = request
+        .to_text()
+        .map_err(|_| "stored enrollment CSR cannot be inspected".to_owned())?;
+    let request_key = request
+        .public_key()
+        .map_err(|_| "stored enrollment CSR key unavailable".to_owned())?;
+    if !request.verify(&request_key).unwrap_or(false)
+        || subject.as_deref() != Some(agent_id)
+        || !request_text
             .windows(agent_uri.len())
             .any(|w| w == agent_uri.as_bytes())
-        || !csr
+        || !request_text
             .windows(epoch_uri.len())
             .any(|w| w == epoch_uri.as_bytes())
     {
         return Err("stored enrollment CSR identity does not match requested host".to_owned());
     }
-    let request_key = request
-        .public_key()
-        .map_err(|_| "stored enrollment CSR key unavailable".to_owned())?;
     let a = private
         .public_key_to_pem()
         .map_err(|_| "stored enrollment key unavailable".to_owned())?;
