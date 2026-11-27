@@ -2267,7 +2267,7 @@ pub async fn build_composition_with_guard(
                 o3k_compute_agent::DurableComputeEnrollmentService::new(
                     o3k_compute_agent::EnrollmentIssuer::new(
                         Vec::new(),
-                        o3k_compute_agent::RootHelperEnrollmentSigner::new(signer_path),
+                        o3k_compute_agent::UnixSocketEnrollmentSigner::new(signer_path),
                     ),
                     crate::native_adapters::StoreEnrollmentGrants(store.clone()),
                 ),
