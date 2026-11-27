@@ -61,12 +61,18 @@ docker = (root / "deployments/docker/Dockerfile.o3kd").read_text()
 docker_version = re.search(r'^ARG VERSION="([^"]+)"$', docker, re.M).group(1)
 docker_local = (root / "deployments/docker/Dockerfile.o3kd-local").read_text()
 docker_local_version = re.search(r'^ARG VERSION="([^"]+)"$', docker_local, re.M).group(1)
+wrapper = (root / "packaging/get-o3k.sh").read_text()
 assert version == "0.4.1-rc.1", version
 assert pin == version, pin
 assert app_version == version, app_version
 assert chart_version == version, chart_version
 assert docker_version == version, docker_version
 assert docker_local_version == version, docker_local_version
+digest_verified = wrapper.index("release archive digest verified from authenticated manifest")
+inspection_install = wrapper.index("apt-get install -y binutils")
+bundle_verify = wrapper.index('verify-release-bundle.sh" "$BUNDLE_DIR"')
+remaining_dependencies = wrapper.index("apt-get install -y $APT_PACKAGES")
+assert digest_verified < inspection_install < bundle_verify < remaining_dependencies
 PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 

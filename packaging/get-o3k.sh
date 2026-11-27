@@ -673,6 +673,22 @@ if internal.get("version") not in (sys.argv[3], "v" + sys.argv[3]):
 PY
 
 # ---- bundled integrity and preflight ------------------------------------------
+# The bundle's executable inspection uses nm/readelf from binutils. Fresh
+# Ubuntu 24.04 hosts may not have those tools. At this point the signed
+# release-digest manifest has authenticated the archive bytes, the archive
+# digest has matched, and extraction has rejected unsafe entries. Install only
+# the inspection dependency now; full bundle checksum and executable checks
+# still run before any bundled application code is executed.
+APT_UPDATED=0
+if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
+  printf 'installing binutils for authenticated bundle inspection\n'
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y binutils
+  APT_UPDATED=1
+fi
+command -v nm >/dev/null 2>&1 || die 'nm (binutils) is required to inspect release executables'
+command -v readelf >/dev/null 2>&1 || die 'readelf (binutils) is required to inspect release executables'
 bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \
   || die "release bundle verification failed for o3k-$VERSION_NO_V"
 step "O3K v$VERSION_NO_V verified"
@@ -748,7 +764,7 @@ if [ "$EA_INSTALL" = 1 ]; then
   APT_PACKAGES="$APT_PACKAGES postgresql-16"
 fi
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
+if [ "$APT_UPDATED" -eq 0 ]; then apt-get update; fi
 # shellcheck disable=SC2086
 apt-get install -y $APT_PACKAGES
 systemctl enable --now libvirtd
