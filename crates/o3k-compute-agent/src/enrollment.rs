@@ -177,6 +177,16 @@ pub trait DurableEnrollmentGrants: Send + Sync {
     ) -> Result<EnrollmentGrantBinding, EnrollmentIssueError>;
 }
 
+#[async_trait::async_trait]
+pub trait AsyncDurableEnrollmentGrants: Send + Sync {
+    async fn consume(
+        &self,
+        grant_id: &str,
+        token_digest_hex: &str,
+        now_unix_ms: u64,
+    ) -> Result<EnrollmentGrantBinding, EnrollmentIssueError>;
+}
+
 pub struct EnrollmentIssuer<S> {
     grants: Arc<Mutex<Vec<EnrollmentGrantBinding>>>,
     signer: S,
@@ -187,6 +197,68 @@ pub struct EnrollmentIssuer<S> {
 /// narrow signer above and keep grant state in the controller's durable store.
 pub struct ComputeEnrollmentService<S> {
     issuer: Arc<EnrollmentIssuer<S>>,
+}
+
+/// Durable-store variant used by controller composition.  Keeping this as a
+/// separate adapter avoids accidentally deploying the test-only in-memory
+/// grant implementation.
+pub struct DurableComputeEnrollmentService<S, R> {
+    issuer: Arc<EnrollmentIssuer<S>>,
+    grants: Arc<R>,
+}
+
+impl<S, R> DurableComputeEnrollmentService<S, R> {
+    pub fn new(issuer: EnrollmentIssuer<S>, grants: R) -> Self {
+        Self {
+            issuer: Arc::new(issuer),
+            grants: Arc::new(grants),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl<S, R> crate::proto::compute_enrollment_server::ComputeEnrollment
+    for DurableComputeEnrollmentService<S, R>
+where
+    S: EnrollmentSigner + 'static,
+    R: AsyncDurableEnrollmentGrants + 'static,
+{
+    async fn enroll(
+        &self,
+        request: Request<crate::proto::EnrollRequest>,
+    ) -> Result<Response<crate::proto::EnrollResponse>, Status> {
+        let request = request.into_inner();
+        let (grant_id, _) = request
+            .bootstrap_token
+            .split_once('.')
+            .ok_or_else(|| Status::unauthenticated("invalid enrollment grant"))?;
+        let issued = self
+            .issuer
+            .issue_durable_async(
+                self.grants.as_ref(),
+                grant_id,
+                request.bootstrap_token.as_bytes(),
+                &request.certificate_signing_request_pem,
+                unix_ms(),
+            )
+            .await
+            .map_err(|_| Status::unauthenticated("enrollment rejected"))?;
+        Ok(Response::new(crate::proto::EnrollResponse {
+            client_certificate_chain_pem: issued.client_certificate_chain_pem,
+            ca_certificate_pem: issued.ca_certificate_pem,
+            ca_fingerprint_sha256: issued.ca_fingerprint_sha256,
+            certificate_expires_at_unix_ms: issued.certificate_expires_at_unix_ms,
+            rotation_deadline_unix_ms: issued.rotation_deadline_unix_ms,
+            selected_version: request.supported_versions.into_iter().next(),
+        }))
+    }
+
+    async fn rotate_certificate(
+        &self,
+        _request: Request<crate::proto::RotateCertificateRequest>,
+    ) -> Result<Response<crate::proto::RotateCertificateResponse>, Status> {
+        Err(Status::unimplemented("certificate rotation is not enabled"))
+    }
 }
 
 impl<S: EnrollmentSigner + 'static> ComputeEnrollmentService<S> {
@@ -306,7 +378,7 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
             )
             .map_err(|_| EnrollmentIssueError::Signer)?;
         if issued.agent_id != grant.agent_id
-            || issued.agent_epoch != grant.agent_epoch
+            || (!grant.agent_epoch.is_empty() && issued.agent_epoch != grant.agent_epoch)
             || issued.client_certificate_chain_pem.is_empty()
             || issued.ca_certificate_pem.is_empty()
             || issued.ca_fingerprint_sha256.len() != 64
@@ -340,6 +412,34 @@ impl<S: EnrollmentSigner> EnrollmentIssuer<S> {
         }
         let token_digest = hex_lower(&Sha256::digest(token));
         let grant = grants.consume(grant_id, &token_digest, now_unix_ms)?;
+        validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
+        let issued = self
+            .signer
+            .sign_csr(
+                grant_id,
+                token,
+                &grant.agent_id,
+                &grant.agent_epoch,
+                csr_pem,
+            )
+            .map_err(|_| EnrollmentIssueError::Signer)?;
+        validate_issued_binding(&issued, csr_pem, now_unix_ms)?;
+        Ok(issued)
+    }
+
+    pub async fn issue_durable_async<R: AsyncDurableEnrollmentGrants>(
+        &self,
+        grants: &R,
+        grant_id: &str,
+        token: &[u8],
+        csr_pem: &[u8],
+        now_unix_ms: u64,
+    ) -> Result<IssuedEnrollment, EnrollmentIssueError> {
+        if token.len() > 4096 || csr_pem.len() > 128 * 1024 {
+            return Err(EnrollmentIssueError::UnauthorizedGrant);
+        }
+        let token_digest = hex_lower(&Sha256::digest(token));
+        let grant = grants.consume(grant_id, &token_digest, now_unix_ms).await?;
         validate_csr(csr_pem, &grant.agent_id, &grant.agent_epoch)?;
         let issued = self
             .signer
@@ -424,7 +524,7 @@ fn validate_csr(csr_pem: &[u8], agent_id: &str, epoch: &str) -> Result<(), Enrol
     )
     .into_owned();
     if !text.contains(&format!("URI:urn:o3k:compute:agent:{agent_id}"))
-        || !text.contains(&format!("URI:urn:o3k:compute:epoch:{epoch}"))
+        || (!epoch.is_empty() && !text.contains(&format!("URI:urn:o3k:compute:epoch:{epoch}")))
     {
         return Err(EnrollmentIssueError::InvalidCsr);
     }

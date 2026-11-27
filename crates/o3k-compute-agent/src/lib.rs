@@ -66,6 +66,7 @@ pub use config_drive::{
     ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
     config_drive_materialization_request, config_drive_requested,
 };
+pub use enrollment::{AsyncDurableEnrollmentGrants, DurableComputeEnrollmentService};
 pub use enrollment::{
     ComputeEnrollmentService, EnrollmentGrantBinding, EnrollmentIssueError, EnrollmentIssuer,
     EnrollmentSigner, IssuedEnrollment, RootHelperEnrollmentSigner,

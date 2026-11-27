@@ -20,6 +20,50 @@ use o3k_native_api::building_block::BuildingBlockReader;
 use o3k_placement::{Inventory, PlacementLedger};
 use o3k_store::{BootstrapRepository, BootstrapStateRecord, EnrollmentGrantRecord, O3kStore};
 
+/// Durable enrollment-grant adapter.  The store retains only the token digest;
+/// plaintext bearer material is never passed to or returned by this boundary.
+pub struct StoreEnrollmentGrants(pub Arc<O3kStore>);
+
+#[async_trait]
+impl o3k_compute_agent::AsyncDurableEnrollmentGrants for StoreEnrollmentGrants {
+    async fn consume(
+        &self,
+        grant_id: &str,
+        token_digest_hex: &str,
+        now_unix_ms: u64,
+    ) -> Result<o3k_compute_agent::EnrollmentGrantBinding, o3k_compute_agent::EnrollmentIssueError>
+    {
+        let record = self
+            .0
+            .consume_enrollment_grant(grant_id, token_digest_hex, now_unix_ms)
+            .await
+            .map_err(|_| o3k_compute_agent::EnrollmentIssueError::State)?;
+        Ok(o3k_compute_agent::EnrollmentGrantBinding {
+            grant_id: record.grant_id,
+            token_digest: decode_digest(&record.token_digest)
+                .ok_or(o3k_compute_agent::EnrollmentIssueError::State)?,
+            agent_id: record.agent_id,
+            // Existing bootstrap grants bind agent identity and expiry. Epoch is
+            // supplied by the joining CSR and is therefore intentionally empty
+            // until the durable schema carries an epoch column.
+            agent_epoch: String::new(),
+            expires_at_unix_ms: record.expires_at_unix_ms,
+            consumed_at_unix_ms: record.used_at_unix_ms,
+        })
+    }
+}
+
+fn decode_digest(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0_u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 use crate::native_adapters::BuildingBlockAdapter;
 
 const STATE_ID: &str = "default";
