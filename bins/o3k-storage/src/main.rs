@@ -44,12 +44,31 @@ impl StorageExecutor for Executor {
             .journal
             .get(&envelope.idempotency_key)
             .map_err(|_| Status::internal("journal lookup failed"))?
-            && !matches!(
+        {
+            // Accepted/Running means the provider side effect may have happened
+            // before this process lost the response.  Never replay a mutation
+            // blindly: return an explicit unknown outcome for controller
+            // reconciliation/inspection.
+            if matches!(
                 existing.operation_state,
                 o3k_domain::StorageOperationState::Accepted
                     | o3k_domain::StorageOperationState::Running
-            )
-        {
+            ) {
+                let mut unknown = existing;
+                unknown.operation_state = o3k_domain::StorageOperationState::UnknownOutcome;
+                unknown.resource_state = "unknown".to_owned();
+                self.journal
+                    .record_observation(&envelope.idempotency_key, unknown.clone())
+                    .map_err(|_| Status::internal("journal outcome persistence failed"))?;
+                let bytes = serde_json::to_vec(&unknown)
+                    .map_err(|_| Status::internal("observation encoding failed"))?;
+                return Ok(Response::new(ExecuteResponse {
+                    observation: Some(WireObservation {
+                        observation_json: bytes,
+                    }),
+                    error: String::new(),
+                }));
+            }
             let bytes = serde_json::to_vec(&existing)
                 .map_err(|_| Status::internal("observation encoding failed"))?;
             return Ok(Response::new(ExecuteResponse {
@@ -77,6 +96,12 @@ impl StorageExecutor for Executor {
         terminal.observation_sequence = 2;
         terminal.operation_state = if result.is_ok() {
             o3k_domain::StorageOperationState::Succeeded
+        } else if result
+            .as_ref()
+            .err()
+            .is_some_and(o3k_storage::StorageProviderError::is_unknown_outcome)
+        {
+            o3k_domain::StorageOperationState::UnknownOutcome
         } else {
             o3k_domain::StorageOperationState::Failed
         };
