@@ -1,0 +1,108 @@
+{
+  "spec": "SPEC-0052 \u00a78",
+  "campaign": "A then B-E",
+  "status": "NOT_RUN",
+  "candidate": null,
+  "source_sha": null,
+  "artifact_sha256": null,
+  "installer_sha256": null,
+  "topology": null,
+  "checks": [
+    {
+      "id": 1,
+      "requirement": "Release authentication",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 2,
+      "requirement": "Fresh install",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 3,
+      "requirement": "PostgreSQL",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 4,
+      "requirement": "Services",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 5,
+      "requirement": "Single-host VM lifecycle",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 6,
+      "requirement": "Three-host placement",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 7,
+      "requirement": "Networking",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 8,
+      "requirement": "Storage",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 9,
+      "requirement": "Restart/reconciliation",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 10,
+      "requirement": "Database outage",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 11,
+      "requirement": "Host lifecycle",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 12,
+      "requirement": "Negative security",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 13,
+      "requirement": "Cross-profile security",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 14,
+      "requirement": "Authority/leaks",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 15,
+      "requirement": "Diagnostics/docs",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": 16,
+      "requirement": "Rebuild/data protection",
+      "status": "NOT_RUN",
+      "evidence": []
+    }
+  ]
+}
