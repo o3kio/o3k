@@ -7,6 +7,10 @@ pub mod composition {
     tonic::include_proto!("o3k.composition.v1");
 }
 
+pub mod storage {
+    tonic::include_proto!("o3k.storage.v1");
+}
+
 pub mod conversion;
 
 pub const PROTOCOL_VERSION: (u16, u16) = (1, 0);

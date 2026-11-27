@@ -33,6 +33,7 @@ struct JournalRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JournalSnapshot {
+    format_version: u16,
     controller_epoch: u64,
     records: Vec<JournalRecord>,
 }
@@ -63,6 +64,9 @@ impl StorageJournal {
         let path = path.into();
         let (controller_epoch, records) = if path.exists() {
             let snapshot: JournalSnapshot = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if snapshot.format_version != 1 {
+                return Err(StorageJournalError::Conflict);
+            }
             (snapshot.controller_epoch, snapshot.records)
         } else {
             (0, Vec::new())
@@ -86,6 +90,10 @@ impl StorageJournal {
         if envelope.target_agent_id != agent_id || envelope.target_agent_epoch != agent_epoch {
             return Err(StorageJournalError::Stale);
         }
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
         let current_epoch = self
             .controller_epoch
             .lock()
@@ -93,10 +101,6 @@ impl StorageJournal {
         if *current_epoch != 0 && envelope.controller_epoch != *current_epoch {
             return Err(StorageJournalError::Stale);
         }
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| StorageJournalError::Conflict)?;
         if let Some(existing) = records
             .iter()
             .find(|record| record.envelope.idempotency_key == envelope.idempotency_key)
@@ -176,6 +180,7 @@ impl StorageJournal {
             || observation.operation_id != record.observation.operation_id
             || observation.resource_generation != record.observation.resource_generation
             || observation.observation_sequence <= record.observation.observation_sequence
+            || observation.resource_id != record.envelope.resource_id
         {
             return Err(StorageJournalError::Conflict);
         }
@@ -208,6 +213,7 @@ fn persist_journal(
     std::fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".journal-{}.tmp", uuid::Uuid::new_v4()));
     let bytes = serde_json::to_vec(&JournalSnapshot {
+        format_version: 1,
         controller_epoch,
         records: records.to_vec(),
     })?;
