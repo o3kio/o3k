@@ -22,6 +22,7 @@ use o3k_compute_agent::types::EnrollmentIdentity;
 use o3k_provider_contract::compute_proto::{
     EnrollRequest, ProtocolVersion, compute_enrollment_client::ComputeEnrollmentClient,
 };
+use openssl::{pkey::PKey, x509::X509Req};
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 
 /// Default native API base URL.
@@ -97,14 +98,28 @@ pub fn enroll_host(
         Some(v) if !v.is_empty() => v.to_owned(),
         _ => secret_from_env_or_file("O3K_ENROLLMENT_TOKEN")?,
     };
-    let identity = EnrollmentIdentity::generate(agent_id, agent_epoch)
-        .map_err(|e| format!("cannot generate enrollment identity: {e}"))?;
-    identity
-        .write_private_key(private_key)
-        .map_err(|e| format!("cannot persist private key: {e}"))?;
+    let csr_path = private_key.with_extension("csr.pem");
+    let csr = if private_key.exists() || csr_path.exists() {
+        if !private_key.exists() || !csr_path.exists() {
+            return Err("enrollment identity is partially present; refusing repair".to_owned());
+        }
+        let key = std::fs::read(private_key)
+            .map_err(|_| "cannot read existing enrollment key".to_owned())?;
+        let csr = std::fs::read(&csr_path)
+            .map_err(|_| "cannot read existing enrollment CSR".to_owned())?;
+        validate_persisted_identity(&key, &csr, agent_id, agent_epoch)?;
+        csr
+    } else {
+        let identity = EnrollmentIdentity::generate(agent_id, agent_epoch)
+            .map_err(|e| format!("cannot generate enrollment identity: {e}"))?;
+        identity
+            .write_private_key(private_key)
+            .map_err(|e| format!("cannot persist private key: {e}"))?;
+        write_secret_file(&csr_path, identity.csr_pem())?;
+        identity.csr_pem().to_vec()
+    };
     let ca =
         std::fs::read(ca_certificate).map_err(|e| format!("cannot read enrollment CA: {e}"))?;
-    let csr = identity.csr_pem().to_vec();
     let endpoint = endpoint.to_owned();
     let response = runtime()?.block_on(async move {
         let tls = ClientTlsConfig::new()
@@ -162,6 +177,69 @@ pub fn enroll_host(
     }
     std::fs::rename(&tmp, certificate)
         .map_err(|e| format!("cannot install issued certificate: {e}"))?;
+    Ok(())
+}
+
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or("identity path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("cannot create identity directory: {e}"))?;
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("identity"),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write identity: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot protect identity: {e}"))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("cannot install identity: {e}"))
+}
+
+fn validate_persisted_identity(
+    key: &[u8],
+    csr: &[u8],
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), String> {
+    let private = PKey::private_key_from_pem(key)
+        .map_err(|_| "stored enrollment key is malformed".to_owned())?;
+    let request =
+        X509Req::from_pem(csr).map_err(|_| "stored enrollment CSR is malformed".to_owned())?;
+    let subject = request
+        .subject_name()
+        .entries_by_nid(openssl::nid::Nid::COMMONNAME)
+        .next()
+        .map(|entry| entry.data().to_string());
+    let agent_uri = format!("urn:o3k:compute:agent:{agent_id}");
+    let epoch_uri = format!("urn:o3k:compute:epoch:{agent_epoch}");
+    if subject.as_deref() != Some(agent_id)
+        || !csr
+            .windows(agent_uri.len())
+            .any(|w| w == agent_uri.as_bytes())
+        || !csr
+            .windows(epoch_uri.len())
+            .any(|w| w == epoch_uri.as_bytes())
+    {
+        return Err("stored enrollment CSR identity does not match requested host".to_owned());
+    }
+    let request_key = request
+        .public_key()
+        .map_err(|_| "stored enrollment CSR key unavailable".to_owned())?;
+    let a = private
+        .public_key_to_pem()
+        .map_err(|_| "stored enrollment key unavailable".to_owned())?;
+    let b = request_key
+        .public_key_to_pem()
+        .map_err(|_| "stored enrollment CSR key unavailable".to_owned())?;
+    if a != b {
+        return Err("stored enrollment key does not match CSR".to_owned());
+    }
     Ok(())
 }
 
@@ -536,7 +614,8 @@ pub fn print_help() {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::secret_from;
+    use super::{secret_from, validate_persisted_identity};
+    use o3k_compute_agent::types::EnrollmentIdentity;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -588,6 +667,18 @@ mod tests {
             secret_from(None, Some(path.to_string_lossy().into_owned())).expect_err("must fail");
         assert!(error.contains("is empty"), "{error}");
         std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn persisted_identity_reuses_exact_csr_and_rejects_mismatch() {
+        let identity = EnrollmentIdentity::generate("host-a", "epoch-1").expect("identity");
+        let key_path = std::env::temp_dir().join(format!("o3k-key-{}", uuid::Uuid::new_v4()));
+        identity.write_private_key(&key_path).expect("key");
+        let key = std::fs::read(&key_path).expect("read key");
+        let csr = identity.csr_pem().to_vec();
+        validate_persisted_identity(&key, &csr, "host-a", "epoch-1").expect("valid identity");
+        assert!(validate_persisted_identity(&key, &csr, "host-b", "epoch-1").is_err());
+        std::fs::remove_file(key_path).expect("cleanup");
     }
 
     use super::init_inner;
