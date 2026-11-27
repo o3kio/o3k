@@ -1,0 +1,20 @@
+[package]
+name = "o3k-storage-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+o3k-controller-protocol = { path = "../../crates/o3k-controller-protocol" }
+o3k-domain = { path = "../../crates/o3k-domain" }
+o3k-storage = { path = "../../crates/o3k-storage" }
+serde_json.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
