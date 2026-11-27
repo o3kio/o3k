@@ -4,19 +4,26 @@
 
 The owner-directed target is `v0.4.1 — Early Access`, governed by
 [ADR-0191](adr/ADR-0191-owner-directed-early-access-adoption-and-installation-trust.md)
-and [SPEC-0052](specs/SPEC-0052-early-access-profile-and-acceptance.md). It is
-not currently publishable: the repository's current release workflow and
-runtime still require C1 installation authority, and the EA installation-local
-trust profile is not implemented. A bundle without C1 must not be produced as
-an attempted workaround; it currently fails closed at installed startup.
+and [SPEC-0052](specs/SPEC-0052-early-access-profile-and-acceptance.md). The
+merged runtime and installer implement installation-local EA trust.
+`v0.4.1-rc.N` artifacts are qualification-only prereleases, not advertised
+customer releases. The final artifact is not publishable until all SPEC-0052
+§8 checks pass against that exact artifact, focused independent human security
+review is complete, and the owner records GO through the protected release
+process.
 
-Before the EA workflow can publish, it must carry an explicit authenticated
-`early-access-v1` / `installation-local` selector, preserve the existing C1
-release path including immutable v0.4.0, pass focused independent security
-review, and bind all SPEC-0052 §8 results to the exact artifact. The command in
-SPEC-0052 is a target URL only until then. Release publication also requires
-the protected workflow and explicit owner GO; this policy does not bypass
-branch protections or the release environment.
+The protected workflow selects the authenticated
+`early-access-v1` / `installation-local` tuple for EA candidate and final tags
+without requiring the historical C1 signing key. The historical C1 release
+path and immutable v0.4.0 remain unchanged. The command in SPEC-0052 is a
+target URL only until final acceptance and owner GO. RC installation is
+restricted to isolated qualification hosts and is not customer deployment
+authorization. The `v0.4.1` tag workflow creates a signed draft release first.
+Qualify those exact draft assets and record the archive digest in the owner GO
+marker. The protected `Promote qualified O3K Early Access release` workflow
+then verifies the staged signature, provenance, digest, owner evidence, and
+`ea-final-go` label before publishing the existing draft assets. Promotion
+does not rebuild or replace them.
 
 Release bundles are built by `packaging/make-release.sh [version] [profile]`.
 The bundle contains `o3kd`, optionally `o3k-compute` for the libvirt profile,
@@ -94,6 +101,8 @@ artifact signing.
     packaging/make-release.sh 0.4.0-rc.5 libvirt
   ```
 
+- `installation_security_profile`, `installation_authority` — present only
+  for Early Access, identifying `early-access-v1` and `installation-local`.
 - `installation_policy_format`, `installation_policy_path`,
   `installation_policy_authority` — the C1 installation-policy authority
   block (SPEC-0050 section 7.2, issue #1225). Present only when the build
@@ -103,8 +112,9 @@ artifact signing.
   builder validates both and fails closed on a missing or malformed value.
   Only **public** key material enters the build: the signing key stays in
   offline custody and never touches CI or the repository. The protected
-  release workflow always builds with C1 enabled, sourcing the public key
-  from variables on the approval-gated `release` environment. A C1-bearing
+  historical C1 releases source the public key from variables on the
+  approval-gated `release` environment. EA releases explicitly disable C1 and
+  use installation-local trust. A C1-bearing
   release can only be installed through the offline signing ceremony (see
   `docs/operator/C1_OFFLINE_SIGNING_CEREMONY.md`); the packaged-path
   startup guard denies service startup until authenticated policy, state,

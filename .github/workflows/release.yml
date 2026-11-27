@@ -60,17 +60,12 @@ jobs:
           O3K_RELEASE_SIGNATURE_SCHEME: sigstore
           O3K_UPGRADE_FROM_MIN_VERSION: v0.4.0-rc.5
           GITHUB_WORKFLOW: O3K protected release workflow
-          # C1 installation policy (SPEC-0050 section 7.2, issue #1225 Option
-          # A): every protected release carries the installation-policy
-          # authority so installed services can satisfy the fail-closed
-          # startup guard. For rc.28 and the exact v0.4.0 test-use release,
-          # SPEC-0050 §9.1 records the owner's lab-origin, non-production
-          # exception. Only PUBLIC key
-          # material is configured here, via variables on the approval-gated
-          # `release` environment; private material must never enter CI.
-          # make-release.sh fails closed (exit 2) when these are unset or
-          # malformed.
-          O3K_C1_INSTALLATION_POLICY_ENABLED: "1"
+          # EA artifacts use their explicit installation-local authority and
+          # must not depend on the historical C1 key. All other historical
+          # release paths retain their prior C1 behavior.
+          O3K_INSTALLATION_SECURITY_PROFILE: ${{ (startsWith(github.ref_name, 'v0.4.1-rc.') || github.ref_name == 'v0.4.1') && 'early-access-v1' || '' }}
+          O3K_PRODUCT_PROFILE_ID: ${{ (startsWith(github.ref_name, 'v0.4.1-rc.') || github.ref_name == 'v0.4.1') && 'o3k-early-access-v1' || '' }}
+          O3K_C1_INSTALLATION_POLICY_ENABLED: ${{ (startsWith(github.ref_name, 'v0.4.1-rc.') || github.ref_name == 'v0.4.1') && '0' || '1' }}
           O3K_C1_INSTALLATION_POLICY_KEY_ID: ${{ vars.O3K_C1_INSTALLATION_POLICY_KEY_ID }}
           O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY: ${{ vars.O3K_C1_INSTALLATION_POLICY_PUBLIC_KEY }}
         run: |
@@ -84,6 +79,12 @@ jobs:
               echo "v0.4.0 is authorized only for the reviewed lab-origin test-use authority" >&2
               exit 1
             fi
+          fi
+          if [[ "$RELEASE_TAG" =~ ^v0\.4\.1-rc\.[1-9][0-9]*$ || "$RELEASE_TAG" == v0.4.1 ]]; then
+            test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" = "$version"
+            test "$O3K_INSTALLATION_SECURITY_PROFILE" = early-access-v1
+            test "$O3K_PRODUCT_PROFILE_ID" = o3k-early-access-v1
+            test "$O3K_C1_INSTALLATION_POLICY_ENABLED" = 0
           fi
           packaging/make-release.sh "$version" libvirt
           packaging/make-release-archive.sh "$version"
@@ -146,6 +147,28 @@ jobs:
               --title "O3K v0.4.0 (TEST USE ONLY)" \
               --notes-file docs/releases/v0.4.0.md \
               --latest
+          elif [[ "$tag" =~ ^v0\.4\.1-rc\.[1-9][0-9]*$ ]]; then
+          release_notes="docs/releases/$tag.md"
+          test -f "$release_notes"
+          gh release create "$tag" \
+            dist/install.sh \
+            "dist/o3k-$version-linux-x86_64.tar.gz" \
+            "dist/o3k-$version-linux-x86_64.tar.gz.sha256" \
+            dist/release-digests.txt \
+            dist/release-digests.sigstore.json \
+            dist/provenance.json \
+            --prerelease --title "O3K $tag — Early Access qualification candidate" --notes-file "$release_notes"
+          elif [[ "$tag" == "v0.4.1" ]]; then
+            test -f docs/releases/v0.4.1.md
+            gh release create "$tag" \
+              dist/install.sh \
+              "dist/o3k-$version-linux-x86_64.tar.gz" \
+              "dist/o3k-$version-linux-x86_64.tar.gz.sha256" \
+              dist/release-digests.txt \
+              dist/release-digests.sigstore.json \
+              dist/provenance.json \
+              --draft --title "O3K v0.4.1 — Early Access (qualification staging)" \
+              --notes-file docs/releases/v0.4.1.md
           elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*$ ]]; then
           cat > release-notes.md <<EOF
           ## O3K $tag

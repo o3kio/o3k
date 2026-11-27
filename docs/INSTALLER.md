@@ -1,9 +1,12 @@
 # One-line O3K TestLab installer (historical)
 
 > **Release status:** This page documents the existing TestLab/v0.4.0
-> test-use installer and is not an Early Access installation guide. The owner
-> has approved a separate EA profile and target version `v0.4.1`; its public
-> install command is defined in [SPEC-0052](specs/SPEC-0052-early-access-profile-and-acceptance.md):
+> test-use installer. The Early Access runtime and installer are implemented;
+> `v0.4.1-rc.N` is qualification-only and must only be installed in an
+> isolated qualification environment. Customer deployment remains prohibited
+> until exact-artifact acceptance, independent security review, and owner GO.
+> See the [Early Access operator guide](operator/EARLY_ACCESS.md) and
+> [SPEC-0052](specs/SPEC-0052-early-access-profile-and-acceptance.md).
 >
 > ```sh
 > curl -fsSL https://github.com/o3kio/o3k/releases/download/v0.4.1/install.sh | sudo sh -
