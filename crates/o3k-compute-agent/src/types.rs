@@ -18,6 +18,7 @@ use openssl::{
     x509::{X509Extension, X509NameBuilder, X509Req},
 };
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 pub(crate) const MAX_HOST_LABEL: usize = 255;
 
@@ -43,7 +44,7 @@ impl std::fmt::Debug for EnrollmentIdentity {
 
 impl EnrollmentIdentity {
     pub fn generate(agent_id: &str, agent_epoch: &str) -> Result<Self, AgentError> {
-        if agent_id.is_empty() || agent_id.len() > 128 || agent_epoch.is_empty() {
+        if !valid_enrollment_component(agent_id) || !valid_enrollment_component(agent_epoch) {
             return Err(AgentError::InvalidConfiguration(
                 "invalid enrollment identity",
             ));
@@ -96,13 +97,43 @@ impl EnrollmentIdentity {
     }
     pub fn write_private_key(&self, path: &std::path::Path) -> Result<(), AgentError> {
         use std::os::unix::fs::OpenOptionsExt;
+        let parent = path.parent().ok_or(AgentError::InvalidConfiguration(
+            "private-key path has no parent",
+        ))?;
+        std::fs::create_dir_all(parent).map_err(AgentError::IdentityStore)?;
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("key"),
+            uuid::Uuid::new_v4()
+        ));
         let mut options = std::fs::OpenOptions::new();
         options.create_new(true).write(true).mode(0o600);
         use std::io::Write;
-        let mut file = options.open(path).map_err(AgentError::IdentityStore)?;
-        file.write_all(&self.private_key_pem)
-            .map_err(AgentError::IdentityStore)
+        let result = (|| {
+            let mut file = options.open(&tmp).map_err(AgentError::IdentityStore)?;
+            file.write_all(&self.private_key_pem)
+                .map_err(AgentError::IdentityStore)?;
+            file.sync_all().map_err(AgentError::IdentityStore)?;
+            std::fs::hard_link(&tmp, path).map_err(AgentError::IdentityStore)?;
+            std::fs::remove_file(&tmp).map_err(AgentError::IdentityStore)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result
     }
+}
+
+impl Drop for EnrollmentIdentity {
+    fn drop(&mut self) {
+        self.private_key_pem.zeroize();
+    }
+}
+
+fn valid_enrollment_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
 #[derive(Debug, Error)]

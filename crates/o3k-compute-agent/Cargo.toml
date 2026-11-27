@@ -33,6 +33,7 @@ tonic.workspace = true
 tower.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

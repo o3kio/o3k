@@ -1,6 +1,15 @@
 use o3k_compute_agent::EnrollmentIdentity;
 
 #[test]
+fn rejects_san_delimiters_and_unbounded_epoch() {
+    for value in ["bad,uri", "bad\\uri", "bad\nuri", "bad\"uri", ""] {
+        assert!(EnrollmentIdentity::generate(value, "epoch-1").is_err());
+        assert!(EnrollmentIdentity::generate("host-a", value).is_err());
+    }
+    assert!(EnrollmentIdentity::generate("host-a", &"x".repeat(129)).is_err());
+}
+
+#[test]
 fn csr_contains_agent_and_epoch_sans_without_exposing_key() {
     let identity = EnrollmentIdentity::generate("host-a", "epoch-1").unwrap();
     let csr = openssl::x509::X509Req::from_pem(identity.csr_pem()).unwrap();
