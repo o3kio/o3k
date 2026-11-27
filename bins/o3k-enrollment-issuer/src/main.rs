@@ -212,6 +212,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     std::fs::create_dir_all(socket.parent().ok_or("socket parent")?)?;
     let listener = UnixListener::bind(&socket)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    }
     for conn in listener.incoming() {
         let mut stream = match conn {
             Ok(s) => s,
