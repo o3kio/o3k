@@ -58,6 +58,7 @@
     "migrations/0053_network_plan_work.sql": "c572a31ab39a4e3dce33aae32bdac88cee6c7aeef914271dbf19207478e4801f",
     "migrations/0054_enrollment_grant_epoch.sql": "e771719c54e569fb5fc1dbdba7f2f810542ccf60eba25c7e9c55d03a8676a53b",
     "migrations/0055_enrollment_results.sql": "1cd778bbde6e9e71791792862edb4c808dad55d12053ea408b597273a4f29d86",
+    "migrations/0056_bootstrap_agent_epochs.sql": "e73dd97353448c7700f1d9835b5ea5c0f9913fdffd790f69b20671797ec09b76",
     "migrations_postgres/0001_initial.sql": "f462a76803a706b0fcd7a83050672e00599da654aa8910f467fca63de1b31d56",
     "migrations_postgres/0002_coordination.sql": "74bb6f71c6023e879ae45adaf7c044f657e977d5152a078ca545263ec65932d6",
     "migrations_postgres/0003_network_intents.sql": "b14343337e1e74fba60cfe1c174fea0b7587bcf4b987ae03853f7e0b1edf36ce",
@@ -95,7 +96,8 @@
     "migrations_postgres/0035_port_binding_generation.sql": "2f9f973151d2d130b69ef86814b8b61c402a00f224f4e22d0d7997b6c85369d4",
     "migrations_postgres/0036_network_plan_work.sql": "a8fb16d7329a1f1d7aa54f16f2171a7db4033a3c2965f04cff51031e7aa91269",
     "migrations_postgres/0037_enrollment_grant_epoch.sql": "54b1365fb35a9465d1c82302ff449da43db3397b5c6044aa35a05ed87758a213",
-    "migrations_postgres/0038_enrollment_results.sql": "536cc5206c13cdedb14452756a37afa008fe8fe58fe00753e42b3ce3d3e32563"
+    "migrations_postgres/0038_enrollment_results.sql": "536cc5206c13cdedb14452756a37afa008fe8fe58fe00753e42b3ce3d3e32563",
+    "migrations_postgres/0039_bootstrap_agent_epochs.sql": "f8d5611a3fce76563a2c9f2a9e2ac5b1640822108044b5a028b5264b4c7442a9"
   },
   "repositories": [
     {
@@ -242,7 +244,7 @@
           "kind": "table",
           "schema": "main",
           "name": "bootstrap_state",
-          "definition_sha256": "4bbd37fd0e80b72f489651d5f2d142f3995e3e34260a702c5afe91ad5cea1ac2"
+          "definition_sha256": "c2a164738da17cccc25f4c5f30bf870911198911d900a40bfb9c681af9f53613"
         },
         {
           "kind": "table",
@@ -274,7 +276,7 @@
           "kind": "table",
           "schema": "public",
           "name": "bootstrap_state",
-          "definition_sha256": "e2baa0462f8b2f3a74538401bd571d9800173bb0c7f826e9a6f359269d0d54a3"
+          "definition_sha256": "2174427cfa1845d99aed0a3520ebf188e9f37babdacffd298f8dd6a37b9545ba"
         },
         {
           "kind": "table",
@@ -305,9 +307,11 @@
         "0033_bootstrap",
         "0037_enrollment_grant_epoch",
         "0038_enrollment_results",
+        "0039_bootstrap_agent_epochs",
         "0050_bootstrap",
         "0054_enrollment_grant_epoch",
-        "0055_enrollment_results"
+        "0055_enrollment_results",
+        "0056_bootstrap_agent_epochs"
       ]
     },
     {
@@ -2376,6 +2380,7 @@
         "0037_enrollment_grant_epoch",
         "0038_canonical_operation_integrity",
         "0038_enrollment_results",
+        "0039_bootstrap_agent_epochs",
         "0039_federated_bindings",
         "0040_operator_assignments",
         "0041_audit_events",
@@ -2392,7 +2397,8 @@
         "0052_port_binding_generation",
         "0053_network_plan_work",
         "0054_enrollment_grant_epoch",
-        "0055_enrollment_results"
+        "0055_enrollment_results",
+        "0056_bootstrap_agent_epochs"
       ]
     },
     {
