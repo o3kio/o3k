@@ -241,11 +241,10 @@ async fn enroll_joined_building_block(
         BuildingBlockState::Ready => Ok(()),
         BuildingBlockState::Enrolling => {
             adapter
-                .transition(
+                .transition_locked(
                     &current.block.id,
                     BuildingBlockState::Ready,
                     current.block.generation,
-                    Vec::new(),
                     &principal_context(),
                 )
                 .await?;
@@ -267,11 +266,10 @@ async fn ensure_joined_building_block_ready(
         BuildingBlockState::Ready => Ok(()),
         BuildingBlockState::Enrolling => {
             adapter
-                .transition(
+                .transition_locked(
                     id,
                     BuildingBlockState::Ready,
                     current.block.generation,
-                    Vec::new(),
                     &principal_context(),
                 )
                 .await?;

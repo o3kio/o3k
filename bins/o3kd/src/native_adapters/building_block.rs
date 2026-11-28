@@ -271,6 +271,76 @@ impl BuildingBlockAdapter {
         })
         .collect())
     }
+
+    /// Apply a building-block transition when the caller already holds
+    /// `lifecycle_lock`. Bootstrap join shares that lock across enrollment and
+    /// readiness publication, so it must not call the lock-taking trait entry
+    /// point recursively.
+    pub(super) async fn transition_locked(
+        &self,
+        id: &str,
+        target: BuildingBlockState,
+        expected_generation: u64,
+        auth: &AuthContext,
+    ) -> Result<BuildingBlockView, String> {
+        let current = self
+            .store
+            .get_building_block(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "building block not found".to_owned())?;
+        let old = current.block().map_err(|e| e.to_string())?;
+        if old.generation != expected_generation {
+            return Err("stale generation".into());
+        }
+        let blockers = if matches!(
+            target,
+            BuildingBlockState::Draining | BuildingBlockState::Removed
+        ) {
+            self.derived_blockers(&old).await?
+        } else {
+            Vec::new()
+        };
+        let next = old
+            .transition(target, blockers)
+            .map_err(|e| e.to_string())?;
+        let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
+        let projected_state = match target {
+            BuildingBlockState::Enrolling => Some(ProviderState::Unavailable),
+            BuildingBlockState::Ready => None,
+            BuildingBlockState::Unavailable | BuildingBlockState::Failed => {
+                Some(ProviderState::Unavailable)
+            }
+            BuildingBlockState::Draining => Some(ProviderState::Draining),
+            BuildingBlockState::Removed => Some(ProviderState::Deleted),
+        };
+        if let Some(state) = projected_state {
+            self.project_provider_state(&old, state).await?;
+        }
+        if target == BuildingBlockState::Removed {
+            self.persist_revocation(&old.execution_identity).await?;
+            let agents = self.agents.clone();
+            let identity = old.execution_identity.clone();
+            tokio::spawn(async move {
+                agents.revoke_agent_identity(&identity).await;
+            })
+            .await
+            .map_err(|error| format!("agent revocation task failed: {error}"))?;
+        }
+        self.store
+            .upsert_building_block_with_audit(
+                &record,
+                Some(old.generation),
+                &self.audit(&next, auth, "ManageBuildingBlock"),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if target == BuildingBlockState::Ready {
+            self.project_provider_state(&next, ProviderState::Enabled)
+                .await?;
+        }
+        self.view(next).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -348,75 +418,9 @@ impl BuildingBlockReader for BuildingBlockAdapter {
         auth: &AuthContext,
     ) -> Result<BuildingBlockView, String> {
         let _lifecycle_guard = self.lifecycle_lock.lock().await;
-        let current = self
-            .store
-            .get_building_block(id)
+        let _ = _blockers;
+        self.transition_locked(id, target, expected_generation, auth)
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "building block not found".to_owned())?;
-        let old = current.block().map_err(|e| e.to_string())?;
-        if old.generation != expected_generation {
-            return Err("stale generation".into());
-        }
-        let blockers = if matches!(
-            target,
-            BuildingBlockState::Draining | BuildingBlockState::Removed
-        ) {
-            self.derived_blockers(&old).await?
-        } else {
-            Vec::new()
-        };
-        let next = old
-            .transition(target, blockers)
-            .map_err(|e| e.to_string())?;
-        let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
-        // Close capacity before recording a drain/unavailable/removal
-        // transition. If the block write fails, remaining closed is
-        // fail-safe and prevents new work from entering the requested drain.
-        let projected_state = match target {
-            BuildingBlockState::Enrolling => Some(ProviderState::Unavailable),
-            BuildingBlockState::Ready => None,
-            BuildingBlockState::Unavailable | BuildingBlockState::Failed => {
-                Some(ProviderState::Unavailable)
-            }
-            BuildingBlockState::Draining => Some(ProviderState::Draining),
-            BuildingBlockState::Removed => Some(ProviderState::Deleted),
-        };
-        if let Some(state) = projected_state {
-            self.project_provider_state(&old, state).await?;
-        }
-        if target == BuildingBlockState::Removed {
-            // Revoke before publishing the terminal removal. If the block
-            // write is interrupted, the host remains visible but its old
-            // credentials are already fenced; retries are idempotent.
-            self.persist_revocation(&old.execution_identity).await?;
-            // Do not let cancellation between durable persistence and the
-            // live fence leave this process admitting the old identity. The
-            // spawned task is independent of the removal future and therefore
-            // completes the fence even if the request is aborted while it is
-            // awaiting the provider operation.
-            let agents = self.agents.clone();
-            let identity = old.execution_identity.clone();
-            tokio::spawn(async move {
-                agents.revoke_agent_identity(&identity).await;
-            })
-            .await
-            .map_err(|error| format!("agent revocation task failed: {error}"))?;
-        }
-        self.store
-            .upsert_building_block_with_audit(
-                &record,
-                Some(old.generation),
-                &self.audit(&next, auth, "ManageBuildingBlock"),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        // Capacity is reopened only after the durable block reaches Ready.
-        if target == BuildingBlockState::Ready {
-            self.project_provider_state(&next, ProviderState::Enabled)
-                .await?;
-        }
-        self.view(next).await
     }
 }
 
