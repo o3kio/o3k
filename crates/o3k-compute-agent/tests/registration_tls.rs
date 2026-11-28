@@ -69,6 +69,7 @@ async fn mutual_tls_registration_and_heartbeat_are_black_box_observable()
             private_key: fixture("agent-key-pkcs8.pem"),
         },
         identity_file: identity.clone(),
+        agent_epoch: Some("seed-epoch".to_owned()),
         host_label: "black-box-host".to_owned(),
         software_version: "test".to_owned(),
         heartbeat_interval: Duration::from_millis(50),
@@ -109,6 +110,7 @@ async fn mutual_tls_registration_and_heartbeat_are_black_box_observable()
         return Err("agent did not register and heartbeat".into());
     }
     let node = registry.all().await.pop().ok_or("registered node")?;
+    assert_eq!(node.agent_epoch, "seed-epoch");
     assert_eq!(node.host_label, "black-box-host");
     assert_eq!(
         node.last_heartbeat_state,
@@ -190,6 +192,7 @@ async fn untrusted_client_ca_is_rejected_before_registration()
             private_key: fixture("agent-key-pkcs8.pem"),
         },
         identity_file: identity.clone(),
+        agent_epoch: None,
         host_label: "untrusted-host".to_owned(),
         software_version: "test".to_owned(),
         heartbeat_interval: Duration::from_millis(25),

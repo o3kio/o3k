@@ -436,6 +436,7 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
             private_key: tls_dir.join("agent-key.pem"),
         },
         identity_file: data_dir.join("agent-id"),
+        agent_epoch: env::var("O3K_COMPUTE_AGENT_EPOCH").ok(),
         host_label,
         software_version,
         heartbeat_interval: Duration::from_secs(5),

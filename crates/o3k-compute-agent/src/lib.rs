@@ -4797,7 +4797,11 @@ impl AgentClient {
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
             .max_encoding_message_size(MAX_MESSAGE_SIZE);
         let (tx, rx) = mpsc::channel(32);
-        let epoch = Uuid::now_v7().to_string();
+        let epoch = self
+            .config
+            .agent_epoch
+            .clone()
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
         tx.send(proto::ControlRequest {
             body: Some(proto::control_request::Body::Register(
                 proto::RegisterRequest {

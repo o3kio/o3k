@@ -8,6 +8,7 @@ root=/etc/o3k
 if [ "${O3K_EPOCH_HELPER_TEST:-0}" = 1 ]; then root=${O3K_EPOCH_HELPER_ROOT:?}; fi
 storage=$root/storage/o3k-storage.env
 daemon=$root/o3kd.env
+compute=$root/o3k-compute.env
 [ -f "$storage" ] && [ -f "$daemon" ] || exit 0
 tmpdir=$root/storage
 tmp=$(mktemp "$tmpdir/.epoch.XXXXXX")
@@ -28,7 +29,23 @@ sync -f "$tmp2"
 mv -f "$tmp2" "$daemon"
 sync -f "$root/storage"
 sync -f "$root"
+if [ -f "$compute" ]; then
+  tmp3=$(mktemp "$root/.epoch.XXXXXX")
+  trap 'rm -f "$tmp" "$tmp2" "$tmp3"' EXIT
+  if grep -q '^O3K_COMPUTE_AGENT_EPOCH=' "$compute"; then
+    sed "s/^O3K_COMPUTE_AGENT_EPOCH=.*/O3K_COMPUTE_AGENT_EPOCH=$epoch/" "$compute" >"$tmp3"
+  else
+    cat "$compute" >"$tmp3"
+    printf 'O3K_COMPUTE_AGENT_EPOCH=%s\n' "$epoch" >>"$tmp3"
+  fi
+  chmod --reference="$compute" "$tmp3"
+  chown --reference="$compute" "$tmp3"
+  sync -f "$tmp3"
+  mv -f "$tmp3" "$compute"
+  sync -f "$root"
+fi
 if [ "${O3K_EPOCH_HELPER_TEST:-0}" != 1 ] || [ -n "${O3K_HELPER_SYSTEMCTL_LOG:-}" ]; then
   systemctl restart o3k-storage.service
   systemctl restart o3kd.service
+  systemctl try-restart o3k-compute.service
 fi
