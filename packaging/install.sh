@@ -735,7 +735,8 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
     install -d -o root -g root -m 0750 "$CONFIG_DIR/storage"
     if [[ ! -f "$CONFIG_DIR/storage/o3k-storage.env" ]]; then
       umask 077
-      printf 'O3K_STORAGE_LISTEN=127.0.0.1:9444\nO3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json\nO3K_STORAGE_AGENT_ID=%s\nO3K_STORAGE_AGENT_EPOCH=1\nO3K_STORAGE_VOLUME_GROUP=%s\nO3K_STORAGE_THIN_POOL=%s\nO3K_STORAGE_NAMESPACE=o3k\nO3K_STORAGE_TLS_CERT=%s/server.pem\nO3K_STORAGE_TLS_KEY=%s/server-key.pem\nO3K_STORAGE_TLS_CLIENT_CA=%s/ca.pem\nO3K_STORAGE_CONTROLLER_IDENTITY=urn:o3k:controller:installation-local\n' "$(cat "$TLS_DIR/agent-id")" "$O3K_LVM_VOLUME_GROUP" "$O3K_LVM_THIN_POOL" "$TLS_DIR" "$TLS_DIR" "$TLS_DIR" >"$CONFIG_DIR/storage/o3k-storage.env"
+      storage_agent_id="$(cat "$TLS_DIR/agent-id")"
+      printf 'O3K_STORAGE_LISTEN=127.0.0.1:9444\nO3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json\nO3K_STORAGE_AGENT_ID=%s\nO3K_STORAGE_AGENT_EPOCH=1\nO3K_STORAGE_VOLUME_GROUP=%s\nO3K_STORAGE_THIN_POOL=%s\nO3K_STORAGE_NAMESPACE=o3k\nO3K_STORAGE_TLS_CERT=%s/server.pem\nO3K_STORAGE_TLS_KEY=%s/server-key.pem\nO3K_STORAGE_TLS_CLIENT_CA=%s/ca.pem\nO3K_STORAGE_CONTROLLER_IDENTITY=urn:o3k:compute:agent:%s\n' "$storage_agent_id" "$O3K_LVM_VOLUME_GROUP" "$O3K_LVM_THIN_POOL" "$TLS_DIR" "$TLS_DIR" "$TLS_DIR" "$storage_agent_id" >"$CONFIG_DIR/storage/o3k-storage.env"
       chmod 0600 "$CONFIG_DIR/storage/o3k-storage.env"
     fi
     # Keep the executor's device access limited to the operator-selected VG;
@@ -949,6 +950,16 @@ if [[ "$PROFILE" == libvirt ]]; then
     "O3K_COMPUTE_AUTHORIZED_AGENTS=$(<"$TLS_DIR/agent-id")=$FINGERPRINT"; do
     o3k_upsert_env_setting "$ENV_FILE" "$setting"
   done
+  if [[ "$STORAGE_ENABLED" == 1 ]]; then
+    for setting in \
+      "O3K_STORAGE_ENDPOINT=https://127.0.0.1:9444" \
+      "O3K_STORAGE_TLS_CA=$TLS_DIR/ca.pem" \
+      "O3K_STORAGE_TLS_CERT=$TLS_DIR/agent.pem" \
+      "O3K_STORAGE_TLS_KEY=$TLS_DIR/agent-key.pem" \
+      "O3K_STORAGE_SERVER_NAME=o3k-control-plane"; do
+      o3k_upsert_env_setting "$ENV_FILE" "$setting"
+    done
+  fi
   # Only authenticated EA installs have the root-owned issuer socket. C1
   # must never inherit these listener settings from a shared environment.
   if [[ "$EA_INSTALL" == 1 ]]; then

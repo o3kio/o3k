@@ -95,7 +95,10 @@ impl RemoteStorageProvider {
             protocol_version: 1,
             command_id: Uuid::new_v4(),
             operation_id: Uuid::new_v4(),
-            idempotency_key: format!("remote-{resource_id}-{generation}"),
+            // The executor journal keys retries by canonical operation.  Include
+            // the action so inspect/delete (or prepare/terminate) on the same
+            // generation cannot replay one another.
+            idempotency_key: format!("remote-{action:?}-{resource_id}-{generation}"),
             resource_id,
             resource_generation: generation,
             project_id,
@@ -318,7 +321,37 @@ impl StorageProvider for RemoteStorageProvider {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<StorageAttachmentObservation, StorageProviderError> {
-        self.inspect_attachment(request).await
+        let payload = StorageCommandPayload::Attachment(StorageAttachmentCommandPayload {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            server_id: request
+                .host_id
+                .parse()
+                .map_err(|_| StorageProviderError::InvalidRequest)?,
+            project_id: request.project_id.clone(),
+            access_mode: request.access_mode,
+            delete_on_termination: false,
+            volume_generation: request.volume_generation,
+        });
+        let o = self
+            .execute(
+                StorageAction::TerminateAttachment,
+                request.attachment_id.to_string(),
+                request.project_id.clone(),
+                request.volume_generation,
+                &payload,
+            )
+            .await?;
+        Ok(StorageAttachmentObservation {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            host_id: request.host_id.clone(),
+            attached: false,
+            provider_reference: o3k_domain::StorageProviderReference {
+                provider: "o3k-storage".into(),
+                resource_id: o.provider_resource_id.unwrap_or_default(),
+            },
+        })
     }
     async fn create_snapshot(
         &self,
