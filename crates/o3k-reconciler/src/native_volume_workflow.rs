@@ -6,7 +6,10 @@ use crate::storage_volume_workflow::StorageVolumeIntent;
 use crate::storage_workflow::StorageControllerFence;
 use async_trait::async_trait;
 use o3k_domain::VolumeState;
-use o3k_domain::{StorageAction, StorageCommandPayload, StorageCommandRecord, VolumeId};
+use o3k_domain::{
+    StorageAction, StorageCommandPayload, StorageCommandRecord, StorageVolumeCommandPayload,
+    VolumeId,
+};
 use o3k_storage::{
     StorageExecutionContext, StorageProvider, StorageProviderError, StorageVolumeRequest,
 };
@@ -51,8 +54,13 @@ mod tests {
             provider: "lvm".into(),
             resource_id: "o3k-v-00000000000000000000000000000008".into(),
         };
+        let foreign_provider = o3k_domain::StorageProviderReference {
+            provider: "foreign".into(),
+            resource_id: format!("o3k-v-{}", id.as_uuid().simple()),
+        };
         assert!(provider_reference_matches(id, &good));
         assert!(!provider_reference_matches(id, &foreign));
+        assert!(!provider_reference_matches(id, &foreign_provider));
     }
 }
 
@@ -67,9 +75,8 @@ fn provider_reference_matches(
     reference: &o3k_domain::StorageProviderReference,
 ) -> bool {
     reference.validate().is_ok()
-        && (reference.resource_id == volume_id.to_string()
-            || (reference.provider == "lvm"
-                && reference.resource_id == format!("o3k-v-{}", volume_id.as_uuid().simple())))
+        && reference.provider == "lvm"
+        && reference.resource_id == format!("o3k-v-{}", volume_id.as_uuid().simple())
 }
 
 impl<S, P, F> NativeVolumeWorkflow<S, P, F>
@@ -316,7 +323,7 @@ where
                     return Ok(());
                 }
             }
-            Err(error) if matches!(error, StoreError::ResourceNotFound) => {}
+            Err(StoreError::ResourceNotFound) => {}
             Err(error) => return Err(error.into()),
         }
         let operation_id = envelope.operation_id;
@@ -373,7 +380,7 @@ where
         }
         let request = StorageVolumeRequest {
             volume_id: intent.volume_id,
-            project_id: intent.project_id,
+            project_id: intent.project_id.clone(),
             size_bytes: intent.size_bytes,
             generation: intent.generation,
         };
@@ -513,6 +520,14 @@ where
                     .provider
                     .inspect_volume_with_context(&request, &context)
                     .await;
+                let observed_reference = if matches!(action, StorageAction::CreateVolume) {
+                    observed
+                        .as_ref()
+                        .ok()
+                        .map(|value| value.provider_reference.clone())
+                } else {
+                    None
+                };
                 let converged = match observed {
                     Ok(observed) => match action {
                         StorageAction::CreateVolume => {
@@ -533,6 +548,17 @@ where
                     Err(_) => false,
                 };
                 if converged {
+                    self.converge_recovered_volume(
+                        &StorageVolumeCommandPayload {
+                            volume_id: intent.volume_id,
+                            project_id: intent.project_id.clone(),
+                            size_bytes: intent.size_bytes,
+                            generation: intent.generation,
+                        },
+                        action,
+                        observed_reference,
+                    )
+                    .await?;
                     self.store
                         .update_agent_command(
                             &command_id,
