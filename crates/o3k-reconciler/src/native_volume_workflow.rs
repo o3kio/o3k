@@ -5,7 +5,8 @@
 use async_trait::async_trait;
 use o3k_domain::{StorageAction, StorageCommandPayload, StorageCommandRecord, VolumeId};
 use o3k_storage::{StorageExecutionContext, StorageProvider, StorageProviderError, StorageVolumeRequest};
-use o3k_store::{AgentCommandRecord, AgentCommandState, DurableStore, OperationRecord, OperationState, StoreError};
+use o3k_store::{AgentCommandRecord, AgentCommandState, DurableStore, OperationRecord, OperationState, StorageRepository, StoreError, VolumeRecord};
+use o3k_domain::VolumeState;
 use std::sync::Arc;
 use thiserror::Error;
 use crate::storage_volume_workflow::StorageVolumeIntent;
@@ -33,7 +34,7 @@ pub struct NativeVolumeWorkflow<S, P: ?Sized, F> {
 
 impl<S, P, F> NativeVolumeWorkflow<S, P, F>
 where
-    S: DurableStore + Send + Sync + 'static,
+    S: DurableStore + StorageRepository + Send + Sync + 'static,
     P: StorageProvider + ?Sized + 'static,
     F: StorageControllerFence + 'static,
 {
@@ -65,13 +66,30 @@ where
         let _ = self.store.insert_agent_command(&AgentCommandRecord { command_id: command_id.clone(), idempotency_key: intent.idempotency_key.clone(), operation_id, resource_id: intent.volume_id.as_uuid(), agent_id: intent.target_agent_id.clone(), agent_epoch: intent.target_agent_epoch.to_string(), payload_fingerprint_sha256: fingerprint, payload, state: AgentCommandState::Pending, accepted_sequence: 0, last_sequence: 0, provider_operation_id: None, provider_resource_id: None }).await?;
         let request = StorageVolumeRequest { volume_id: intent.volume_id, project_id: intent.project_id, size_bytes: intent.size_bytes, generation: intent.generation };
         let context = StorageExecutionContext { envelope };
+        if let Some(current) = self.store.get_volume(intent.volume_id.as_uuid()).await? {
+            let mut next = current.volume.clone();
+            next.operation_id = Some(operation_id);
+            next.state = match action { StorageAction::CreateVolume => VolumeState::Creating, StorageAction::DeleteVolume => VolumeState::Deleting, _ => current.volume.state };
+            let _ = self.store.update_volume(current.volume.generation, &VolumeRecord { volume: next, created_at: current.created_at.clone() }).await?;
+        }
         let result = match action {
-            StorageAction::CreateVolume => self.provider.create_volume_with_context(&request, &context).await.map(|_| ()),
-            StorageAction::DeleteVolume => self.provider.delete_volume_with_context(&request, &context).await,
+            StorageAction::CreateVolume => self.provider.create_volume_with_context(&request, &context).await.map(|observation| {
+                (Some(observation.provider_reference), false)
+            }),
+            StorageAction::DeleteVolume => self.provider.delete_volume_with_context(&request, &context).await.map(|_| (None, true)),
             _ => return Err(NativeVolumeWorkflowError::Invalid),
         };
         match result {
-            Ok(()) => { let _ = self.store.update_agent_command(&command_id, AgentCommandState::Succeeded, 0, 0, None, None).await?; let _ = self.store.update_operation(operation_id, OperationState::Succeeded, None, None, None).await?; Ok(()) }
+            Ok((provider_reference, deleted)) => {
+                if let Some(current) = self.store.get_volume(intent.volume_id.as_uuid()).await? {
+                    let mut next = current.volume.clone();
+                    next.state = if deleted { VolumeState::Deleted } else { VolumeState::Available };
+                    next.operation_id = Some(operation_id);
+                    if let Some(reference) = provider_reference { next.provider_reference = Some(reference); }
+                    let _ = self.store.update_volume(current.volume.generation, &VolumeRecord { volume: next, created_at: current.created_at.clone() }).await?;
+                }
+                let _ = self.store.update_agent_command(&command_id, AgentCommandState::Succeeded, 0, 0, None, None).await?; let _ = self.store.update_operation(operation_id, OperationState::Succeeded, None, None, None).await?; Ok(())
+            }
             Err(e) if e.is_unknown_outcome() => { let _ = self.store.update_agent_command(&command_id, AgentCommandState::UnknownOutcome, 0, 0, None, None).await?; let _ = self.store.update_operation(operation_id, OperationState::Running, None, Some("unknown_outcome"), Some("observe before retry")).await?; Err(e.into()) }
             Err(e) => { let _ = self.store.update_agent_command(&command_id, AgentCommandState::Failed, 0, 0, None, None).await?; let _ = self.store.update_operation(operation_id, OperationState::Failed, None, Some("provider"), Some("storage operation failed")).await?; Err(e.into()) }
         }
