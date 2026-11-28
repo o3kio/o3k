@@ -23,7 +23,10 @@ fn run(args: &[&str]) -> (i32, String, String) {
     if args.first() == Some(&"doctor") {
         command
             .env("O3K_DOCTOR_DATA_DIR", absent.join("data"))
-            .env("O3K_INSTALL_PREFIX", &absent);
+            .env("O3K_INSTALL_PREFIX", &absent)
+            // These contract cases model a fresh SQLite/default install.
+            // CI may export PostgreSQL for unrelated integration tests.
+            .env_remove("O3K_DATABASE_URL");
     }
     match command.output() {
         Ok(output) => (

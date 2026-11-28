@@ -471,6 +471,7 @@ if [[ -x "$BIN" ]] && command -v strings >/dev/null 2>&1 \
       O3K_DOCTOR_DATA_DIR="$data" \
       O3K_DOCTOR_PREFIX="$prefix" \
       O3K_INSTALL_PREFIX="$prefix" \
+      env -u O3K_DATABASE_URL \
       PATH="$SANDBOX_SHIM_BIN:$PATH" \
       "$BIN" doctor --json >"$out" 2>"$OUT_DIR/$name.err"
     status=$?
