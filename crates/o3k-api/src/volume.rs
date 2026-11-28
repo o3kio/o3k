@@ -259,11 +259,17 @@ fn volume_not_found() -> Response {
     keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found").into_response()
 }
 
-fn volume_observation_matches(record: &VolumeRecord, observation: &o3k_storage::StorageVolumeObservation) -> bool {
+fn volume_observation_matches(
+    record: &VolumeRecord,
+    observation: &o3k_storage::StorageVolumeObservation,
+) -> bool {
     observation.owned && observation.size_bytes == record.volume.size_bytes
 }
 
-fn available_volume_observation_matches(record: &VolumeRecord, observation: &o3k_storage::StorageVolumeObservation) -> bool {
+fn available_volume_observation_matches(
+    record: &VolumeRecord,
+    observation: &o3k_storage::StorageVolumeObservation,
+) -> bool {
     volume_observation_matches(record, observation) && observation.available
 }
 
