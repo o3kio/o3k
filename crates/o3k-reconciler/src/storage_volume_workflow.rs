@@ -120,11 +120,12 @@ mod tests {
     }
 
     #[test]
-    fn envelope_is_deterministic_and_payload_bound() {
-        let a = intent().envelope(StorageAction::CreateVolume).unwrap();
-        let b = intent().envelope(StorageAction::CreateVolume).unwrap();
+    fn envelope_is_deterministic_and_payload_bound() -> Result<(), StorageVolumeIntentError> {
+        let a = intent().envelope(StorageAction::CreateVolume)?;
+        let b = intent().envelope(StorageAction::CreateVolume)?;
         assert_eq!(a, b);
         assert!(a.validate().is_ok());
         assert_eq!(a.resource_id, intent().volume_id.to_string());
+        Ok(())
     }
 }
