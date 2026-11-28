@@ -1885,6 +1885,7 @@ pub async fn build_composition_with_guard(
             );
             Some(Arc::new(NativeStorageVolumeWorkflow {
                 store: store.clone(),
+                metering: metering_observer.clone(),
                 workflow,
                 controller_epoch: storage_intent_epoch,
                 target_agent_id,

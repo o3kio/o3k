@@ -1062,6 +1062,7 @@ pub(crate) struct NativeStorageAttachmentWorkflow {
 /// storage provider and observes the provider before reporting success.
 pub(crate) struct NativeStorageVolumeWorkflow {
     pub(crate) store: Arc<o3k_store::O3kStore>,
+    pub(crate) metering: Option<Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
     pub(crate) workflow: o3k_reconciler::native_volume_workflow::NativeVolumeWorkflow<
         o3k_store::O3kStore,
         dyn o3k_storage::StorageProvider,
@@ -1100,7 +1101,10 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
         self.workflow
             .create(intent)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        let record = self.store.get_volume(volume_id).await.map_err(|e| e.to_string())?
+            .ok_or_else(|| "native volume disappeared after create".to_owned())?;
+        o3k_api::observe_volume_open_if_consuming(self.metering.as_ref(), &record).await
     }
 
     async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
@@ -1131,7 +1135,8 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
         self.workflow
             .delete(intent)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        o3k_api::observe_volume_allocation(self.metering.as_ref(), project_id, &volume_id.to_string(), record.volume.size_bytes, false).await
     }
 
     async fn recover(&self) -> Result<(), String> {
