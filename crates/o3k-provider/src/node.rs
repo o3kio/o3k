@@ -100,6 +100,12 @@ pub trait AgentNodeRegistry: Send + Sync {
     ) -> Option<Box<dyn AgentEpochLease>>;
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent>;
 
+    /// Permanently fences a host identity from live admission. Durable host
+    /// lifecycle authorities must persist revocation before reporting removal.
+    async fn revoke_agent_identity(&self, _agent_id: &str) -> Result<(), String> {
+        Err("agent identity revocation is unavailable".to_owned())
+    }
+
     /// Unix milliseconds of the most recent authenticated heartbeat observed
     /// for an agent, or `None` when no heartbeat has ever been observed by
     /// this registry.

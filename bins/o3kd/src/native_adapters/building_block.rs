@@ -8,13 +8,16 @@ use o3k_kernel::{
 use o3k_native_api::building_block::{BuildingBlockReader, BuildingBlockView, CapacityDimension};
 use o3k_placement::{PlacementLedger, ProviderState};
 use o3k_provider::AgentNodeRegistry;
-use o3k_store::{AuditEventRecord, BuildingBlockRecord, ComputeRepository, O3kStore};
+use o3k_store::{
+    AuditEventRecord, BootstrapRepository, BuildingBlockRecord, ComputeRepository, O3kStore,
+};
 
 pub struct BuildingBlockAdapter {
     pub store: Arc<O3kStore>,
     pub placement: PlacementLedger,
     pub agents: Arc<dyn AgentNodeRegistry>,
     pub locations: LocationRegistry,
+    pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn now() -> String {
@@ -22,6 +25,27 @@ fn now() -> String {
 }
 
 impl BuildingBlockAdapter {
+    async fn persist_revocation(&self, agent_id: &str) -> Result<(), String> {
+        let Some(mut state) = self
+            .store
+            .get_bootstrap_state("default")
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("bootstrap state is missing".to_owned());
+        };
+        let mut revoked: BTreeMap<String, bool> = serde_json::from_str(&state.revoked_agents)
+            .map_err(|_| "bootstrap revocation state is corrupt".to_owned())?;
+        revoked.insert(agent_id.to_owned(), true);
+        state.revoked_agents =
+            serde_json::to_string(&revoked).map_err(|error| error.to_string())?;
+        self.store
+            .upsert_bootstrap_state(&state)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// Project lifecycle gates into Placement, which remains the scheduling
     /// authority. The projection must be durable before a drain races with a
     /// new create.
@@ -323,6 +347,7 @@ impl BuildingBlockReader for BuildingBlockAdapter {
         _blockers: Vec<DrainBlocker>,
         auth: &AuthContext,
     ) -> Result<BuildingBlockView, String> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
         let current = self
             .store
             .get_building_block(id)
@@ -359,6 +384,15 @@ impl BuildingBlockReader for BuildingBlockAdapter {
         };
         if let Some(state) = projected_state {
             self.project_provider_state(&old, state).await?;
+        }
+        if target == BuildingBlockState::Removed {
+            // Revoke before publishing the terminal removal. If the block
+            // write is interrupted, the host remains visible but its old
+            // credentials are already fenced; retries are idempotent.
+            self.persist_revocation(&old.execution_identity).await?;
+            self.agents
+                .revoke_agent_identity(&old.execution_identity)
+                .await?;
         }
         self.store
             .upsert_building_block_with_audit(
@@ -487,6 +521,7 @@ mod tests {
                 snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
             }),
             locations: o3k_kernel::LocationRegistry::default(),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let auth = operator_context();
         adapter
@@ -754,6 +789,7 @@ mod tests {
             placement,
             agents: Arc::new(agents),
             locations: o3k_kernel::LocationRegistry::default(),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let auth = operator_context();
 

@@ -1293,6 +1293,11 @@ impl o3k_provider::AgentNodeRegistry for NodeRegistry {
     fn subscribe_events(&self) -> broadcast::Receiver<o3k_provider::AgentEvent> {
         self.subscribe_events()
     }
+
+    async fn revoke_agent_identity(&self, agent_id: &str) -> Result<(), String> {
+        self.revoke_agent_identity(agent_id).await;
+        Ok(())
+    }
 }
 
 pub fn agent_snapshot(node: &NodeSnapshot) -> o3k_provider::AgentNodeSnapshot {

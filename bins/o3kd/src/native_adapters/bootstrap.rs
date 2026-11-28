@@ -706,6 +706,7 @@ impl BootstrapWorkflow for BootstrapAdapter {
             placement: self.placement.clone(),
             agents: self.agents.clone(),
             locations: self.locations.clone(),
+            lifecycle_lock: self.lock.clone(),
         };
         if let Some(old) = state.enrolled_agents.get(&request.agent_id) {
             if old != &fingerprint {
