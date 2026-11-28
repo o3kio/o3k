@@ -897,6 +897,7 @@ if [[ "$PROFILE" == libvirt ]]; then
   for setting in \
     "O3K_PROVIDER=agent" \
     "O3K_LISTEN_ADDR=127.0.0.1:18080" \
+    "O3K_COMPUTE_CONTROL_ENDPOINT=https://127.0.0.1:50051" \
     "O3K_COMPUTE_SERVER_CERTIFICATE=$TLS_DIR/server.pem" \
     "O3K_COMPUTE_SERVER_PRIVATE_KEY=$TLS_DIR/server-key.pem" \
     "O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA" \

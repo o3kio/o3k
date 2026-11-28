@@ -106,6 +106,7 @@ grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.s
 grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
 grep -Fq 'o3k-enrollment-issuer" --export-ca' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_COMPUTE_CONTROL_ENDPOINT=https://127.0.0.1:50051' "$ROOT/packaging/install.sh"
 grep -Fq 'compute-client-ca.pem' "$ROOT/packaging/install.sh"
 grep -Fq 'install -d -m 0750 -o root -g o3k "$CONFIG_DIR/ea"' "$ROOT/packaging/install.sh"
 grep -Fq 'Some("--export-ca")' "$ROOT/bins/o3k-enrollment-issuer/src/main.rs"
