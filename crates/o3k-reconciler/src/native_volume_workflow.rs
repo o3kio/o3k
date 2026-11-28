@@ -322,12 +322,17 @@ where
                 if matches!(existing.state, AgentCommandState::Succeeded) {
                     return Ok(());
                 }
+                // A pending/unknown command already has an execution owner.
+                // Never let a concurrent replay dispatch the same provider
+                // mutation; recovery must observe the durable command first.
+                return Err(NativeVolumeWorkflowError::RecoveryRequired);
             }
             Err(StoreError::ResourceNotFound) => {}
             Err(error) => return Err(error.into()),
         }
         let operation_id = envelope.operation_id;
-        self.store
+        match self
+            .store
             .insert_operation(&OperationRecord {
                 id: operation_id,
                 resource_id: intent.volume_id.as_uuid(),
@@ -337,7 +342,19 @@ where
                 error_category: None,
                 error_message: None,
             })
-            .await?;
+            .await
+        {
+            Ok(()) => {}
+            Err(StoreError::IdempotencyConflict | StoreError::ResourceAlreadyExists) => {
+                let existing = self.store.get_operation(operation_id).await?;
+                if existing.resource_id != intent.volume_id.as_uuid()
+                    || existing.kind != "storage:volume"
+                {
+                    return Err(NativeVolumeWorkflowError::IdempotencyConflict);
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
         let payload = serde_json::to_vec(&StorageCommandRecord {
             envelope: envelope.clone(),
             payload: intent.payload(),
@@ -375,6 +392,7 @@ where
                 if matches!(existing.state, AgentCommandState::Succeeded) {
                     return Ok(());
                 }
+                return Err(NativeVolumeWorkflowError::RecoveryRequired);
             }
             Err(error) => return Err(error.into()),
         }
