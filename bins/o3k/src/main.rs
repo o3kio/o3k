@@ -888,16 +888,6 @@ fn is_postgres_url(url: &str) -> bool {
     url.starts_with("postgres://") || url.starts_with("postgresql://")
 }
 
-#[cfg(test)]
-mod doctor_store_selection_tests {
-    #[test]
-    fn postgres_urls_skip_local_store_lock() {
-        assert!(super::is_postgres_url("postgres://controller/db"));
-        assert!(super::is_postgres_url("postgresql://controller/db"));
-        assert!(!super::is_postgres_url("file:/var/lib/o3k/o3k.db"));
-    }
-}
-
 fn doctor_access_denied(json: bool, reason: &str) -> ExitCode {
     let report = o3k::Report {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1062,5 +1052,15 @@ fn render_upgrade_human(command: &str, outcome: &UpgradeOutcome) {
                 eprintln!("o3k {command}: failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod doctor_store_selection_tests {
+    #[test]
+    fn postgres_urls_skip_local_store_lock() {
+        assert!(super::is_postgres_url("postgres://controller/db"));
+        assert!(super::is_postgres_url("postgresql://controller/db"));
+        assert!(!super::is_postgres_url("file:/var/lib/o3k/o3k.db"));
     }
 }
