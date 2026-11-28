@@ -33,10 +33,41 @@ pub enum NativeVolumeWorkflowError {
     RecoveryRequired,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn lvm_reference_is_bound_to_canonical_volume_name() {
+        let id = VolumeId::from_uuid(Uuid::from_u128(7));
+        let good = o3k_domain::StorageProviderReference {
+            provider: "lvm".into(),
+            resource_id: format!("o3k-v-{}", id.as_uuid().simple()),
+        };
+        let foreign = o3k_domain::StorageProviderReference {
+            provider: "lvm".into(),
+            resource_id: "o3k-v-00000000000000000000000000000008".into(),
+        };
+        assert!(provider_reference_matches(id, &good));
+        assert!(!provider_reference_matches(id, &foreign));
+    }
+}
+
 pub struct NativeVolumeWorkflow<S, P: ?Sized, F> {
     store: Arc<S>,
     provider: Arc<P>,
     fence: Arc<F>,
+}
+
+fn provider_reference_matches(
+    volume_id: VolumeId,
+    reference: &o3k_domain::StorageProviderReference,
+) -> bool {
+    reference.validate().is_ok()
+        && (reference.resource_id == volume_id.to_string()
+            || (reference.provider == "lvm"
+                && reference.resource_id == format!("o3k-v-{}", volume_id.as_uuid().simple())))
 }
 
 impl<S, P, F> NativeVolumeWorkflow<S, P, F>
@@ -124,8 +155,10 @@ where
                     observed.owned
                         && observed.available
                         && observed.size_bytes == payload.size_bytes
-                        && observed.provider_reference.validate().is_ok()
-                        && observed.provider_reference.resource_id == payload.volume_id.to_string()
+                        && provider_reference_matches(
+                            payload.volume_id,
+                            &observed.provider_reference,
+                        )
                 }
                 StorageAction::DeleteVolume => !observed.owned || !observed.available,
                 _ => false,
@@ -337,8 +370,7 @@ where
         match result {
             Ok((provider_reference, deleted)) => {
                 if let Some(reference) = provider_reference.as_ref()
-                    && (reference.validate().is_err()
-                        || reference.resource_id != intent.volume_id.to_string())
+                    && !provider_reference_matches(intent.volume_id, reference)
                 {
                     return Err(NativeVolumeWorkflowError::Invalid);
                 }
@@ -414,9 +446,10 @@ where
                             observed.owned
                                 && observed.available
                                 && observed.size_bytes == intent.size_bytes
-                                && observed.provider_reference.validate().is_ok()
-                                && observed.provider_reference.resource_id
-                                    == intent.volume_id.to_string()
+                                && provider_reference_matches(
+                                    intent.volume_id,
+                                    &observed.provider_reference,
+                                )
                         }
                         StorageAction::DeleteVolume => !observed.owned || !observed.available,
                         _ => false,
