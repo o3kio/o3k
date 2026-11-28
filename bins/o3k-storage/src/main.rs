@@ -268,7 +268,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ca = std::fs::read(env::var("O3K_STORAGE_TLS_CLIENT_CA")?)?;
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(cert, key))
-        .client_ca_root(Certificate::from_pem(ca));
+        .client_ca_root(Certificate::from_pem(ca))
+        .client_auth_optional(false);
     Server::builder()
         .tls_config(tls)?
         .add_service(StorageExecutorServer::new(executor))
