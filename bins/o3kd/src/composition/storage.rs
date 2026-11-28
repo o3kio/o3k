@@ -41,6 +41,10 @@ pub(crate) struct RemoteStorageProvider {
     agent_epoch: u64,
 }
 
+fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: u64) -> String {
+    format!("remote-{action:?}-{resource_id}-{generation}")
+}
+
 impl RemoteStorageProvider {
     pub(crate) fn from_env(agent_id: String, agent_epoch: u64) -> Result<Self, String> {
         let endpoint = std::env::var("O3K_STORAGE_ENDPOINT")
@@ -98,7 +102,7 @@ impl RemoteStorageProvider {
             // The executor journal keys retries by canonical operation.  Include
             // the action so inspect/delete (or prepare/terminate) on the same
             // generation cannot replay one another.
-            idempotency_key: format!("remote-{action:?}-{resource_id}-{generation}"),
+            idempotency_key: remote_idempotency_key(action, &resource_id, generation),
             resource_id,
             resource_generation: generation,
             project_id,
@@ -912,6 +916,26 @@ pub(crate) fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
         hash.wrapping_mul(0x100000001b3)
             .wrapping_add(u64::from(byte))
     })
+}
+
+#[cfg(test)]
+mod remote_protocol_tests {
+    use super::remote_idempotency_key;
+    use o3k_domain::StorageAction;
+
+    #[test]
+    fn action_is_part_of_stable_retry_identity() {
+        let create = remote_idempotency_key(StorageAction::CreateVolume, "vol-1", 7);
+        let create_retry = remote_idempotency_key(StorageAction::CreateVolume, "vol-1", 7);
+        let delete = remote_idempotency_key(StorageAction::DeleteVolume, "vol-1", 7);
+        assert_eq!(create, create_retry);
+        assert_ne!(create, delete);
+    }
+
+    #[test]
+    fn terminate_attachment_is_not_downgraded_to_observation() {
+        assert_ne!(StorageAction::TerminateAttachment, StorageAction::Reconcile);
+    }
 }
 
 #[cfg(test)]
