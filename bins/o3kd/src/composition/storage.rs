@@ -40,10 +40,38 @@ pub(crate) struct RemoteStorageProvider {
     agent_id: String,
     agent_epoch: String,
     controller_epoch: u64,
+    fencing_token: Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: u64) -> String {
     format!("remote-{action:?}-{resource_id}-{generation}")
+}
+
+fn inject_wire_fencing_token(
+    supplied: &StorageCommandEnvelope,
+    fencing_token: u64,
+) -> Result<StorageCommandEnvelope, StorageProviderError> {
+    let mut envelope = supplied.clone();
+    envelope.fencing_token = fencing_token;
+    envelope
+        .validate_for_rpc()
+        .map_err(|_| StorageProviderError::InvalidRequest)?;
+    Ok(envelope)
+}
+
+fn context_matches_call(
+    envelope: &StorageCommandEnvelope,
+    action: StorageAction,
+    resource_id: &str,
+    project_id: &str,
+    generation: u64,
+    fingerprint: &str,
+) -> bool {
+    envelope.action == action
+        && envelope.resource_id == resource_id
+        && envelope.project_id == project_id
+        && envelope.resource_generation == generation
+        && envelope.canonical_payload_fingerprint == fingerprint
 }
 
 impl RemoteStorageProvider {
@@ -51,6 +79,7 @@ impl RemoteStorageProvider {
         agent_id: String,
         agent_epoch: String,
         controller_epoch: u64,
+        fencing_token: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Self, String> {
         let endpoint = std::env::var("O3K_STORAGE_ENDPOINT")
             .map_err(|_| "O3K_STORAGE_ENDPOINT is required".to_owned())?;
@@ -90,6 +119,7 @@ impl RemoteStorageProvider {
             agent_id,
             agent_epoch,
             controller_epoch,
+            fencing_token,
         })
     }
 
@@ -101,26 +131,73 @@ impl RemoteStorageProvider {
         generation: u64,
         payload: &T,
     ) -> Result<StorageObservation, o3k_storage::StorageProviderError> {
-        let envelope = StorageCommandEnvelope {
-            protocol_version: 1,
-            command_id: Uuid::new_v4(),
-            operation_id: Uuid::new_v4(),
-            // The executor journal keys retries by canonical operation.  Include
-            // the action so inspect/delete (or prepare/terminate) on the same
-            // generation cannot replay one another.
-            idempotency_key: remote_idempotency_key(action, &resource_id, generation),
-            resource_id,
-            resource_generation: generation,
-            project_id,
-            controller_epoch: self.controller_epoch,
-            target_agent_id: self.agent_id.clone(),
-            target_agent_epoch: self.agent_epoch.clone(),
-            deadline: "2099-01-01T00:00:00Z".into(),
-            trace_id: "o3kd-storage".into(),
-            action,
-            canonical_payload_fingerprint: storage_payload_fingerprint(payload)
-                .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?,
+        self.execute_with_envelope(action, resource_id, project_id, generation, payload, None)
+            .await
+    }
+
+    async fn execute_with_envelope<T: serde::Serialize>(
+        &self,
+        action: StorageAction,
+        resource_id: String,
+        project_id: String,
+        generation: u64,
+        payload: &T,
+        supplied: Option<&StorageCommandEnvelope>,
+    ) -> Result<StorageObservation, o3k_storage::StorageProviderError> {
+        let fencing_token = self.fencing_token.load(Ordering::Acquire);
+        if fencing_token == 0 {
+            return Err(o3k_storage::StorageProviderError::Unavailable);
+        }
+        let mut envelope = if let Some(envelope) = supplied {
+            let fingerprint = storage_payload_fingerprint(payload)
+                .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?;
+            if !context_matches_call(
+                envelope,
+                action,
+                &resource_id,
+                &project_id,
+                generation,
+                &fingerprint,
+            ) {
+                return Err(o3k_storage::StorageProviderError::InvalidRequest);
+            }
+            inject_wire_fencing_token(envelope, fencing_token)?
+        } else {
+            let fingerprint = storage_payload_fingerprint(payload)
+                .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?;
+            StorageCommandEnvelope {
+                protocol_version: 1,
+                command_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    remote_idempotency_key(action, &resource_id, generation).as_bytes(),
+                ),
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_OID,
+                    remote_idempotency_key(action, &resource_id, generation).as_bytes(),
+                ),
+                // The executor journal keys retries by canonical operation.  Include
+                // the action so inspect/delete (or prepare/terminate) on the same
+                // generation cannot replay one another.
+                idempotency_key: remote_idempotency_key(action, &resource_id, generation),
+                resource_id,
+                resource_generation: generation,
+                project_id,
+                controller_epoch: self.controller_epoch,
+                fencing_token,
+                target_agent_id: self.agent_id.clone(),
+                target_agent_epoch: self.agent_epoch.clone(),
+                deadline: "2099-01-01T00:00:00Z".into(),
+                trace_id: "o3kd-storage".into(),
+                action,
+                canonical_payload_fingerprint: fingerprint,
+            }
         };
+        if supplied.is_none() {
+            envelope.fencing_token = fencing_token;
+            envelope
+                .validate_for_rpc()
+                .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?;
+        }
         let endpoint = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
             .map_err(|_| o3k_storage::StorageProviderError::Unavailable)?;
         let tls = tonic::transport::ClientTlsConfig::new()
@@ -169,6 +246,176 @@ impl RemoteStorageProvider {
 
 #[async_trait]
 impl StorageProvider for RemoteStorageProvider {
+    async fn create_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        context: &o3k_storage::StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
+        let o = self
+            .execute_with_envelope(
+                StorageAction::CreateVolume,
+                request.volume_id.to_string(),
+                request.project_id.clone(),
+                request.generation,
+                &payload,
+                Some(&context.envelope),
+            )
+            .await?;
+        Ok(StorageVolumeObservation {
+            provider_reference: o
+                .provider_resource_id
+                .map(|resource_id| o3k_domain::StorageProviderReference {
+                    provider: "o3k-storage".into(),
+                    resource_id,
+                })
+                .ok_or(StorageProviderError::CommandFailed)?,
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: o.resource_state == "available",
+        })
+    }
+
+    async fn inspect_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        context: &o3k_storage::StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
+        let o = self
+            .execute_with_envelope(
+                StorageAction::InspectVolume,
+                request.volume_id.to_string(),
+                request.project_id.clone(),
+                request.generation,
+                &payload,
+                Some(&context.envelope),
+            )
+            .await?;
+        Ok(StorageVolumeObservation {
+            provider_reference: o
+                .provider_resource_id
+                .map(|resource_id| o3k_domain::StorageProviderReference {
+                    provider: "o3k-storage".into(),
+                    resource_id,
+                })
+                .ok_or(StorageProviderError::CommandFailed)?,
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: o.resource_state == "available",
+        })
+    }
+
+    async fn delete_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        context: &o3k_storage::StorageExecutionContext,
+    ) -> Result<(), StorageProviderError> {
+        let payload = StorageCommandPayload::Volume(StorageVolumeCommandPayload {
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            size_bytes: request.size_bytes,
+            generation: request.generation,
+        });
+        self.execute_with_envelope(
+            StorageAction::DeleteVolume,
+            request.volume_id.to_string(),
+            request.project_id.clone(),
+            request.generation,
+            &payload,
+            Some(&context.envelope),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn prepare_attachment_with_context(
+        &self,
+        request: &StorageAttachmentRequest,
+        context: &o3k_storage::StorageExecutionContext,
+    ) -> Result<PreparedAttachment, StorageProviderError> {
+        let payload = StorageCommandPayload::Attachment(StorageAttachmentCommandPayload {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            server_id: request
+                .host_id
+                .parse()
+                .map_err(|_| StorageProviderError::InvalidRequest)?,
+            project_id: request.project_id.clone(),
+            access_mode: request.access_mode,
+            delete_on_termination: false,
+            volume_generation: request.volume_generation,
+        });
+        let o = self
+            .execute_with_envelope(
+                StorageAction::PrepareAttachment,
+                request.attachment_id.to_string(),
+                request.project_id.clone(),
+                request.volume_generation,
+                &payload,
+                Some(&context.envelope),
+            )
+            .await?;
+        PreparedAttachment::from_provider(
+            o3k_domain::StorageProviderReference {
+                provider: "o3k-storage".into(),
+                resource_id: o.provider_resource_id.unwrap_or_default(),
+            },
+            o.device_path.ok_or(StorageProviderError::CommandFailed)?,
+            request.attachment_id,
+            request.volume_id,
+        )
+    }
+
+    async fn terminate_attachment_with_context(
+        &self,
+        request: &StorageAttachmentRequest,
+        context: &o3k_storage::StorageExecutionContext,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        let payload = StorageCommandPayload::Attachment(StorageAttachmentCommandPayload {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            server_id: request
+                .host_id
+                .parse()
+                .map_err(|_| StorageProviderError::InvalidRequest)?,
+            project_id: request.project_id.clone(),
+            access_mode: request.access_mode,
+            delete_on_termination: false,
+            volume_generation: request.volume_generation,
+        });
+        let o = self
+            .execute_with_envelope(
+                StorageAction::TerminateAttachment,
+                request.attachment_id.to_string(),
+                request.project_id.clone(),
+                request.volume_generation,
+                &payload,
+                Some(&context.envelope),
+            )
+            .await?;
+        Ok(StorageAttachmentObservation {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            host_id: request.host_id.clone(),
+            attached: false,
+            provider_reference: o3k_domain::StorageProviderReference {
+                provider: "o3k-storage".into(),
+                resource_id: o.provider_resource_id.unwrap_or_default(),
+            },
+        })
+    }
+
     async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
         Err(StorageProviderError::Unavailable)
     }
@@ -386,6 +633,7 @@ pub(crate) struct LocalStorageFence {
     pub(crate) execution_lock_path: PathBuf,
     pub(crate) attempt: Arc<tokio::sync::Mutex<Option<StorageLeaseAttempt>>>,
     pub(crate) quiescing: Arc<AtomicBool>,
+    pub(crate) fencing_token: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) struct StorageLeaseAttempt {
@@ -506,6 +754,8 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             .as_mut()
             .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
         current.fencing_token = lease.fencing_token;
+        self.fencing_token
+            .store(lease.fencing_token, Ordering::Release);
         current.acquisition_pending = false;
         if self.quiescing.load(Ordering::Acquire) {
             // `end` owns the recorded release; no best-effort release can
@@ -662,6 +912,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             Ok(Ok(true)) => {
                 attempt.release_confirmed = true;
                 attempt_slot.take();
+                self.fencing_token.store(0, Ordering::Release);
                 Ok(())
             }
             Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
@@ -683,11 +934,13 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                     {
                         attempt.release_confirmed = true;
                         attempt_slot.take();
+                        self.fencing_token.store(0, Ordering::Release);
                         Ok(())
                     }
                     Ok(Ok(None)) => {
                         attempt.release_confirmed = true;
                         attempt_slot.take();
+                        self.fencing_token.store(0, Ordering::Release);
                         Ok(())
                     }
                     Ok(Ok(Some(_))) | Ok(Err(_)) | Err(_) => Err(
@@ -926,8 +1179,9 @@ pub(crate) fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
 
 #[cfg(test)]
 mod remote_protocol_tests {
-    use super::remote_idempotency_key;
-    use o3k_domain::StorageAction;
+    use super::{context_matches_call, inject_wire_fencing_token, remote_idempotency_key};
+    use o3k_domain::{StorageAction, StorageCommandEnvelope};
+    use uuid::Uuid;
 
     #[test]
     fn action_is_part_of_stable_retry_identity() {
@@ -941,6 +1195,79 @@ mod remote_protocol_tests {
     #[test]
     fn terminate_attachment_is_not_downgraded_to_observation() {
         assert_ne!(StorageAction::TerminateAttachment, StorageAction::Reconcile);
+    }
+
+    #[test]
+    fn context_identity_is_preserved_while_live_fence_is_injected() {
+        let make = |suffix: &str| StorageCommandEnvelope {
+            protocol_version: 1,
+            command_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, suffix.as_bytes()),
+            operation_id: Uuid::new_v5(&Uuid::NAMESPACE_OID, suffix.as_bytes()),
+            idempotency_key: format!("canonical-{suffix}"),
+            resource_id: "same-volume".into(),
+            resource_generation: 3,
+            project_id: "project".into(),
+            controller_epoch: 44,
+            fencing_token: 0,
+            target_agent_id: "agent".into(),
+            target_agent_epoch: "7".into(),
+            deadline: "2099-01-01T00:00:00Z".into(),
+            trace_id: suffix.into(),
+            action: StorageAction::CreateVolume,
+            canonical_payload_fingerprint: "a".repeat(64),
+        };
+        let first = inject_wire_fencing_token(&make("one"), 8).expect("wire envelope");
+        let second = inject_wire_fencing_token(&make("two"), 8).expect("wire envelope");
+        assert_eq!(first.fencing_token, 8);
+        assert_eq!(second.fencing_token, 8);
+        assert_ne!(first.command_id, second.command_id);
+        assert_ne!(first.operation_id, second.operation_id);
+        assert_ne!(first.idempotency_key, second.idempotency_key);
+    }
+
+    #[test]
+    fn context_mismatch_cannot_change_privileged_call() {
+        let envelope = StorageCommandEnvelope {
+            protocol_version: 1,
+            command_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            idempotency_key: "canonical".into(),
+            resource_id: "volume".into(),
+            resource_generation: 3,
+            project_id: "project".into(),
+            controller_epoch: 1,
+            fencing_token: 0,
+            target_agent_id: "agent".into(),
+            target_agent_epoch: "7".into(),
+            deadline: "2099-01-01T00:00:00Z".into(),
+            trace_id: "trace".into(),
+            action: StorageAction::CreateVolume,
+            canonical_payload_fingerprint: "a".repeat(64),
+        };
+        assert!(!context_matches_call(
+            &envelope,
+            StorageAction::DeleteVolume,
+            "volume",
+            "project",
+            3,
+            &"a".repeat(64)
+        ));
+        assert!(!context_matches_call(
+            &envelope,
+            StorageAction::CreateVolume,
+            "other",
+            "project",
+            3,
+            &"a".repeat(64)
+        ));
+        assert!(!context_matches_call(
+            &envelope,
+            StorageAction::CreateVolume,
+            "volume",
+            "project",
+            3,
+            &"b".repeat(64)
+        ));
     }
 }
 
@@ -969,6 +1296,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: root.join("storage.execution.lock"),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
         Ok((fence, coordination, root))
@@ -1115,6 +1443,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: lock_path.clone(),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let mut begin =
             Box::pin(o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1));
@@ -1160,6 +1489,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: root.join("storage.execution.lock"),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
 
         o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
@@ -1212,6 +1542,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: lock_path.clone(),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
 

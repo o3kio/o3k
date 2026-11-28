@@ -989,6 +989,8 @@ where
             resource_generation: generation,
             project_id: intent.project_id.clone(),
             controller_epoch: intent.controller_epoch,
+            // The provider boundary fills the live WorkLease fence.
+            fencing_token: 0,
             target_agent_id: intent.target_agent_id.clone(),
             target_agent_epoch: intent.target_agent_epoch.to_string(),
             deadline: intent.deadline.clone(),

@@ -90,6 +90,8 @@ impl StorageVolumeIntent {
             resource_generation: self.generation,
             project_id: self.project_id.clone(),
             controller_epoch: self.controller_epoch,
+            // The provider boundary fills the live WorkLease fence.
+            fencing_token: 0,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch.to_string(),
             deadline: self.deadline.clone(),
