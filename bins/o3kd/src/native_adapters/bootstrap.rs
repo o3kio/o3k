@@ -659,6 +659,9 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .map(state_from_record)
             .transpose()?
             .ok_or(BootstrapFailure::Unavailable)?;
+        if revoked.get(&request.agent_id).copied().unwrap_or(false) {
+            return Err(BootstrapFailure::Unauthorized);
+        }
         let legacy_grant = if issued_enrollment.is_none() {
             let id = grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?;
             let grant = self
@@ -1199,6 +1202,60 @@ mod tests {
                 .await
                 .is_some(),
             "replayed join must re-project the durable identity into the live registry"
+        );
+
+        // A removal's durable revocation survives controller restart and is
+        // checked before the enrolled-identity replay path can re-authorize
+        // the old credential. A separately authorized replacement identity
+        // (node-second above) remains enrolled.
+        let mut removed_state = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing before removal replay")?;
+        removed_state.revoked_agents =
+            serde_json::to_string(&BTreeMap::from([(String::from("node-test"), true)]))?;
+        store.upsert_bootstrap_state(&removed_state).await?;
+        let after_removal_restart = BootstrapAdapter {
+            store: store.clone(),
+            placement: o3k_placement::PlacementLedger::open(
+                std::env::temp_dir().join(format!("o3k-bootstrap-revoked-{}", Uuid::now_v7())),
+                store.clone(),
+            )
+            .await?,
+            agents: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            locations: o3k_kernel::LocationRegistry::default(),
+            bootstrap_secret: Some("secret".to_owned()),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            readiness: o3k_api::AppState::new(),
+        };
+        let old_credential_replay = after_removal_restart
+            .join(JoinRequest {
+                enrollment_token,
+                enrollment_grant_id: None,
+                agent_id: "node-test".into(),
+                agent_epoch: "epoch-1".into(),
+                certificate: String::from_utf8(
+                    include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem")
+                        .to_vec(),
+                )?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([(String::from("VCPU"), 2), (String::from("MEMORY_MB"), 1024)]),
+            })
+            .await;
+        assert!(
+            matches!(old_credential_replay, Err(BootstrapFailure::Unauthorized)),
+            "removed agent credentials must stay rejected after controller restart"
+        );
+        assert!(
+            after_removal_restart
+                .agents
+                .snapshot("node-test")
+                .await
+                .is_none(),
+            "revoked identity must not be projected into the fresh runtime"
         );
         Ok(())
     }
