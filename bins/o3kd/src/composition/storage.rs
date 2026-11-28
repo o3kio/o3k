@@ -1064,26 +1064,93 @@ pub(crate) struct NativeStorageVolumeWorkflow {
     pub(crate) store: Arc<o3k_store::O3kStore>,
     pub(crate) provider: Arc<dyn o3k_storage::StorageProvider>,
     pub(crate) metering: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+    pub(crate) controller_epoch: u64,
+    pub(crate) target_agent_id: String,
+    pub(crate) target_agent_epoch: u64,
 }
 
 #[async_trait]
 impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
     async fn create(&self, volume_id: Uuid) -> Result<(), String> {
-        let record = self.store.get_volume(volume_id).await
-            .map_err(|e| e.to_string())?.ok_or_else(|| "native volume disappeared".to_owned())?;
-        o3k_api::realize_native_volume_create(
-            self.store.clone(), self.provider.clone(), record, Some(&self.metering),
-        ).await.map(|_| ())
+        let record = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "native volume disappeared".to_owned())?;
+        let intent = o3k_reconciler::storage_volume_workflow::StorageVolumeIntent {
+            volume_id: record.volume.id,
+            project_id: record.volume.project_id.clone(),
+            size_bytes: record.volume.size_bytes,
+            generation: record.volume.generation + 1,
+            controller_epoch: self.controller_epoch,
+            target_agent_id: self.target_agent_id.clone(),
+            target_agent_epoch: self.target_agent_epoch,
+            idempotency_key: format!(
+                "volume-create-{}-{}",
+                volume_id,
+                record.volume.generation + 1
+            ),
+            trace_id: "o3kd-native-volume".into(),
+            deadline: "2099-01-01T00:00:00Z".into(),
+        };
+        let context = o3k_storage::StorageExecutionContext {
+            envelope: intent
+                .envelope(o3k_domain::StorageAction::CreateVolume)
+                .map_err(|e| e.to_string())?,
+        };
+        let request = o3k_storage::StorageVolumeRequest {
+            volume_id: record.volume.id,
+            project_id: record.volume.project_id.clone(),
+            size_bytes: record.volume.size_bytes,
+            generation: record.volume.generation + 1,
+        };
+        self.provider
+            .create_volume_with_context(&request, &context)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
-        o3k_api::remove_native_volume(
-            self.store.clone(), self.provider.clone(), project_id, volume_id, None,
-            Some(&self.metering),
-        ).await
+        let record = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "native volume disappeared".to_owned())?;
+        let intent = o3k_reconciler::storage_volume_workflow::StorageVolumeIntent {
+            volume_id: record.volume.id,
+            project_id: project_id.into(),
+            size_bytes: record.volume.size_bytes,
+            generation: record.volume.generation + 1,
+            controller_epoch: self.controller_epoch,
+            target_agent_id: self.target_agent_id.clone(),
+            target_agent_epoch: self.target_agent_epoch,
+            idempotency_key: format!("volume-delete-{volume_id}-{}", record.volume.generation + 1),
+            trace_id: "o3kd-native-volume".into(),
+            deadline: "2099-01-01T00:00:00Z".into(),
+        };
+        let context = o3k_storage::StorageExecutionContext {
+            envelope: intent
+                .envelope(o3k_domain::StorageAction::DeleteVolume)
+                .map_err(|e| e.to_string())?,
+        };
+        let request = o3k_storage::StorageVolumeRequest {
+            volume_id: record.volume.id,
+            project_id: project_id.into(),
+            size_bytes: record.volume.size_bytes,
+            generation: record.volume.generation + 1,
+        };
+        self.provider
+            .delete_volume_with_context(&request, &context)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    async fn recover(&self) -> Result<(), String> { Ok(()) }
+    async fn recover(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 // Native LVM execution is intentionally in-process in this bounded profile;

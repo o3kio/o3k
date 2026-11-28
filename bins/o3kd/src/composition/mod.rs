@@ -233,8 +233,7 @@ use self::network::{
 use self::runtime::{control_shutdown_signal, spawn_console_event_consumer};
 use self::storage::{
     LocalComputeAttachmentExecutor, LocalStorageFence, NativeStorageAttachmentWorkflow,
-    NativeStorageVolumeWorkflow,
-    storage_intent_epoch,
+    NativeStorageVolumeWorkflow, storage_intent_epoch,
 };
 
 fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String> {
@@ -1880,6 +1879,10 @@ pub async fn build_composition_with_guard(
                 store: store.clone(),
                 provider: provider.clone(),
                 metering: metering_observer.clone(),
+                controller_epoch: storage_intent_epoch,
+                target_agent_id: std::env::var("O3K_STORAGE_AGENT_ID")
+                    .unwrap_or_else(|_| "local".into()),
+                target_agent_epoch: 1,
             }) as Arc<dyn o3k_api::NativeVolumeWorkflow>
         });
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
