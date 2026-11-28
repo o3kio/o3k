@@ -141,6 +141,8 @@ installer = Path(sys.argv[1]).read_text()
 assert installer.index('o3k_verify_config_ledger "$CONFIG_DIR"') < installer.index('bash "$ROOT_DIR/scripts/generate-passwords.sh"')
 PY
 grep -Fq 'share/o3k/o3k-enrollment-issuer@.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh"
+grep -Fq '"$ROOT_DIR/packaging/o3k-enrollment-issuer@.service"' "$ROOT/packaging/make-release.sh"
+grep -Fq '"$ROOT_DIR/packaging/o3k-enrollment-issuer.socket"' "$ROOT/packaging/make-release.sh"
 grep -Fq 'systemctl disable --now o3k-enrollment-issuer.socket' "$ROOT/packaging/uninstall.sh"
 grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
 ! grep -Fq 'O3K_ENROLLMENT_SIGNER=/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
