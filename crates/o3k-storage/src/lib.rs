@@ -43,6 +43,8 @@ struct JournalRecord {
 struct JournalSnapshot {
     format_version: u16,
     controller_epoch: u64,
+    #[serde(default)]
+    fencing_token: u64,
     records: Vec<JournalRecord>,
 }
 
@@ -67,6 +69,7 @@ pub struct StorageJournal {
     path: std::path::PathBuf,
     records: std::sync::Mutex<Vec<JournalRecord>>,
     controller_epoch: std::sync::Mutex<u64>,
+    fencing_token: std::sync::Mutex<u64>,
 }
 
 impl StorageJournal {
@@ -76,6 +79,7 @@ impl StorageJournal {
             path,
             records: std::sync::Mutex::new(Vec::new()),
             controller_epoch: std::sync::Mutex::new(0),
+            fencing_token: std::sync::Mutex::new(0),
         };
         let _lock = acquire_journal_lock(&journal_lock_path(&journal.path))?;
         journal.reload_locked()?;
@@ -96,6 +100,9 @@ impl StorageJournal {
         if envelope.target_agent_id != agent_id || envelope.target_agent_epoch != agent_epoch {
             return Err(StorageJournalError::Stale);
         }
+        if envelope.fencing_token == 0 {
+            return Err(StorageJournalError::Stale);
+        }
         let mut records = self
             .records
             .lock()
@@ -104,14 +111,24 @@ impl StorageJournal {
             .controller_epoch
             .lock()
             .map_err(|_| StorageJournalError::Conflict)?;
-        if *current_epoch != 0 && envelope.controller_epoch != *current_epoch {
-            return Err(StorageJournalError::Stale);
-        }
+        let mut current_token = self
+            .fencing_token
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        // ControllerEpoch identifies the process session, but is not the
+        // takeover fence.  Durable WorkLease fencing_token is authoritative;
+        // a restarted controller may present a new session epoch.
         if let Some(existing) = records
             .iter()
             .find(|record| record.envelope.idempotency_key == envelope.idempotency_key)
         {
-            return if existing.envelope == envelope {
+            return if existing.envelope == envelope
+                || (existing.envelope.action == envelope.action
+                    && existing.envelope.resource_id == envelope.resource_id
+                    && existing.envelope.canonical_payload_fingerprint
+                        == envelope.canonical_payload_fingerprint
+                    && envelope.fencing_token <= existing.envelope.fencing_token)
+            {
                 Ok(existing.observation.clone())
             } else {
                 Err(StorageJournalError::Conflict)
@@ -133,23 +150,43 @@ impl StorageJournal {
             device_path: None,
         };
         let next_controller_epoch = envelope.controller_epoch;
+        if *current_token != 0 && envelope.fencing_token < *current_token {
+            if let Some(existing) = records.iter().find(|record| {
+                record.envelope.idempotency_key == envelope.idempotency_key
+                    && record.envelope.action == envelope.action
+                    && record.envelope.resource_id == envelope.resource_id
+                    && record.envelope.canonical_payload_fingerprint
+                        == envelope.canonical_payload_fingerprint
+            }) {
+                return Ok(existing.observation.clone());
+            }
+            return Err(StorageJournalError::Stale);
+        }
+        let next_fencing_token = envelope.fencing_token;
         let mut candidate = records.clone();
         candidate.push(JournalRecord {
             envelope,
             observation: observation.clone(),
         });
-        match persist_journal(&self.path, next_controller_epoch, &candidate) {
+        match persist_journal(
+            &self.path,
+            next_controller_epoch,
+            next_fencing_token,
+            &candidate,
+        ) {
             Ok(()) => {}
             Err(error @ StorageJournalError::DurabilityUncertain(_)) => {
                 *records = candidate;
                 drop(records);
                 *current_epoch = next_controller_epoch;
+                *current_token = next_fencing_token;
                 return Err(error);
             }
             Err(error) => return Err(error),
         }
         *records = candidate;
         *current_epoch = next_controller_epoch;
+        *current_token = next_fencing_token;
         Ok(observation)
     }
 
@@ -225,7 +262,11 @@ impl StorageJournal {
             .controller_epoch
             .lock()
             .map_err(|_| StorageJournalError::Conflict)?;
-        match persist_journal(&self.path, epoch, &candidate) {
+        let token = *self
+            .fencing_token
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        match persist_journal(&self.path, epoch, token, &candidate) {
             Ok(()) => {}
             Err(error @ StorageJournalError::DurabilityUncertain(_)) => {
                 *records = candidate;
@@ -242,19 +283,24 @@ impl StorageJournal {
             return Ok(());
         }
         let bytes = std::fs::read(&self.path)?;
-        let (epoch, records, migrated) = match serde_json::from_slice::<JournalSnapshot>(&bytes) {
-            Ok(snapshot) if snapshot.format_version == 1 => {
-                (snapshot.controller_epoch, snapshot.records, false)
-            }
-            Ok(_) => return Err(StorageJournalError::Conflict),
-            Err(_) => (
-                0,
-                serde_json::from_slice::<Vec<JournalRecord>>(&bytes)?,
-                true,
-            ),
-        };
+        let (epoch, token, records, migrated) =
+            match serde_json::from_slice::<JournalSnapshot>(&bytes) {
+                Ok(snapshot) if snapshot.format_version == 1 => (
+                    snapshot.controller_epoch,
+                    snapshot.fencing_token,
+                    snapshot.records,
+                    false,
+                ),
+                Ok(_) => return Err(StorageJournalError::Conflict),
+                Err(_) => (
+                    0,
+                    0,
+                    serde_json::from_slice::<Vec<JournalRecord>>(&bytes)?,
+                    true,
+                ),
+            };
         if migrated {
-            match persist_journal(&self.path, epoch, &records) {
+            match persist_journal(&self.path, epoch, token, &records) {
                 Ok(()) => {}
                 Err(StorageJournalError::DurabilityUncertain(error)) => {
                     *self
@@ -265,6 +311,10 @@ impl StorageJournal {
                         .controller_epoch
                         .lock()
                         .map_err(|_| StorageJournalError::Conflict)? = epoch;
+                    *self
+                        .fencing_token
+                        .lock()
+                        .map_err(|_| StorageJournalError::Conflict)? = token;
                     return Err(StorageJournalError::DurabilityUncertain(error));
                 }
                 Err(error) => return Err(error),
@@ -278,6 +328,10 @@ impl StorageJournal {
             .controller_epoch
             .lock()
             .map_err(|_| StorageJournalError::Conflict)? = epoch;
+        *self
+            .fencing_token
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = token;
         Ok(())
     }
 }
@@ -296,6 +350,7 @@ fn journal_lock_path(path: &std::path::Path) -> std::path::PathBuf {
 fn persist_journal(
     path: &std::path::Path,
     controller_epoch: u64,
+    fencing_token: u64,
     records: &[JournalRecord],
 ) -> Result<(), StorageJournalError> {
     use std::fs::OpenOptions;
@@ -308,6 +363,7 @@ fn persist_journal(
     let bytes = serde_json::to_vec(&JournalSnapshot {
         format_version: 1,
         controller_epoch,
+        fencing_token,
         records: records.to_vec(),
     })?;
     let mut file = OpenOptions::new()
@@ -411,6 +467,7 @@ mod journal_tests {
             resource_generation: 1,
             project_id: "project-1".to_owned(),
             controller_epoch: 1,
+            fencing_token: 1,
             target_agent_id: "storage-a".to_owned(),
             target_agent_epoch: "7".into(),
             deadline: "2099-01-01T00:00:00Z".to_owned(),
@@ -456,6 +513,33 @@ mod journal_tests {
             .expect("journal opens")
             .accept(envelope("op-2", &"c".repeat(64)), "storage-a", "8");
         assert!(matches!(result, Err(StorageJournalError::Stale)));
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn fencing_token_rejects_stale_and_accepts_takeover() {
+        let journal_path = path();
+        let journal = StorageJournal::open(&journal_path).expect("open");
+        journal
+            .accept(envelope("fence-a", &"a".repeat(64)), "storage-a", "7")
+            .expect("initial token");
+        let mut stale = envelope("fence-b", &"b".repeat(64));
+        stale.fencing_token = 0;
+        assert!(matches!(
+            journal.accept(stale, "storage-a", "7"),
+            Err(StorageJournalError::Stale)
+        ));
+        let mut successor = envelope("fence-b", &"b".repeat(64));
+        successor.fencing_token = 2;
+        successor.controller_epoch = 99;
+        journal
+            .accept(successor, "storage-a", "7")
+            .expect("higher token takeover");
+        drop(journal);
+        let journal = StorageJournal::open(&journal_path).expect("reopen after takeover");
+        let mut old_duplicate = envelope("fence-a", &"a".repeat(64));
+        old_duplicate.fencing_token = 1;
+        assert!(journal.accept(old_duplicate, "storage-a", "7").is_ok());
         let _ = std::fs::remove_file(journal_path);
     }
 

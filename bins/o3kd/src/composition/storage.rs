@@ -40,6 +40,7 @@ pub(crate) struct RemoteStorageProvider {
     agent_id: String,
     agent_epoch: String,
     controller_epoch: u64,
+    fencing_token: Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: u64) -> String {
@@ -51,6 +52,7 @@ impl RemoteStorageProvider {
         agent_id: String,
         agent_epoch: String,
         controller_epoch: u64,
+        fencing_token: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Self, String> {
         let endpoint = std::env::var("O3K_STORAGE_ENDPOINT")
             .map_err(|_| "O3K_STORAGE_ENDPOINT is required".to_owned())?;
@@ -90,6 +92,7 @@ impl RemoteStorageProvider {
             agent_id,
             agent_epoch,
             controller_epoch,
+            fencing_token,
         })
     }
 
@@ -101,10 +104,20 @@ impl RemoteStorageProvider {
         generation: u64,
         payload: &T,
     ) -> Result<StorageObservation, o3k_storage::StorageProviderError> {
+        let fencing_token = self.fencing_token.load(Ordering::Acquire);
+        if fencing_token == 0 {
+            return Err(o3k_storage::StorageProviderError::Unavailable);
+        }
         let envelope = StorageCommandEnvelope {
             protocol_version: 1,
-            command_id: Uuid::new_v4(),
-            operation_id: Uuid::new_v4(),
+            command_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                remote_idempotency_key(action, &resource_id, generation).as_bytes(),
+            ),
+            operation_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                remote_idempotency_key(action, &resource_id, generation).as_bytes(),
+            ),
             // The executor journal keys retries by canonical operation.  Include
             // the action so inspect/delete (or prepare/terminate) on the same
             // generation cannot replay one another.
@@ -113,6 +126,7 @@ impl RemoteStorageProvider {
             resource_generation: generation,
             project_id,
             controller_epoch: self.controller_epoch,
+            fencing_token,
             target_agent_id: self.agent_id.clone(),
             target_agent_epoch: self.agent_epoch.clone(),
             deadline: "2099-01-01T00:00:00Z".into(),
@@ -121,6 +135,9 @@ impl RemoteStorageProvider {
             canonical_payload_fingerprint: storage_payload_fingerprint(payload)
                 .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?,
         };
+        envelope
+            .validate_for_rpc()
+            .map_err(|_| o3k_storage::StorageProviderError::InvalidRequest)?;
         let endpoint = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
             .map_err(|_| o3k_storage::StorageProviderError::Unavailable)?;
         let tls = tonic::transport::ClientTlsConfig::new()
@@ -386,6 +403,7 @@ pub(crate) struct LocalStorageFence {
     pub(crate) execution_lock_path: PathBuf,
     pub(crate) attempt: Arc<tokio::sync::Mutex<Option<StorageLeaseAttempt>>>,
     pub(crate) quiescing: Arc<AtomicBool>,
+    pub(crate) fencing_token: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) struct StorageLeaseAttempt {
@@ -506,6 +524,8 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             .as_mut()
             .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
         current.fencing_token = lease.fencing_token;
+        self.fencing_token
+            .store(lease.fencing_token, Ordering::Release);
         current.acquisition_pending = false;
         if self.quiescing.load(Ordering::Acquire) {
             // `end` owns the recorded release; no best-effort release can
@@ -662,6 +682,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             Ok(Ok(true)) => {
                 attempt.release_confirmed = true;
                 attempt_slot.take();
+                self.fencing_token.store(0, Ordering::Release);
                 Ok(())
             }
             Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
@@ -683,11 +704,13 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                     {
                         attempt.release_confirmed = true;
                         attempt_slot.take();
+                        self.fencing_token.store(0, Ordering::Release);
                         Ok(())
                     }
                     Ok(Ok(None)) => {
                         attempt.release_confirmed = true;
                         attempt_slot.take();
+                        self.fencing_token.store(0, Ordering::Release);
                         Ok(())
                     }
                     Ok(Ok(Some(_))) | Ok(Err(_)) | Err(_) => Err(
@@ -969,6 +992,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: root.join("storage.execution.lock"),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
         Ok((fence, coordination, root))
@@ -1115,6 +1139,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: lock_path.clone(),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let mut begin =
             Box::pin(o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1));
@@ -1160,6 +1185,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: root.join("storage.execution.lock"),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
 
         o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
@@ -1212,6 +1238,7 @@ mod storage_lease_drain_tests {
             execution_lock_path: lock_path.clone(),
             attempt: Arc::new(tokio::sync::Mutex::new(None)),
             quiescing: Arc::new(AtomicBool::new(false)),
+            fencing_token: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
 

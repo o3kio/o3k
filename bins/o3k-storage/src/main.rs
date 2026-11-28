@@ -53,7 +53,7 @@ impl StorageExecutor for Executor {
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.envelope_json)
             .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
         envelope
-            .validate()
+            .validate_for_rpc()
             .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
         let payload: StorageCommandPayload = serde_json::from_slice(&command.payload_json)
             .map_err(|_| Status::invalid_argument("invalid storage payload"))?;

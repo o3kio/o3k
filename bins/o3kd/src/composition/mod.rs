@@ -1695,6 +1695,7 @@ pub async fn build_composition_with_guard(
 
     // Native EA storage always crosses the dedicated mTLS executor boundary.
     // Missing executor identity is a fail-closed configuration error.
+    let storage_fencing_token = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let native_lvm_provider: Option<Arc<o3k_storage::LvmStorageProvider>> = None;
     let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
         if std::env::var_os("O3K_STORAGE_ENDPOINT").is_some() {
@@ -1707,6 +1708,7 @@ pub async fn build_composition_with_guard(
                         "O3K_STORAGE_AGENT_EPOCH is required for storage executor".to_owned()
                     })?,
                     storage_intent_epoch(&controller_epoch),
+                    storage_fencing_token.clone(),
                 )?,
             ) as Arc<dyn o3k_storage::StorageProvider>)
         } else {
@@ -1854,6 +1856,7 @@ pub async fn build_composition_with_guard(
                 execution_lock_path: config.data_dir.join("storage.execution.lock"),
                 attempt: Arc::new(tokio::sync::Mutex::new(None)),
                 quiescing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                fencing_token: storage_fencing_token.clone(),
             };
             storage_fence_for_drain = Some(storage_fence.clone());
             let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(

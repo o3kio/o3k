@@ -120,6 +120,10 @@ pub struct StorageCommandEnvelope {
     /// Controller fencing epoch. Storage agents must reject commands from a
     /// controller that no longer owns the durable work lease.
     pub controller_epoch: u64,
+    /// Monotonic durable WorkLease fence. This is distinct from the
+    /// controller process epoch and is never derived from it.
+    #[serde(default)]
+    pub fencing_token: u64,
     pub target_agent_id: String,
     #[serde(deserialize_with = "deserialize_epoch")]
     pub target_agent_epoch: String,
@@ -193,6 +197,17 @@ impl StorageCommandEnvelope {
                 .chars()
                 .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
         {
+            return Err(StorageValidationError::InvalidCommandEnvelope);
+        }
+        Ok(())
+    }
+
+    /// Validates an envelope crossing the privileged executor boundary.
+    /// Persisted workflow intents may be explicitly unfenced until execution
+    /// injects the live durable WorkLease token.
+    pub fn validate_for_rpc(&self) -> Result<(), StorageValidationError> {
+        self.validate()?;
+        if self.fencing_token == 0 {
             return Err(StorageValidationError::InvalidCommandEnvelope);
         }
         Ok(())
@@ -819,6 +834,7 @@ mod tests {
             resource_generation: 1,
             project_id: "project-a".to_owned(),
             controller_epoch: 1,
+            fencing_token: 0,
             target_agent_id: "storage-a".to_owned(),
             target_agent_epoch: "epoch-1".into(),
             deadline: "2026-08-19T00:00:00Z".to_owned(),
