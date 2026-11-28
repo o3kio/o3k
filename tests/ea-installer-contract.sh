@@ -149,6 +149,15 @@ grep -Fq 'DirectoryMode=0711' "$ROOT/packaging/o3k-enrollment-issuer.socket"
 grep -Fq 'SocketUser=o3k' "$ROOT/packaging/o3k-enrollment-issuer.socket"
 grep -Fq 'SocketMode=0600' "$ROOT/packaging/o3k-enrollment-issuer.socket"
 grep -Fq 'O3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json' "$ROOT/packaging/install.sh"
+python3 - "$ROOT/packaging/install.sh" <<'PY'
+from pathlib import Path
+import sys
+installer = Path(sys.argv[1]).read_text()
+recursive_chown = installer.index('chown -R o3k:o3k-compute "$DATA_DIR"')
+storage_restore = installer.index('chown root:root "$DATA_DIR/storage"')
+assert recursive_chown < storage_restore
+assert 'chmod 0700 "$DATA_DIR/storage"' in installer[storage_restore:storage_restore + 160]
+PY
 grep -Fq 'unwrap_or_else(|_| "/var/lib/o3k/storage/journal.json".into())' "$ROOT/bins/o3k-storage/src/main.rs"
 grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
 ! grep -Fq 'O3K_ENROLLMENT_SIGNER=/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"

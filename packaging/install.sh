@@ -1190,6 +1190,14 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k "$LOG_DIR"
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d ! -path "$COMPUTE_DATA_DIR" -exec chmod 0700 {} +
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 {} +
+  # The storage executor runs as root with CAP_SYS_ADMIN but without DAC
+  # override. Keep its journal directory root-owned across reinstalls: the
+  # recursive controller data chown above would otherwise make mode 0700
+  # inaccessible to the executor and prevent it from creating its lock file.
+  if [[ "$STORAGE_ENABLED" == 1 && -d "$DATA_DIR/storage" ]]; then
+    chown root:root "$DATA_DIR/storage"
+    chmod 0700 "$DATA_DIR/storage"
+  fi
   # The network agent state dir has its own identity: restore it after the
   # recursive control-plane chown so the (never-enabled-here) o3k-network
   # unit can write its state once small-edge orchestration enrolls it.
