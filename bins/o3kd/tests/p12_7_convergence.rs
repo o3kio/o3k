@@ -230,6 +230,7 @@ async fn build_http_runtime_with_identity_and_scheduler(
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: None,
             metering: None,
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
@@ -354,6 +355,7 @@ async fn run_native_openstack_http_conformance(
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: None,
             metering: None,
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {

@@ -241,6 +241,7 @@ async fn build_runtime(
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: None,
             metering: Some(adapter.clone()),
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(TestIssuer {
@@ -581,6 +582,7 @@ async fn volume_application(
         public_allocator: None,
         network_external_realm_id: None,
         attachment_workflow: None,
+        volume_workflow: None,
         metering: Some(adapter),
     });
     Ok((descriptor, application))
