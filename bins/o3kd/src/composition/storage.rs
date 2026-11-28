@@ -1057,6 +1057,35 @@ pub(crate) struct NativeStorageAttachmentWorkflow {
     >,
 }
 
+/// Canonical native-volume route.  The API retains ownership and authorization;
+/// this adapter only executes the already-persisted volume through the bounded
+/// storage provider and observes the provider before reporting success.
+pub(crate) struct NativeStorageVolumeWorkflow {
+    pub(crate) store: Arc<o3k_store::O3kStore>,
+    pub(crate) provider: Arc<dyn o3k_storage::StorageProvider>,
+    pub(crate) metering: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+}
+
+#[async_trait]
+impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
+    async fn create(&self, volume_id: Uuid) -> Result<(), String> {
+        let record = self.store.get_volume(volume_id).await
+            .map_err(|e| e.to_string())?.ok_or_else(|| "native volume disappeared".to_owned())?;
+        o3k_api::realize_native_volume_create(
+            self.store.clone(), self.provider.clone(), record, Some(&self.metering),
+        ).await.map(|_| ())
+    }
+
+    async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
+        o3k_api::remove_native_volume(
+            self.store.clone(), self.provider.clone(), project_id, volume_id, None,
+            Some(&self.metering),
+        ).await
+    }
+
+    async fn recover(&self) -> Result<(), String> { Ok(()) }
+}
+
 // Native LVM execution is intentionally in-process in this bounded profile;
 // there is no independently restartable storage-agent session to register.
 // The durable controller work lease above is the real storage mutation fence.

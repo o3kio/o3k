@@ -233,6 +233,7 @@ use self::network::{
 use self::runtime::{control_shutdown_signal, spawn_console_event_consumer};
 use self::storage::{
     LocalComputeAttachmentExecutor, LocalStorageFence, NativeStorageAttachmentWorkflow,
+    NativeStorageVolumeWorkflow,
     storage_intent_epoch,
 };
 
@@ -1873,6 +1874,14 @@ pub async fn build_composition_with_guard(
                 workflow,
             }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
         });
+    let native_volume_workflow: Option<Arc<dyn o3k_api::NativeVolumeWorkflow>> =
+        native_storage_provider.as_ref().map(|provider| {
+            Arc::new(NativeStorageVolumeWorkflow {
+                store: store.clone(),
+                provider: provider.clone(),
+                metering: metering_observer.clone(),
+            }) as Arc<dyn o3k_api::NativeVolumeWorkflow>
+        });
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(crate::native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
@@ -2098,6 +2107,9 @@ pub async fn build_composition_with_guard(
     state = state.with_storage_store(store.clone());
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);
+    }
+    if let Some(workflow) = native_volume_workflow {
+        state = state.with_native_volume_workflow(workflow);
     }
     o3k_api::recover_native_volumes(&state).await;
     let native_storage_recovery_task = if let Some(workflow) = native_attachment_workflow.clone() {
