@@ -437,6 +437,8 @@ mod tests {
     struct FakeAgents {
         snapshots: HashMap<String, AgentNodeSnapshot>,
         revoked: std::sync::Mutex<Vec<String>>,
+        revoke_started: Option<Arc<tokio::sync::Notify>>,
+        revoke_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait::async_trait]
@@ -458,6 +460,12 @@ mod tests {
             tokio::sync::broadcast::channel(1).1
         }
         async fn revoke_agent_identity(&self, agent_id: &str) {
+            if let Some(started) = &self.revoke_started {
+                started.notify_one();
+            }
+            if let Some(release) = &self.revoke_release {
+                release.notified().await;
+            }
             if let Ok(mut revoked) = self.revoked.lock() {
                 revoked.push(agent_id.to_owned());
             }
@@ -536,6 +544,8 @@ mod tests {
             agents: Arc::new(FakeAgents {
                 snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
                 revoked: std::sync::Mutex::new(Vec::new()),
+                revoke_started: None,
+                revoke_release: None,
             }),
             locations: o3k_kernel::LocationRegistry::default(),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -821,6 +831,8 @@ mod tests {
                 ("agent-b".to_owned(), snapshot("agent-b")),
             ]),
             revoked: std::sync::Mutex::new(Vec::new()),
+            revoke_started: None,
+            revoke_release: None,
         };
         let agents = Arc::new(agents);
         let adapter = BuildingBlockAdapter {
@@ -909,6 +921,106 @@ mod tests {
             .map(|view| view.block.id)
             .collect();
         assert_eq!(listed, BTreeSet::from(["block-b".to_owned()]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_removal_still_completes_live_agent_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        initialize_bootstrap_state(&store).await?;
+        let placement = o3k_placement::PlacementLedger::open(
+            std::env::temp_dir().join(format!("o3k-bb-cancel-{}", Uuid::now_v7())),
+            store.clone(),
+        )
+        .await?;
+        placement
+            .register_provider(
+                "agent-a",
+                BTreeMap::from([(
+                    "VCPU".to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                )]),
+            )
+            .await?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agents = Arc::new(FakeAgents {
+            snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
+            revoked: std::sync::Mutex::new(Vec::new()),
+            revoke_started: Some(started.clone()),
+            revoke_release: Some(release.clone()),
+        });
+        let adapter = BuildingBlockAdapter {
+            store: store.clone(),
+            placement,
+            agents: agents.clone(),
+            locations: o3k_kernel::LocationRegistry::default(),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let auth = operator_context();
+        adapter
+            .enroll(
+                o3k_kernel::BuildingBlock::enrolling(
+                    "block-a",
+                    "agent-a",
+                    vec!["agent-a".to_owned()],
+                    None,
+                    None,
+                )?,
+                &auth,
+            )
+            .await?;
+        let ready = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Ready,
+                1,
+                vec![],
+                &auth,
+            )
+            .await?;
+        adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                ready.block.generation,
+                vec![],
+                &auth,
+            )
+            .await?;
+        let draining = store
+            .get_building_block("block-a")
+            .await?
+            .unwrap()
+            .block()?;
+        let removal = tokio::spawn({
+            let adapter = adapter;
+            async move {
+                adapter
+                    .transition(
+                        "block-a",
+                        o3k_kernel::BuildingBlockState::Removed,
+                        draining.generation,
+                        vec![],
+                        &auth,
+                    )
+                    .await
+            }
+        });
+        started.notified().await;
+        removal.abort();
+        release.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let bootstrap = store.get_bootstrap_state("default").await?.unwrap();
+        let revoked: BTreeMap<String, bool> = serde_json::from_str(&bootstrap.revoked_agents)?;
+        assert_eq!(revoked.get("agent-a"), Some(&true));
+        assert_eq!(agents.revoked.lock().unwrap().as_slice(), ["agent-a"]);
         Ok(())
     }
 
