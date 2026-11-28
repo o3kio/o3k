@@ -519,6 +519,24 @@ mod tests {
             VolumeState::Available,
             "the concurrent winner must persist the canonical terminal state"
         );
+        let command = store
+            .get_agent_command_by_idempotency_key("concurrent-duplicate")
+            .await
+            .unwrap();
+        assert_eq!(
+            command.state,
+            AgentCommandState::Succeeded,
+            "the durable executor command must reach its terminal state"
+        );
+        assert_eq!(
+            store
+                .get_operation(command.operation_id)
+                .await
+                .unwrap()
+                .state,
+            OperationState::Succeeded,
+            "the canonical operation must reach its terminal state"
+        );
     }
 
     #[tokio::test]
