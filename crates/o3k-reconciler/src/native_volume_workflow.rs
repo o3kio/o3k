@@ -130,6 +130,10 @@ where
                 &record.envelope.target_agent_epoch,
             )
             .await?;
+            self.fence
+                .assert_current(record.envelope.controller_epoch)
+                .await
+                .map_err(|_| NativeVolumeWorkflowError::StaleFence)?;
             let observed = match self
                 .provider
                 .inspect_volume_with_context(&request, &context)
@@ -164,22 +168,65 @@ where
                 }
                 Err(_) => continue,
             };
+            let mut recovered_observation = None;
+            let mut recovered_delete = false;
             let converged = match record.envelope.action {
                 StorageAction::CreateVolume => {
-                    observed.owned
-                        && observed.available
-                        && observed.size_bytes == payload.size_bytes
+                    if !observed.owned || !observed.available {
+                        match self
+                            .provider
+                            .create_volume_with_context(&request, &context)
+                            .await
+                        {
+                            Ok(created) => {
+                                recovered_observation = Some(created);
+                            }
+                            Err(StorageProviderError::Conflict) => {}
+                            Err(_) => continue,
+                        }
+                    }
+                    let candidate = recovered_observation.as_ref().unwrap_or(&observed);
+                    candidate.owned
+                        && candidate.available
+                        && candidate.size_bytes == payload.size_bytes
                         && provider_reference_matches(
                             payload.volume_id,
-                            &observed.provider_reference,
+                            &candidate.provider_reference,
                         )
                 }
-                StorageAction::DeleteVolume => !observed.owned || !observed.available,
+                StorageAction::DeleteVolume => {
+                    if observed.owned && observed.available {
+                        match self
+                            .provider
+                            .delete_volume_with_context(&request, &context)
+                            .await
+                        {
+                            Ok(()) => recovered_delete = true,
+                            Err(StorageProviderError::NotFound) => recovered_delete = true,
+                            Err(_) => continue,
+                        }
+                    }
+                    if recovered_delete {
+                        match self
+                            .provider
+                            .inspect_volume_with_context(&request, &context)
+                            .await
+                        {
+                            Err(StorageProviderError::NotFound) => true,
+                            Ok(_) | Err(_) => false,
+                        }
+                    } else {
+                        !observed.owned || !observed.available
+                    }
+                }
                 _ => false,
             };
             if converged {
                 let reference = if record.envelope.action == StorageAction::CreateVolume {
-                    Some(observed.provider_reference.clone())
+                    recovered_observation
+                        .as_ref()
+                        .or(Some(&observed))
+                        .map(|value| value.provider_reference.clone())
                 } else {
                     None
                 };
