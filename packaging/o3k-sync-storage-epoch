@@ -14,7 +14,9 @@ tmpdir=$root/storage
 tmp=$(mktemp "$tmpdir/.epoch.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 sed "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$epoch/" "$storage" >"$tmp"
-grep -q '^O3K_STORAGE_AGENT_EPOCH=' "$tmp" || exit 1
+if ! grep -q '^O3K_STORAGE_AGENT_EPOCH=' "$tmp"; then
+  printf 'O3K_STORAGE_AGENT_EPOCH=%s\n' "$epoch" >>"$tmp"
+fi
 chmod --reference="$storage" "$tmp"
 chown --reference="$storage" "$tmp"
 sync -f "$tmp"
@@ -22,7 +24,9 @@ mv -f "$tmp" "$storage"
 tmp2=$(mktemp "$root/.epoch.XXXXXX")
 trap 'rm -f "$tmp" "$tmp2"' EXIT
 sed "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$epoch/" "$daemon" >"$tmp2"
-grep -q '^O3K_STORAGE_AGENT_EPOCH=' "$tmp2" || exit 1
+if ! grep -q '^O3K_STORAGE_AGENT_EPOCH=' "$tmp2"; then
+  printf 'O3K_STORAGE_AGENT_EPOCH=%s\n' "$epoch" >>"$tmp2"
+fi
 chmod --reference="$daemon" "$tmp2"
 chown --reference="$daemon" "$tmp2"
 sync -f "$tmp2"
