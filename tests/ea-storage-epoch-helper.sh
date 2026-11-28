@@ -24,6 +24,7 @@ cat > "$bin/systemctl" <<'EOF'
 echo restart >> "$O3K_HELPER_SYSTEMCTL_LOG"
 EOF
 chmod +x "$bin/mv" "$bin/systemctl"
+: > "$calls"
 O3K_HELPER_SYSTEMCTL_LOG="$root/systemctl.log" PATH="$bin:/usr/bin:/bin" O3K_EPOCH_HELPER_TEST=1 O3K_EPOCH_HELPER_ROOT="$root" bash packaging/o3k-sync-storage-epoch failed-epoch || true
 [ "$(cat "$root/storage/o3k-storage.env")" = 'O3K_STORAGE_AGENT_EPOCH=failed-epoch' ]
 [ "$(cat "$root/o3kd.env")" = 'O3K_STORAGE_AGENT_EPOCH=old' ]
