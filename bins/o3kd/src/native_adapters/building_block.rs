@@ -420,13 +420,15 @@ mod tests {
         AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentEpochLease,
         AgentEvent, AgentNodeRegistry, AgentNodeSnapshot,
     };
-    use o3k_store::{DurableStore, ResourceRecord};
+    use o3k_store::{BootstrapRepository, BootstrapStateRecord, DurableStore, ResourceRecord};
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
     use uuid::Uuid;
 
     struct FakeAgents {
         snapshots: HashMap<String, AgentNodeSnapshot>,
+        revoked: std::sync::Mutex<Vec<String>>,
+        fail_next_revoke: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -446,6 +448,19 @@ mod tests {
         }
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
             tokio::sync::broadcast::channel(1).1
+        }
+        async fn revoke_agent_identity(&self, agent_id: &str) -> Result<(), String> {
+            if self
+                .fail_next_revoke
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err("injected interruption during agent revocation".to_owned());
+            }
+            self.revoked
+                .lock()
+                .map_err(|_| "revocation test lock poisoned".to_owned())?
+                .push(agent_id.to_owned());
+            Ok(())
         }
     }
 
@@ -495,6 +510,7 @@ mod tests {
         Box<dyn std::error::Error>,
     > {
         let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        initialize_bootstrap_state(&store).await?;
         let placement = o3k_placement::PlacementLedger::open(
             std::env::temp_dir().join(format!("o3k-bb-drain-{}", Uuid::now_v7())),
             store.clone(),
@@ -519,6 +535,8 @@ mod tests {
             placement,
             agents: Arc::new(FakeAgents {
                 snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
+                revoked: std::sync::Mutex::new(Vec::new()),
+                fail_next_revoke: std::sync::atomic::AtomicBool::new(false),
             }),
             locations: o3k_kernel::LocationRegistry::default(),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -546,6 +564,25 @@ mod tests {
             )
             .await?;
         Ok((store, adapter))
+    }
+
+    async fn initialize_bootstrap_state(
+        store: &o3k_store::O3kStore,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .upsert_bootstrap_state(&BootstrapStateRecord {
+                state_id: "default".to_owned(),
+                generation: 1,
+                phase: "initialized".to_owned(),
+                cloud_identity_id: "cloud-default".to_owned(),
+                cloud_profile_id: "default".to_owned(),
+                enrolled_agents: "{}".to_owned(),
+                enrolled_agent_epochs: "{}".to_owned(),
+                revoked_agents: "{}".to_owned(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await?;
+        Ok(())
     }
 
     fn drain_workload_blockers(view: &o3k_native_api::building_block::BuildingBlockView) -> u64 {
@@ -757,6 +794,7 @@ mod tests {
     async fn removed_block_leaves_operator_list_but_stays_durable()
     -> Result<(), Box<dyn std::error::Error>> {
         let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        initialize_bootstrap_state(&store).await?;
         let placement = o3k_placement::PlacementLedger::open(
             std::env::temp_dir().join(format!("o3k-bb-list-{}", Uuid::now_v7())),
             store.clone(),
@@ -783,11 +821,14 @@ mod tests {
                 ("agent-a".to_owned(), snapshot("agent-a")),
                 ("agent-b".to_owned(), snapshot("agent-b")),
             ]),
+            revoked: std::sync::Mutex::new(Vec::new()),
+            fail_next_revoke: std::sync::atomic::AtomicBool::new(false),
         };
+        let agents = Arc::new(agents);
         let adapter = BuildingBlockAdapter {
             store: store.clone(),
             placement,
-            agents: Arc::new(agents),
+            agents: agents.clone(),
             locations: o3k_kernel::LocationRegistry::default(),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -832,6 +873,37 @@ mod tests {
             .await?
             .ok_or("block-a missing")?
             .block()?;
+        agents
+            .fail_next_revoke
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            adapter
+                .transition(
+                    "block-a",
+                    o3k_kernel::BuildingBlockState::Removed,
+                    draining.generation,
+                    vec![],
+                    &auth,
+                )
+                .await
+                .is_err()
+        );
+        let interrupted_revocation = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing after interrupted removal")?;
+        let interrupted_revoked: BTreeMap<String, bool> =
+            serde_json::from_str(&interrupted_revocation.revoked_agents)?;
+        assert_eq!(interrupted_revoked.get("agent-a"), Some(&true));
+        assert_eq!(
+            store
+                .get_building_block("block-a")
+                .await?
+                .ok_or("block-a missing after interrupted removal")?
+                .block()?
+                .state,
+            o3k_kernel::BuildingBlockState::Draining
+        );
         adapter
             .transition(
                 "block-a",
@@ -841,6 +913,19 @@ mod tests {
                 &auth,
             )
             .await?;
+
+        let bootstrap = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing after host removal")?;
+        let revoked: BTreeMap<String, bool> = serde_json::from_str(&bootstrap.revoked_agents)?;
+        assert_eq!(revoked.get("agent-a"), Some(&true));
+        let live_revocations = agents
+            .revoked
+            .lock()
+            .map_err(|_| "revocation test lock poisoned")?
+            .clone();
+        assert_eq!(live_revocations, vec!["agent-a"]);
 
         // The durable tombstone stays for audit...
         let tombstone = store
