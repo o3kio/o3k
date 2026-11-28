@@ -65,9 +65,16 @@ impl StorageVolumeIntent {
         })
     }
 
-    pub fn deterministic_id(&self, kind: &str) -> Uuid {
-        let mut bytes = Vec::with_capacity(kind.len() + self.idempotency_key.len() + 1);
+    pub fn deterministic_id(&self, kind: &str, action: StorageAction) -> Uuid {
+        let action = format!("{action:?}");
+        let mut bytes = Vec::with_capacity(kind.len() + action.len() + self.idempotency_key.len() + 32);
         bytes.extend_from_slice(kind.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(action.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(self.volume_id.to_string().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(self.generation.to_string().as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(self.idempotency_key.as_bytes());
         Uuid::new_v5(&Uuid::NAMESPACE_OID, &bytes)
@@ -83,8 +90,8 @@ impl StorageVolumeIntent {
             storage_payload_fingerprint(&payload).map_err(|_| StorageVolumeIntentError::Invalid)?;
         Ok(StorageCommandEnvelope {
             protocol_version: 1,
-            command_id: self.deterministic_id("command"),
-            operation_id: self.deterministic_id("operation"),
+            command_id: self.deterministic_id("command", action),
+            operation_id: self.deterministic_id("operation", action),
             idempotency_key: self.idempotency_key.clone(),
             resource_id: self.volume_id.to_string(),
             resource_generation: self.generation,
