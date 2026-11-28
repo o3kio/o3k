@@ -138,4 +138,22 @@ mod tests {
         assert_eq!(a.resource_id, intent().volume_id.to_string());
         Ok(())
     }
+
+    #[test]
+    fn create_and_delete_with_same_key_have_distinct_command_identity() {
+        let create = intent()
+            .envelope(StorageAction::CreateVolume)
+            .expect("create");
+        let delete = intent()
+            .envelope(StorageAction::DeleteVolume)
+            .expect("delete");
+        assert_ne!(create.command_id, delete.command_id);
+        assert_ne!(create.operation_id, delete.operation_id);
+        // The payload is intentionally the same resource description; the
+        // action-bound command identity is what prevents cross-action replay.
+        assert_eq!(
+            create.canonical_payload_fingerprint,
+            delete.canonical_payload_fingerprint
+        );
+    }
 }
