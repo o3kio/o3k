@@ -473,12 +473,6 @@ where
                 Ok(())
             }
             Err(e) if e.is_unknown_outcome() => {
-                if action == StorageAction::DeleteVolume {
-                    let _ = self
-                        .provider
-                        .inspect_volume_with_context(&request, &context)
-                        .await;
-                }
                 self.store
                     .update_agent_command(
                         &command_id,

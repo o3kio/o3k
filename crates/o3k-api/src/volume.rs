@@ -875,54 +875,6 @@ pub async fn recover_native_volumes(state: &AppState) {
                     // is not authorization to allocate a new object outside
                     // the durable operation workflow.
                     tracing::warn!(volume_id = %record.volume.id, "native volume recovery found no owned provider object; awaiting durable workflow replay");
-                    /*
-                        Ok(observation)
-                            if available_volume_observation_matches(&record, &observation) =>
-                        {
-                            if !observe_recovered_volume(state, &record, true).await {
-                                continue;
-                            }
-                            let mut available = record.clone();
-                            available.volume.state = VolumeState::Available;
-                            available.volume.generation =
-                                match record.volume.generation.checked_add(1) {
-                                    Some(generation) => generation,
-                                    None => continue,
-                                };
-                            available.volume.provider_reference =
-                                Some(o3k_domain::StorageProviderReference {
-                                    provider: observation.provider_reference.provider,
-                                    resource_id: observation.provider_reference.resource_id,
-                                });
-                            let _ = store
-                                .update_volume(record.volume.generation, &available)
-                                .await;
-                        }
-                        Ok(_) => {
-                            tracing::warn!(volume_id = %record.volume.id, "native volume recovery rejected mismatched provider create observation");
-                        }
-                        Err(error) if error.is_unknown_outcome() => {
-                            if record.volume.state != VolumeState::Requested {
-                                let mut unknown = record.clone();
-                                unknown.volume.state = VolumeState::Unknown;
-                                unknown.volume.generation =
-                                    unknown.volume.generation.saturating_add(1);
-                                let _ = store
-                                    .update_volume(record.volume.generation, &unknown)
-                                    .await;
-                            }
-                        }
-                        Err(_) => {
-                            if record.volume.state != VolumeState::Requested {
-                                let mut failed = record.clone();
-                                failed.volume.state = VolumeState::Error;
-                                failed.volume.generation =
-                                    failed.volume.generation.saturating_add(1);
-                                let _ =
-                                    store.update_volume(record.volume.generation, &failed).await;
-                            }
-                        }
-                    */
                 }
                 Err(error) if error.is_unknown_outcome() => {
                     if record.volume.state != VolumeState::Requested {
@@ -948,38 +900,14 @@ pub async fn recover_native_volumes(state: &AppState) {
                     }
                 }
                 Ok(observation) if volume_observation_matches(&record, &observation) => {
-                    match provider.delete_volume(&request).await {
-                        Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
-                            if matches!(
-                                provider.inspect_volume(&request).await,
-                                Err(o3k_storage::StorageProviderError::NotFound)
-                            ) {
-                                if !observe_recovered_volume(state, &record, false).await {
-                                    continue;
-                                }
-                                if finalize_recovered_native_delete(store, &record).await {
-                                    let _ = store
-                                        .delete_volume(
-                                            &record.volume.project_id,
-                                            record.volume.id.as_uuid(),
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        Err(error) if error.is_unknown_outcome() => {
-                            let mut unknown = record.clone();
-                            unknown.volume.state = VolumeState::Unknown;
-                            unknown.volume.generation = unknown.volume.generation.saturating_add(1);
-                            if let Err(update_error) = store
-                                .update_volume(record.volume.generation, &unknown)
-                                .await
-                            {
-                                tracing::warn!(%update_error, volume_id = %record.volume.id, "failed to persist unknown delete outcome");
-                            }
-                        }
-                        Err(_) => {}
-                    }
+                    // Startup recovery is observation-only. The durable
+                    // NativeVolumeWorkflow owns the subsequent delete and
+                    // its observe-before-retry/fencing semantics.
+                    tracing::info!(
+                        volume_id = %record.volume.id,
+                        provider_reference = %observation.provider_reference.resource_id,
+                        "native volume deletion remains pending durable workflow replay"
+                    );
                 }
                 Ok(_) => {
                     tracing::warn!(volume_id = %record.volume.id, "native volume deletion rejected mismatched provider observation");

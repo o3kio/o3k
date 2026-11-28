@@ -1902,6 +1902,7 @@ pub async fn build_composition_with_guard(
             }),
             store: native_api_store.clone(),
             storage_provider: native_storage_provider.clone(),
+            volume_workflow: native_volume_workflow.clone(),
             server: server_reader
                 .clone()
                 .ok_or("generic native application requires compute reader")?,

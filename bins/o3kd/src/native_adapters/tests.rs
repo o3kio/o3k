@@ -501,6 +501,7 @@ mod native_compute_tests {
             network_external_realm_id: None,
             attachment_workflow: None,
             storage_provider: Some(Arc::new(FakeStorageProvider::default())),
+            volume_workflow: None,
             metering: None,
         };
 
