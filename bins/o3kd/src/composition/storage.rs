@@ -1102,7 +1102,11 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             .create(intent)
             .await
             .map_err(|e| e.to_string())?;
-        let record = self.store.get_volume(volume_id).await.map_err(|e| e.to_string())?
+        let record = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| "native volume disappeared after create".to_owned())?;
         o3k_api::observe_volume_open_if_consuming(self.metering.as_ref(), &record).await
     }
@@ -1136,7 +1140,14 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             .delete(intent)
             .await
             .map_err(|e| e.to_string())?;
-        o3k_api::observe_volume_allocation(self.metering.as_ref(), project_id, &volume_id.to_string(), record.volume.size_bytes, false).await
+        o3k_api::observe_volume_allocation(
+            self.metering.as_ref(),
+            project_id,
+            &volume_id.to_string(),
+            record.volume.size_bytes,
+            false,
+        )
+        .await
     }
 
     async fn recover(&self) -> Result<(), String> {

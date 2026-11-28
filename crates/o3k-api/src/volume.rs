@@ -571,9 +571,16 @@ pub(crate) async fn create(
     }
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let Some(workflow) = state.native_volume_workflow.as_ref() else { return unavailable(); };
-            if workflow.create(record.volume.id.as_uuid()).await.is_err() { return unavailable(); }
-            let record = match store.get_volume(record.volume.id.as_uuid()).await { Ok(Some(record)) => record, _ => return unavailable() };
+            let Some(workflow) = state.native_volume_workflow.as_ref() else {
+                return unavailable();
+            };
+            if workflow.create(record.volume.id.as_uuid()).await.is_err() {
+                return unavailable();
+            }
+            let record = match store.get_volume(record.volume.id.as_uuid()).await {
+                Ok(Some(record)) => record,
+                _ => return unavailable(),
+            };
             (
                 StatusCode::ACCEPTED,
                 Json(VolumeResponse {
@@ -703,7 +710,9 @@ pub(crate) async fn delete(
     if state.storage_provider.is_none() {
         return unavailable();
     };
-    let Some(workflow) = state.native_volume_workflow.as_ref() else { return unavailable(); };
+    let Some(workflow) = state.native_volume_workflow.as_ref() else {
+        return unavailable();
+    };
     let deletion = workflow.delete(&project_id, id).await;
     match deletion {
         Ok(()) => match store.delete_volume(&project_id, id).await {
