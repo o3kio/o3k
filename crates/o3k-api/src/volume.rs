@@ -871,7 +871,11 @@ pub async fn recover_native_volumes(state: &AppState) {
                         VolumeState::Requested | VolumeState::Creating | VolumeState::Unknown
                     ) =>
                 {
-                    match provider.create_volume(&request).await {
+                    // Recovery is observation-only. A missing provider object
+                    // is not authorization to allocate a new object outside
+                    // the durable operation workflow.
+                    tracing::warn!(volume_id = %record.volume.id, "native volume recovery found no owned provider object; awaiting durable workflow replay");
+                    /*
                         Ok(observation)
                             if available_volume_observation_matches(&record, &observation) =>
                         {
@@ -918,7 +922,7 @@ pub async fn recover_native_volumes(state: &AppState) {
                                     store.update_volume(record.volume.generation, &failed).await;
                             }
                         }
-                    }
+                    */
                 }
                 Err(error) if error.is_unknown_outcome() => {
                     if record.volume.state != VolumeState::Requested {
@@ -961,6 +965,17 @@ pub async fn recover_native_volumes(state: &AppState) {
                                         )
                                         .await;
                                 }
+                            }
+                        }
+                        Err(error) if error.is_unknown_outcome() => {
+                            let mut unknown = record.clone();
+                            unknown.volume.state = VolumeState::Unknown;
+                            unknown.volume.generation = unknown.volume.generation.saturating_add(1);
+                            if let Err(update_error) = store
+                                .update_volume(record.volume.generation, &unknown)
+                                .await
+                            {
+                                tracing::warn!(%update_error, volume_id = %record.volume.id, "failed to persist unknown delete outcome");
                             }
                         }
                         Err(_) => {}
