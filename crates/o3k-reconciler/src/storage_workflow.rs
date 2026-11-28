@@ -11,8 +11,9 @@ use async_trait::async_trait;
 use o3k_domain::{
     AttachmentAccessMode, StorageAction, StorageAttachmentCommandPayload, StorageCommandEnvelope,
     StorageCommandPayload, StorageCommandRecord, VolumeAttachment, VolumeAttachmentId,
-    VolumeAttachmentState, VolumeId, VolumeState, storage_payload_fingerprint,
+    VolumeAttachmentState, VolumeId, VolumeState,
 };
+use o3k_storage::storage_payload_fingerprint;
 use o3k_storage::{
     PreparedAttachment, StorageAttachmentRequest, StorageProvider, StorageProviderError,
 };
@@ -1065,6 +1066,9 @@ fn deterministic_storage_id(kind: &str, idempotency_key: &str) -> Uuid {
 }
 
 fn decode_command_envelope(bytes: &[u8]) -> Result<StorageCommandEnvelope, StorageWorkflowError> {
+    if let Ok(envelope) = serde_json::from_slice::<StorageCommandEnvelope>(bytes) {
+        return Ok(envelope);
+    }
     if let Ok(record) = serde_json::from_slice::<StorageCommandRecord>(bytes) {
         return Ok(record.envelope);
     }
@@ -1475,7 +1479,7 @@ mod tests {
         assert_eq!(result.attachment_state, VolumeAttachmentState::Attached);
         assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 2);
         let recovered = store.get_agent_command(&command.command_id).await.unwrap();
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&recovered.payload).unwrap();
+        let envelope = decode_command_envelope(&recovered.payload).unwrap();
         assert_eq!(envelope.controller_epoch, 7);
     }
 }

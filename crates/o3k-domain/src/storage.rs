@@ -22,7 +22,10 @@ where
         Epoch::Number(value) => value.to_string(),
     })
 }
-use sha2::{Digest, Sha256};
+
+fn default_protocol_version() -> u16 {
+    1
+}
 use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
@@ -106,6 +109,7 @@ pub enum StorageAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageCommandEnvelope {
+    #[serde(default = "default_protocol_version")]
     pub protocol_version: u16,
     pub command_id: Uuid,
     pub operation_id: Uuid,
@@ -199,13 +203,6 @@ impl StorageCommandEnvelope {
 /// envelope.  Callers must pass the typed payload's serde representation;
 /// keeping this helper in the domain crate prevents controller and executor
 /// implementations from silently choosing different digest encodings.
-pub fn storage_payload_fingerprint<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
-    let bytes = serde_json::to_vec(payload)?;
-    Ok(Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageOperationState {

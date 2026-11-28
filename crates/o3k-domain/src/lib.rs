@@ -22,7 +22,7 @@ pub use storage::{
     StorageCommandRecord, StorageErrorCategory, StorageExecutionScope, StorageObservation,
     StorageOperationState, StorageTransitionError, StorageValidationError,
     StorageVolumeCommandPayload, Volume, VolumeAttachment, VolumeAttachmentId,
-    VolumeAttachmentState, VolumeId, VolumeState, storage_payload_fingerprint,
+    VolumeAttachmentState, VolumeId, VolumeState,
 };
 
 use serde::{Deserialize, Serialize};

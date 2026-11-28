@@ -22,6 +22,14 @@ use std::{
 use thiserror::Error;
 use tokio::process::Command;
 
+pub fn storage_payload_fingerprint<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(payload)?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
 /// Durable local acceptance journal used by the storage executor boundary.
 /// The controller remains authoritative; this journal only fences replay and
 /// records executor outcomes before a process restart can lose them.
