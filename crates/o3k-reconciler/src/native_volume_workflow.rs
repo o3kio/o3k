@@ -11,8 +11,8 @@ use o3k_storage::{
     StorageExecutionContext, StorageProvider, StorageProviderError, StorageVolumeRequest,
 };
 use o3k_store::{
-    AgentCommandRecord, AgentCommandState, DurableStore, OperationRecord, OperationState,
-    StorageRepository, StoreError, VolumeRecord,
+    AgentCommandRecord, AgentCommandState, BootstrapRepository, DurableStore, OperationRecord,
+    OperationState, StorageRepository, StoreError, VolumeRecord,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -74,7 +74,7 @@ fn provider_reference_matches(
 
 impl<S, P, F> NativeVolumeWorkflow<S, P, F>
 where
-    S: DurableStore + StorageRepository + Send + Sync + 'static,
+    S: DurableStore + StorageRepository + BootstrapRepository + Send + Sync + 'static,
     P: StorageProvider + ?Sized + 'static,
     F: StorageControllerFence + 'static,
 {
@@ -118,6 +118,11 @@ where
             let context = StorageExecutionContext {
                 envelope: record.envelope.clone(),
             };
+            self.assert_agent_epoch(
+                &record.envelope.target_agent_id,
+                &record.envelope.target_agent_epoch,
+            )
+            .await?;
             let observed = match self
                 .provider
                 .inspect_volume_with_context(&request, &context)
@@ -244,6 +249,31 @@ where
         Ok(())
     }
 
+    async fn assert_agent_epoch(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Result<(), NativeVolumeWorkflowError> {
+        let state = self
+            .store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or(NativeVolumeWorkflowError::StaleFence)?;
+        let revoked: std::collections::BTreeMap<String, bool> =
+            serde_json::from_str(&state.revoked_agents)
+                .map_err(|_| NativeVolumeWorkflowError::StaleFence)?;
+        if revoked.get(agent_id).copied().unwrap_or(false) {
+            return Err(NativeVolumeWorkflowError::StaleFence);
+        }
+        let epochs: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&state.enrolled_agent_epochs)
+                .map_err(|_| NativeVolumeWorkflowError::StaleFence)?;
+        if epochs.get(agent_id).map(String::as_str) != Some(agent_epoch) {
+            return Err(NativeVolumeWorkflowError::StaleFence);
+        }
+        Ok(())
+    }
+
     async fn execute(
         &self,
         intent: StorageVolumeIntent,
@@ -252,6 +282,11 @@ where
         intent
             .validate()
             .map_err(|_| NativeVolumeWorkflowError::Invalid)?;
+        self.assert_agent_epoch(
+            &intent.target_agent_id,
+            &intent.target_agent_epoch.to_string(),
+        )
+        .await?;
         self.fence
             .assert_current(intent.controller_epoch)
             .await
