@@ -1700,8 +1700,15 @@ pub async fn build_composition_with_guard(
         if std::env::var_os("O3K_STORAGE_ENDPOINT").is_some() {
             Some(Arc::new(
                 crate::composition::storage::RemoteStorageProvider::from_env(
-                    "local".to_owned(),
-                    storage_intent_epoch(&controller_epoch),
+                    std::env::var("O3K_STORAGE_AGENT_ID").map_err(|_| {
+                        "O3K_STORAGE_AGENT_ID is required for storage executor".to_owned()
+                    })?,
+                    std::env::var("O3K_STORAGE_AGENT_EPOCH")
+                        .map_err(|_| {
+                            "O3K_STORAGE_AGENT_EPOCH is required for storage executor".to_owned()
+                        })?
+                        .parse()
+                        .map_err(|_| "O3K_STORAGE_AGENT_EPOCH must be numeric".to_owned())?,
                 )?,
             ) as Arc<dyn o3k_storage::StorageProvider>)
         } else {

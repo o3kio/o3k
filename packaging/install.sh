@@ -956,7 +956,9 @@ if [[ "$PROFILE" == libvirt ]]; then
       "O3K_STORAGE_TLS_CA=$TLS_DIR/ca.pem" \
       "O3K_STORAGE_TLS_CERT=$TLS_DIR/agent.pem" \
       "O3K_STORAGE_TLS_KEY=$TLS_DIR/agent-key.pem" \
-      "O3K_STORAGE_SERVER_NAME=o3k-control-plane"; do
+      "O3K_STORAGE_SERVER_NAME=o3k-control-plane" \
+      "O3K_STORAGE_AGENT_ID=$storage_agent_id" \
+      "O3K_STORAGE_AGENT_EPOCH=1"; do
       o3k_upsert_env_setting "$ENV_FILE" "$setting"
     done
   fi
