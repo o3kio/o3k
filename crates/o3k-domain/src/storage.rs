@@ -6,6 +6,22 @@
 //! observations, never to these resources.
 
 use serde::{Deserialize, Serialize};
+
+fn deserialize_epoch<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Epoch {
+        Text(String),
+        Number(u64),
+    }
+    Ok(match Epoch::deserialize(deserializer)? {
+        Epoch::Text(value) => value,
+        Epoch::Number(value) => value.to_string(),
+    })
+}
 use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
@@ -101,7 +117,8 @@ pub struct StorageCommandEnvelope {
     /// controller that no longer owns the durable work lease.
     pub controller_epoch: u64,
     pub target_agent_id: String,
-    pub target_agent_epoch: u64,
+    #[serde(deserialize_with = "deserialize_epoch")]
+    pub target_agent_epoch: String,
     pub deadline: String,
     pub trace_id: String,
     pub action: StorageAction,
@@ -153,7 +170,7 @@ impl StorageCommandEnvelope {
             || self.project_id.is_empty()
             || self.controller_epoch == 0
             || self.target_agent_id.is_empty()
-            || self.target_agent_epoch == 0
+            || self.target_agent_epoch.trim().is_empty()
             || self.deadline.is_empty()
             || self.trace_id.is_empty()
             || self.canonical_payload_fingerprint.is_empty()
@@ -202,7 +219,8 @@ pub enum StorageOperationState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageObservation {
     pub agent_id: String,
-    pub agent_epoch: u64,
+    #[serde(deserialize_with = "deserialize_epoch")]
+    pub agent_epoch: String,
     pub resource_id: String,
     pub provider_resource_id: Option<String>,
     pub operation_id: Uuid,
@@ -221,7 +239,7 @@ impl StorageObservation {
     pub fn validate(&self) -> Result<(), StorageValidationError> {
         if self.agent_id.is_empty()
             || self.agent_id.len() > 128
-            || self.agent_epoch == 0
+            || self.agent_epoch.trim().is_empty()
             || self.resource_id.is_empty()
             || self.resource_id.len() > 256
             || self.resource_generation == 0
@@ -805,7 +823,7 @@ mod tests {
             project_id: "project-a".to_owned(),
             controller_epoch: 1,
             target_agent_id: "storage-a".to_owned(),
-            target_agent_epoch: 1,
+            target_agent_epoch: "epoch-1".into(),
             deadline: "2026-08-19T00:00:00Z".to_owned(),
             trace_id: "trace-1".to_owned(),
             action: StorageAction::InspectVolume,
@@ -815,7 +833,7 @@ mod tests {
 
         let observation = StorageObservation {
             agent_id: "storage-a".to_owned(),
-            agent_epoch: 1,
+            agent_epoch: "epoch-1".into(),
             resource_id: "volume-1".to_owned(),
             provider_resource_id: None,
             operation_id: Uuid::from_u128(9),

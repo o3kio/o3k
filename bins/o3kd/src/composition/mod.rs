@@ -1703,12 +1703,9 @@ pub async fn build_composition_with_guard(
                     std::env::var("O3K_STORAGE_AGENT_ID").map_err(|_| {
                         "O3K_STORAGE_AGENT_ID is required for storage executor".to_owned()
                     })?,
-                    std::env::var("O3K_STORAGE_AGENT_EPOCH")
-                        .map_err(|_| {
-                            "O3K_STORAGE_AGENT_EPOCH is required for storage executor".to_owned()
-                        })?
-                        .parse()
-                        .map_err(|_| "O3K_STORAGE_AGENT_EPOCH must be numeric".to_owned())?,
+                    std::env::var("O3K_STORAGE_AGENT_EPOCH").map_err(|_| {
+                        "O3K_STORAGE_AGENT_EPOCH is required for storage executor".to_owned()
+                    })?,
                 )?,
             ) as Arc<dyn o3k_storage::StorageProvider>)
         } else {

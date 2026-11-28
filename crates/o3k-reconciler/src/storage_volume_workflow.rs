@@ -90,7 +90,7 @@ impl StorageVolumeIntent {
             project_id: self.project_id.clone(),
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
-            target_agent_epoch: self.target_agent_epoch,
+            target_agent_epoch: self.target_agent_epoch.to_string(),
             deadline: self.deadline.clone(),
             trace_id: self.trace_id.clone(),
             action,

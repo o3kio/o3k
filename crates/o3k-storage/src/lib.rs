@@ -78,7 +78,7 @@ impl StorageJournal {
         &self,
         envelope: StorageCommandEnvelope,
         agent_id: &str,
-        agent_epoch: u64,
+        agent_epoch: &str,
     ) -> Result<StorageObservation, StorageJournalError> {
         let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
         self.reload_locked()?;
@@ -111,7 +111,7 @@ impl StorageJournal {
         }
         let observation = StorageObservation {
             agent_id: agent_id.to_owned(),
-            agent_epoch,
+            agent_epoch: agent_epoch.to_owned(),
             resource_id: envelope.resource_id.clone(),
             provider_resource_id: None,
             operation_id: envelope.operation_id,
@@ -404,7 +404,7 @@ mod journal_tests {
             project_id: "project-1".to_owned(),
             controller_epoch: 1,
             target_agent_id: "storage-a".to_owned(),
-            target_agent_epoch: 7,
+            target_agent_epoch: "7".into(),
             deadline: "2099-01-01T00:00:00Z".to_owned(),
             trace_id: "trace-1".to_owned(),
             action: o3k_domain::StorageAction::CreateVolume,
@@ -426,16 +426,16 @@ mod journal_tests {
         let command = envelope("op-1", &"a".repeat(64));
         let accepted = StorageJournal::open(&journal_path)
             .expect("journal opens")
-            .accept(command.clone(), "storage-a", 7)
+            .accept(command.clone(), "storage-a", "7")
             .expect("command accepted");
         let journal = StorageJournal::open(&journal_path).expect("journal reloads");
         assert_eq!(journal.get("op-1").expect("lookup"), Some(accepted.clone()));
         assert_eq!(
-            journal.accept(command, "storage-a", 7).expect("replay"),
+            journal.accept(command, "storage-a", "7").expect("replay"),
             accepted
         );
         assert!(matches!(
-            journal.accept(envelope("op-1", &"b".repeat(64)), "storage-a", 7),
+            journal.accept(envelope("op-1", &"b".repeat(64)), "storage-a", "7"),
             Err(StorageJournalError::Conflict)
         ));
         let _ = std::fs::remove_file(journal_path);
@@ -446,7 +446,7 @@ mod journal_tests {
         let journal_path = path();
         let result = StorageJournal::open(&journal_path)
             .expect("journal opens")
-            .accept(envelope("op-2", &"c".repeat(64)), "storage-a", 8);
+            .accept(envelope("op-2", &"c".repeat(64)), "storage-a", "8");
         assert!(matches!(result, Err(StorageJournalError::Stale)));
         let _ = std::fs::remove_file(journal_path);
     }
@@ -456,7 +456,7 @@ mod journal_tests {
         let journal_path = path();
         let command = envelope("op-3", &"d".repeat(64));
         let journal = StorageJournal::open(&journal_path).expect("journal opens");
-        let accepted = journal.accept(command, "storage-a", 7).expect("accepted");
+        let accepted = journal.accept(command, "storage-a", "7").expect("accepted");
         let mut terminal = accepted.clone();
         terminal.observation_sequence = 2;
         terminal.operation_state = StorageOperationState::Succeeded;
@@ -480,10 +480,10 @@ mod journal_tests {
         let first = StorageJournal::open(&journal_path).expect("journal");
         let second = StorageJournal::open(&journal_path).expect("journal");
         first
-            .accept(envelope("op-a", &"e".repeat(64)), "storage-a", 7)
+            .accept(envelope("op-a", &"e".repeat(64)), "storage-a", "7")
             .expect("first");
         second
-            .accept(envelope("op-b", &"f".repeat(64)), "storage-a", 7)
+            .accept(envelope("op-b", &"f".repeat(64)), "storage-a", "7")
             .expect("second");
         let reloaded = StorageJournal::open(&journal_path).expect("reload");
         assert!(reloaded.get("op-a").expect("lookup").is_some());
@@ -499,7 +499,7 @@ mod journal_tests {
             envelope: command.clone(),
             observation: StorageObservation {
                 agent_id: "storage-a".to_owned(),
-                agent_epoch: 7,
+                agent_epoch: "7".into(),
                 resource_id: command.resource_id.clone(),
                 provider_resource_id: None,
                 operation_id: command.operation_id,
@@ -527,7 +527,7 @@ mod journal_tests {
                 .is_some()
         );
         journal
-            .accept(envelope("new-op", &"b".repeat(64)), "storage-a", 7)
+            .accept(envelope("new-op", &"b".repeat(64)), "storage-a", "7")
             .expect("mutation succeeds after migration");
         let migrated: JournalSnapshot =
             serde_json::from_slice(&std::fs::read(&journal_path).expect("read migrated"))
@@ -543,7 +543,11 @@ mod journal_tests {
         let first = StorageJournal::open(&journal_path).expect("first journal");
         let second = StorageJournal::open(&journal_path).expect("second journal");
         first
-            .accept(envelope("cross-instance", &"c".repeat(64)), "storage-a", 7)
+            .accept(
+                envelope("cross-instance", &"c".repeat(64)),
+                "storage-a",
+                "7",
+            )
             .expect("accept command");
         assert!(second.get("cross-instance").expect("fresh read").is_some());
         let _ = std::fs::remove_file(&journal_path);

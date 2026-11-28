@@ -18,7 +18,7 @@ use tonic::{Request, Response, Status};
 struct Executor {
     journal: Arc<StorageJournal>,
     agent_id: String,
-    agent_epoch: u64,
+    agent_epoch: String,
     provider: Arc<LvmStorageProvider>,
     controller_identity: String,
 }
@@ -124,7 +124,7 @@ impl StorageExecutor for Executor {
         }
         let observation = self
             .journal
-            .accept(envelope.clone(), &self.agent_id, self.agent_epoch)
+            .accept(envelope.clone(), &self.agent_id, &self.agent_epoch)
             .map_err(|_| Status::failed_precondition("storage command fenced or conflicting"))?;
         let mut provider_resource_id = None;
         let mut device_path = None;
@@ -252,7 +252,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executor = Executor {
         journal: Arc::new(StorageJournal::open(journal)?),
         agent_id: env::var("O3K_STORAGE_AGENT_ID")?,
-        agent_epoch: env::var("O3K_STORAGE_AGENT_EPOCH")?.parse()?,
+        agent_epoch: env::var("O3K_STORAGE_AGENT_EPOCH")
+            .ok()
+            .filter(|epoch| !epoch.trim().is_empty())
+            .ok_or("O3K_STORAGE_AGENT_EPOCH is required")?,
         provider: Arc::new(LvmStorageProvider::new(LvmConfig {
             volume_group: env::var("O3K_STORAGE_VOLUME_GROUP")?,
             thin_pool: env::var("O3K_STORAGE_THIN_POOL")?,
