@@ -29,8 +29,6 @@ pub enum NativeVolumeWorkflowError {
     IdempotencyConflict,
     #[error("provider error")]
     Provider(#[from] StorageProviderError),
-    #[error("native volume recovery required")]
-    RecoveryRequired,
 }
 
 pub struct NativeVolumeWorkflow<S, P: ?Sized, F> {
@@ -67,16 +65,59 @@ where
         self.execute(intent, StorageAction::DeleteVolume).await
     }
 
-    pub async fn recover(&self) -> Result<(), NativeVolumeWorkflowError> {
-        if !self
-            .store
-            .list_recoverable_agent_commands()
-            .await?
-            .is_empty()
-        {
-            return Err(NativeVolumeWorkflowError::RecoveryRequired);
+    /// Reconcile accepted/unknown volume commands after controller restart.
+    /// Recovery is observation-only: it never replays a mutation blindly.
+    pub async fn recover(&self) -> Result<usize, NativeVolumeWorkflowError> {
+        let commands = self.store.list_recoverable_agent_commands().await?;
+        let mut recovered = 0;
+        for command in commands {
+            let Ok(record) = serde_json::from_slice::<StorageCommandRecord>(&command.payload)
+            else {
+                continue;
+            };
+            let StorageCommandPayload::Volume(payload) = record.payload else {
+                continue;
+            };
+            let request = StorageVolumeRequest {
+                volume_id: payload.volume_id,
+                project_id: payload.project_id.clone(),
+                size_bytes: payload.size_bytes,
+                generation: payload.generation,
+            };
+            let context = StorageExecutionContext {
+                envelope: record.envelope.clone(),
+            };
+            let Ok(observed) = self
+                .provider
+                .inspect_volume_with_context(&request, &context)
+                .await
+            else {
+                continue;
+            };
+            if observed.owned && observed.available && observed.size_bytes == payload.size_bytes {
+                self.store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Succeeded,
+                        command.accepted_sequence.saturating_add(1),
+                        command.last_sequence.saturating_add(1),
+                        None,
+                        None,
+                    )
+                    .await?;
+                self.store
+                    .update_operation(
+                        command.operation_id,
+                        OperationState::Succeeded,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                recovered += 1;
+            }
         }
-        Ok(())
+        Ok(recovered)
     }
 
     async fn execute(
@@ -131,7 +172,8 @@ where
         })
         .map_err(|_| NativeVolumeWorkflowError::Invalid)?;
         let command_id = envelope.command_id.to_string();
-        self.store
+        match self
+            .store
             .insert_agent_command(&AgentCommandRecord {
                 command_id: command_id.clone(),
                 idempotency_key: intent.idempotency_key.clone(),
@@ -147,7 +189,29 @@ where
                 provider_operation_id: None,
                 provider_resource_id: None,
             })
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(StoreError::IdempotencyConflict | StoreError::ResourceAlreadyExists) => {
+                let existing = self
+                    .store
+                    .get_agent_command_by_idempotency_key(&intent.idempotency_key)
+                    .await?;
+                if existing.command_id != command_id
+                    || existing.payload_fingerprint_sha256
+                        != intent
+                            .envelope(action)
+                            .map_err(|_| NativeVolumeWorkflowError::Invalid)?
+                            .canonical_payload_fingerprint
+                {
+                    return Err(NativeVolumeWorkflowError::IdempotencyConflict);
+                }
+                if matches!(existing.state, AgentCommandState::Succeeded) {
+                    return Ok(());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
         let request = StorageVolumeRequest {
             volume_id: intent.volume_id,
             project_id: intent.project_id,
@@ -265,9 +329,67 @@ where
                         OperationState::UnknownOutcome,
                         None,
                         Some("unknown_outcome"),
-                        Some("observe before retry"),
+                        Some("observing provider state"),
                     )
                     .await?;
+                // An accepted create may have committed before transport loss. Observe
+                // ownership before allowing any later retry; never issue a second create.
+                if matches!(action, StorageAction::CreateVolume) {
+                    if let Ok(observed) = self
+                        .provider
+                        .inspect_volume_with_context(&request, &context)
+                        .await
+                    {
+                        if observed.owned
+                            && observed.available
+                            && observed.size_bytes == intent.size_bytes
+                        {
+                            if let Some(current) =
+                                self.store.get_volume(intent.volume_id.as_uuid()).await?
+                            {
+                                let mut next = current.volume.clone();
+                                next.state = VolumeState::Available;
+                                next.operation_id = Some(operation_id);
+                                next.provider_reference = Some(observed.provider_reference);
+                                next.generation = current.volume.generation.saturating_add(1);
+                                let next = current
+                                    .volume
+                                    .clone()
+                                    .transition(next)
+                                    .map_err(|_| NativeVolumeWorkflowError::Invalid)?;
+                                self.store
+                                    .update_volume(
+                                        current.volume.generation,
+                                        &VolumeRecord {
+                                            volume: next,
+                                            created_at: current.created_at.clone(),
+                                        },
+                                    )
+                                    .await?;
+                                self.store
+                                    .update_agent_command(
+                                        &command_id,
+                                        AgentCommandState::Succeeded,
+                                        2,
+                                        2,
+                                        None,
+                                        None,
+                                    )
+                                    .await?;
+                                self.store
+                                    .update_operation(
+                                        operation_id,
+                                        OperationState::Succeeded,
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 Err(e.into())
             }
             Err(e) => {
