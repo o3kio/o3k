@@ -956,6 +956,24 @@ if [ "$join_ok" -ne 1 ]; then
     "$(tail -1 "$TMP_DIR/o3k-join.err" 2>/dev/null || echo 'no response')" >&2
   exit 1
 fi
+
+# Bind the privileged storage executor to the same canonical enrolled epoch.
+# The installer initially uses a bootstrap epoch only so the executor can be
+# started before canonical join; after join, replace it before any compute
+# workload is admitted.  Both services are restarted so neither side can
+# retain the bootstrap epoch in memory.
+update_storage_epoch() {
+  epoch="$1"
+  storage_env=/etc/o3k/storage/o3k-storage.env
+  daemon_env=/etc/o3k/o3kd.env
+  [ -f "$storage_env" ] || die 'storage executor environment is missing after enrollment'
+  [ -f "$daemon_env" ] || die 'controller environment is missing after enrollment'
+  sed -i "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$epoch/" "$storage_env"
+  sed -i "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$epoch/" "$daemon_env"
+  systemctl restart o3k-storage.service || die 'storage executor failed to restart with enrolled epoch'
+  systemctl restart o3kd.service || die 'controller failed to restart with enrolled epoch'
+}
+update_storage_epoch "$AGENT_EPOCH"
 # The enrollment epoch is the canonical host fence.  Replace the bootstrap
 # placeholder in both storage and controller environments only after the
 # authenticated join succeeds; this keeps a failed/replayed join fail-closed.
