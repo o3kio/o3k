@@ -9,7 +9,7 @@ if [ "${O3K_EPOCH_HELPER_TEST:-0}" = 1 ]; then root=${O3K_EPOCH_HELPER_ROOT:?}; 
 storage=$root/storage/o3k-storage.env
 daemon=$root/o3kd.env
 [ -f "$storage" ] && [ -f "$daemon" ] || exit 0
-tmpdir=/etc/o3k/storage
+tmpdir=$root/storage
 tmp=$(mktemp "$tmpdir/.epoch.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 sed "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$epoch/" "$storage" >"$tmp"
