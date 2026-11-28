@@ -337,8 +337,7 @@ where
         })
         .map_err(|_| NativeVolumeWorkflowError::Invalid)?;
         let command_id = envelope.command_id.to_string();
-        self.store
-            .insert_agent_command(&AgentCommandRecord {
+        let command_record = AgentCommandRecord {
                 command_id: command_id.clone(),
                 idempotency_key: intent.idempotency_key.clone(),
                 operation_id,
@@ -352,8 +351,18 @@ where
                 last_sequence: 0,
                 provider_operation_id: None,
                 provider_resource_id: None,
-            })
-            .await?;
+            };
+        match self.store.insert_agent_command(&command_record).await {
+            Ok(_) => {}
+            Err(StoreError::IdempotencyConflict | StoreError::ResourceAlreadyExists) => {
+                let existing = self.store.get_agent_command_by_idempotency_key(&intent.idempotency_key).await?;
+                if existing.command_id != command_id || existing.payload_fingerprint_sha256 != command_record.payload_fingerprint_sha256 {
+                    return Err(NativeVolumeWorkflowError::IdempotencyConflict);
+                }
+                if matches!(existing.state, AgentCommandState::Succeeded) { return Ok(()); }
+            }
+            Err(error) => return Err(error.into()),
+        }
         let request = StorageVolumeRequest {
             volume_id: intent.volume_id,
             project_id: intent.project_id,
