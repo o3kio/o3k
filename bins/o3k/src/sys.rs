@@ -111,6 +111,35 @@ pub(crate) fn stderr_message(output: &std::process::Output) -> String {
     }
 }
 
+/// Synchronizes the storage executor's local admission epoch after a host
+/// joins. The privileged operation is restricted to the installer-owned
+/// helper and runs through the bounded host-execution adapter.
+pub(crate) fn sync_storage_epoch(epoch: &str) -> Result<(), String> {
+    if epoch.is_empty()
+        || !epoch
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("enrolled agent epoch is invalid".to_owned());
+    }
+    if !Path::new("/etc/o3k/storage/o3k-storage.env").exists() {
+        return Ok(());
+    }
+
+    let mut command = Command::new("sudo");
+    command.args(["-n", "/usr/local/libexec/o3k-sync-storage-epoch", epoch]);
+    let outcome = run_bounded(&mut command)
+        .map_err(|error| format!("cannot invoke storage epoch helper: {error}"))?;
+    if !outcome.completed {
+        return Err("storage epoch helper timed out; join admission denied".to_owned());
+    }
+    if outcome.output.status.success() {
+        Ok(())
+    } else {
+        Err("storage epoch helper failed; join admission denied".to_owned())
+    }
+}
+
 /// Real [`Exec`] implementation backed by `systemctl`, `virsh`, `ip`, `df`,
 /// `/proc`, and the local filesystem.
 pub struct SystemExec {

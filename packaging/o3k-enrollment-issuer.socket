@@ -7,7 +7,9 @@ Accept=yes
 SocketUser=o3k
 SocketGroup=o3k
 SocketMode=0600
-DirectoryMode=0750
+# The o3k controller must traverse this runtime directory to connect. The
+# socket itself remains restricted to the o3k owner at mode 0600.
+DirectoryMode=0711
 
 [Install]
 WantedBy=sockets.target

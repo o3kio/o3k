@@ -18,12 +18,12 @@ use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::HttpClient;
 use crate::context::HttpResponse;
-use crate::sys::{RequestError, SystemHttpClient, request_with_key};
+use crate::sys::{RequestError, SystemHttpClient, request_with_key, sync_storage_epoch};
 use o3k_compute_agent::types::EnrollmentIdentity;
 use o3k_compute_agent::validate_csr_uri_sans;
 use o3k_provider_contract::compute_proto::{
@@ -124,22 +124,6 @@ fn sync_storage_epoch_at(
             .map_err(|e| format!("cannot sync epoch directory: {e}"))?;
     }
     Ok(true)
-}
-
-fn sync_storage_epoch_after_join(epoch: &str) -> Result<(), String> {
-    let storage = PathBuf::from("/etc/o3k/storage/o3k-storage.env");
-    if !storage.exists() {
-        return Ok(());
-    }
-    let status = std::process::Command::new("sudo")
-        .args(["-n", "/usr/local/libexec/o3k-sync-storage-epoch", epoch])
-        .status()
-        .map_err(|e| format!("cannot invoke storage epoch helper: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("storage epoch helper failed; join admission denied".to_owned())
-    }
 }
 
 /// Returns the effective API base URL from environment or default.
@@ -555,7 +539,7 @@ pub fn join(
     if response.status != 200 {
         return Err(format!("API returned status {}", response.status));
     }
-    sync_storage_epoch_after_join(agent_epoch)?;
+    sync_storage_epoch(agent_epoch)?;
     println!("{}", response.body);
     Ok(())
 }

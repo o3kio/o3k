@@ -266,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let journal = PathBuf::from(
         env::var("O3K_STORAGE_JOURNAL")
-            .unwrap_or_else(|_| "/var/lib/o3k/storage-journal.json".into()),
+            .unwrap_or_else(|_| "/var/lib/o3k/storage/journal.json".into()),
     );
     let executor = Executor {
         journal: Arc::new(StorageJournal::open(journal)?),
