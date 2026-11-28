@@ -28,7 +28,7 @@ sync -f "$tmp2"
 mv -f "$tmp2" "$daemon"
 sync -f "$root/storage"
 sync -f "$root"
-if [ "${O3K_EPOCH_HELPER_TEST:-0}" != 1 ]; then
+if [ "${O3K_EPOCH_HELPER_TEST:-0}" != 1 ] || [ -n "${O3K_HELPER_SYSTEMCTL_LOG:-}" ]; then
   systemctl restart o3k-storage.service
   systemctl restart o3kd.service
 fi
