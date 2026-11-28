@@ -2420,7 +2420,7 @@ mod pp4_endpoint_lifecycle;
 mod tests {
     use super::{
         DaemonCreateResolver, NetworkBindingProjector, locations_from_declarations,
-        placement_consumer_ids, resolve_native_lvm_config,
+        placement_consumer_ids,
     };
     use crate::composition::compute::validate_inspect_probe_paths;
     use o3k_compute::PortBindingProjector;
@@ -2494,40 +2494,6 @@ mod tests {
     }
 
     #[test]
-    fn lvm_config_unset_and_empty_env_means_provider_not_configured() -> Result<(), String> {
-        assert!(
-            resolve_native_lvm_config(None, None, None)
-                .map_err(|error| error.to_string())?
-                .is_none()
-        );
-        assert!(
-            resolve_native_lvm_config(
-                Some(String::new()),
-                Some(String::new()),
-                Some(String::new())
-            )
-            .map_err(|error| error.to_string())?
-            .is_none()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn lvm_config_all_values_set_resolves_to_config() -> Result<(), String> {
-        let config = resolve_native_lvm_config(
-            Some("vg-o3k".to_owned()),
-            Some("pool-o3k".to_owned()),
-            Some("o3k".to_owned()),
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "complete values should produce a config".to_owned())?;
-        assert_eq!(config.volume_group, "vg-o3k");
-        assert_eq!(config.thin_pool, "pool-o3k");
-        assert_eq!(config.provider_namespace, "o3k");
-        Ok(())
-    }
-
-    #[test]
     fn location_config_parses_region_topology_deterministically() -> Result<(), String> {
         let raw = r#"[{"id":"region-b","availability_domains":[{"id":"az-2"},{"id":"az-1"}]},
                           {"id":"region-a","availability_domains":[{"id":"az-3"}]}]"#
@@ -2566,44 +2532,6 @@ mod tests {
             .map(|_| "ok".to_owned())
             .unwrap_or_else(|error| error.to_string());
         assert!(text.contains("ambiguous"), "unexpected: {text}");
-    }
-
-    #[test]
-    fn lvm_config_partial_env_fails_closed() {
-        for values in [
-            (Some("vg-o3k".to_owned()), None, None),
-            (Some("vg-o3k".to_owned()), Some(String::new()), None),
-            (
-                Some("vg-o3k".to_owned()),
-                Some("pool-o3k".to_owned()),
-                Some(String::new()),
-            ),
-        ] {
-            assert!(
-                resolve_native_lvm_config(values.0, values.1, values.2).is_err(),
-                "partial LVM configuration must fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn lvm_config_complete_but_invalid_values_are_rejected() {
-        assert!(
-            resolve_native_lvm_config(
-                Some("vg-o3k".to_owned()),
-                Some("vg-o3k".to_owned()),
-                Some("o3k".to_owned()),
-            )
-            .is_err()
-        );
-        assert!(
-            resolve_native_lvm_config(
-                Some("vg o3k".to_owned()),
-                Some("pool-o3k".to_owned()),
-                Some("o3k".to_owned()),
-            )
-            .is_err()
-        );
     }
 
     #[test]
