@@ -604,6 +604,28 @@ impl BootstrapWorkflow for BootstrapAdapter {
             Some(grant_id.to_owned())
         };
         let token_digest = digest(&request.enrollment_token);
+        let durable_record = self
+            .store
+            .get_bootstrap_state(STATE_ID)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?;
+        // Revocation is durable admission authority and must be checked
+        // before consuming a grant or projecting an agent identity.
+        let (mut epochs, mut revoked) = match durable_record.as_ref() {
+            Some(record) => (
+                parse_agent_epochs(&record.enrolled_agent_epochs)?,
+                parse_revoked_agents(&record.revoked_agents)?,
+            ),
+            None => (BTreeMap::new(), BTreeMap::new()),
+        };
+        let mut state = durable_record
+            .clone()
+            .map(state_from_record)
+            .transpose()?
+            .ok_or(BootstrapFailure::Unavailable)?;
+        if revoked.get(&request.agent_id).copied().unwrap_or(false) {
+            return Err(BootstrapFailure::Unauthorized);
+        }
         let stored_issue = self
             .store
             .get_enrollment_result(grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?)
@@ -640,28 +662,6 @@ impl BootstrapWorkflow for BootstrapAdapter {
         } else {
             None
         };
-        let durable_record = self
-            .store
-            .get_bootstrap_state(STATE_ID)
-            .await
-            .map_err(|_| BootstrapFailure::Internal)?;
-        // Validate durable admission metadata before consuming a grant or
-        // mutating the live agent/placement registries.
-        let (mut epochs, mut revoked) = match durable_record.as_ref() {
-            Some(record) => (
-                parse_agent_epochs(&record.enrolled_agent_epochs)?,
-                parse_revoked_agents(&record.revoked_agents)?,
-            ),
-            None => (BTreeMap::new(), BTreeMap::new()),
-        };
-        let mut state = durable_record
-            .clone()
-            .map(state_from_record)
-            .transpose()?
-            .ok_or(BootstrapFailure::Unavailable)?;
-        if revoked.get(&request.agent_id).copied().unwrap_or(false) {
-            return Err(BootstrapFailure::Unauthorized);
-        }
         let legacy_grant = if issued_enrollment.is_none() {
             let id = grant_id.as_deref().ok_or(BootstrapFailure::Unauthorized)?;
             let grant = self
