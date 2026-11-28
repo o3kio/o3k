@@ -855,9 +855,17 @@ fn run_doctor(json: bool) -> ExitCode {
     }
     // Keep the guard alive through runtime shutdown, including connection
     // cleanup. Diagnostics never create missing installation or lock state.
-    let _store_guard = match o3k_store::StoreAccessLock::acquire_read_only(&context.data_dir) {
-        Ok(guard) => guard,
-        Err(_) => return doctor_access_denied(json, "store-access lock unavailable"),
+    // PostgreSQL is the authoritative durable store for the EA profile and
+    // does not use the local SQLite StoreAccessLock. A running controller may
+    // therefore be inspected read-only. SQLite/C1 keeps the lock denial
+    // fail-closed because the local file remains the authority.
+    let _store_guard = if postgres_store_configured() {
+        None
+    } else {
+        match o3k_store::StoreAccessLock::acquire_read_only(&context.data_dir) {
+            Ok(guard) => Some(guard),
+            Err(_) => return doctor_access_denied(json, "store-access lock unavailable"),
+        }
     };
     if let Err(reason) = o3k::restore_preflight::deny_startup_if_restore_state(&context.data_dir) {
         return doctor_access_denied(json, &format!("recovery quarantine: {reason}"));
@@ -868,6 +876,26 @@ fn run_doctor(json: bool) -> ExitCode {
     };
     let report = runtime.block_on(o3k::run_all(&context));
     render_doctor_report(json, report)
+}
+
+fn postgres_store_configured() -> bool {
+    std::env::var("O3K_DATABASE_URL")
+        .map(|url| is_postgres_url(&url))
+        .unwrap_or(false)
+}
+
+fn is_postgres_url(url: &str) -> bool {
+    url.starts_with("postgres://") || url.starts_with("postgresql://")
+}
+
+#[cfg(test)]
+mod doctor_store_selection_tests {
+    #[test]
+    fn postgres_urls_skip_local_store_lock() {
+        assert!(super::is_postgres_url("postgres://controller/db"));
+        assert!(super::is_postgres_url("postgresql://controller/db"));
+        assert!(!super::is_postgres_url("file:/var/lib/o3k/o3k.db"));
+    }
 }
 
 fn doctor_access_denied(json: bool, reason: &str) -> ExitCode {
