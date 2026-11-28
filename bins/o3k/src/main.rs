@@ -859,7 +859,7 @@ fn run_doctor(json: bool) -> ExitCode {
     // does not use the local SQLite StoreAccessLock. A running controller may
     // therefore be inspected read-only. SQLite/C1 keeps the lock denial
     // fail-closed because the local file remains the authority.
-    let _store_guard = if postgres_store_configured() {
+    let _store_guard = if postgres_store_configured(&context.o3kd_env) {
         None
     } else {
         match o3k_store::StoreAccessLock::acquire_read_only(&context.data_dir) {
@@ -878,9 +878,10 @@ fn run_doctor(json: bool) -> ExitCode {
     render_doctor_report(json, report)
 }
 
-fn postgres_store_configured() -> bool {
-    std::env::var("O3K_DATABASE_URL")
-        .map(|url| is_postgres_url(&url))
+fn postgres_store_configured(o3kd_env: &std::collections::BTreeMap<String, String>) -> bool {
+    o3kd_env
+        .get("O3K_DATABASE_URL")
+        .map(|url| is_postgres_url(url))
         .unwrap_or(false)
 }
 
@@ -1057,6 +1058,16 @@ fn render_upgrade_human(command: &str, outcome: &UpgradeOutcome) {
 
 #[cfg(test)]
 mod doctor_store_selection_tests {
+    #[test]
+    fn postgres_config_from_file_skips_local_lock_without_process_env() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(
+            "O3K_DATABASE_URL".to_owned(),
+            "postgresql://socket/o3k".to_owned(),
+        );
+        assert!(super::postgres_store_configured(&env));
+    }
+
     #[test]
     fn postgres_urls_skip_local_store_lock() {
         assert!(super::is_postgres_url("postgres://controller/db"));
