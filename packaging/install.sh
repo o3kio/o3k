@@ -733,6 +733,11 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
   if [[ $EUID -eq 0 ]]; then
     install -d -o root -g root -m 0700 /var/lib/o3k/storage
     install -d -o root -g root -m 0750 "$CONFIG_DIR/storage"
+    # The bootstrap agent key is compute-owned (root:o3k-compute) and must not
+    # be made readable by o3kd.  The storage client uses the same authenticated
+    # identity authority, but gets a narrowly scoped copy for group o3k.
+    install -o o3k -g o3k -m 0640 "$TLS_DIR/agent.pem" "$CONFIG_DIR/storage/controller-client.pem"
+    install -o o3k -g o3k -m 0640 "$TLS_DIR/agent-key.pem" "$CONFIG_DIR/storage/controller-client-key.pem"
     if [[ ! -f "$CONFIG_DIR/storage/o3k-storage.env" ]]; then
       umask 077
       storage_agent_id="$(cat "$TLS_DIR/agent-id")"
@@ -954,8 +959,8 @@ if [[ "$PROFILE" == libvirt ]]; then
     for setting in \
       "O3K_STORAGE_ENDPOINT=https://127.0.0.1:9444" \
       "O3K_STORAGE_TLS_CA=$TLS_DIR/ca.pem" \
-      "O3K_STORAGE_TLS_CERT=$TLS_DIR/agent.pem" \
-      "O3K_STORAGE_TLS_KEY=$TLS_DIR/agent-key.pem" \
+      "O3K_STORAGE_TLS_CERT=$CONFIG_DIR/storage/controller-client.pem" \
+      "O3K_STORAGE_TLS_KEY=$CONFIG_DIR/storage/controller-client-key.pem" \
       "O3K_STORAGE_SERVER_NAME=o3k-control-plane" \
       "O3K_STORAGE_AGENT_ID=$storage_agent_id" \
       "O3K_STORAGE_AGENT_EPOCH=1"; do
