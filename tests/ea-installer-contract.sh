@@ -94,6 +94,10 @@ bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
 grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_STORAGE_CONTROLLER_IDENTITY=' "$ROOT/packaging/install.sh"
+grep -Fq 'o3k-storage.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh" "$ROOT/packaging/make-release.sh"
+grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
+grep -Fq 'DeviceAllow=/dev/mapper/control rw' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'o3k-enrollment-issuer" --export-ca' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA' "$ROOT/packaging/install.sh"
 grep -Fq 'compute-client-ca.pem' "$ROOT/packaging/install.sh"

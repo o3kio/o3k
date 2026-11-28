@@ -66,7 +66,7 @@ while IFS= read -r line; do
   [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
   [[ "$line" == "$MANIFEST_HEADER" ]] && continue
   case "$line" in
-    bin/o3kd|bin/o3k|bin/o3k-compute|bin/o3k-network|bin/o3k-storage|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/o3k-network.service|share/o3k/o3k-storage.service|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/backup-trust.example.json|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
+    bin/o3kd|bin/o3k|bin/o3k-compute|bin/o3k-network|bin/o3k-storage|bin/o3k-enrollment-issuer|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/o3k-network.service|share/o3k/o3k-storage.service|share/o3k/o3k-enrollment-issuer@.service|share/o3k/o3k-enrollment-issuer.socket|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/backup-trust.example.json|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
       MANIFEST_FILES+=("$line")
       ;;
     *)
@@ -205,6 +205,10 @@ if [[ $PURGE -eq 1 ]]; then
   assert_no_owned_host_state || exit 2
 fi
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then
+  if printf '%s\n' "${MANIFEST_FILES[@]}" | grep -Fqx 'share/o3k/o3k-enrollment-issuer.socket'; then
+    command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-enrollment-issuer.socket 2>/dev/null || true
+    command -v systemctl >/dev/null 2>&1 && systemctl stop 'o3k-enrollment-issuer@*.service' 2>/dev/null || true
+  fi
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3kd.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-storage.service 2>/dev/null || true
@@ -306,7 +310,15 @@ if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   remove_owned_system_file "$PREFIX/share/o3k/o3kd.service" /etc/systemd/system/o3kd.service
   remove_owned_system_file "$PREFIX/share/o3k/o3k-compute.service" /etc/systemd/system/o3k-compute.service
   remove_owned_system_file "$PREFIX/share/o3k/o3k-network.service" /etc/systemd/system/o3k-network.service
+  if printf '%s\n' "${MANIFEST_FILES[@]}" | grep -Fqx 'share/o3k/o3k-enrollment-issuer.socket'; then
+    remove_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" /etc/systemd/system/o3k-enrollment-issuer@.service
+    remove_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" /etc/systemd/system/o3k-enrollment-issuer.socket
+  fi
   remove_owned_system_file "$PREFIX/share/o3k/o3k-storage.service" /etc/systemd/system/o3k-storage.service
+  if [[ -f /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf ]]; then
+    rm -f -- /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
+    rmdir --ignore-fail-on-non-empty /etc/systemd/system/o3k-storage.service.d 2>/dev/null || true
+  fi
 fi
 for relative in "${MANIFEST_FILES[@]}"; do
   destination="$PREFIX/$relative"

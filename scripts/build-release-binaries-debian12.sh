@@ -93,7 +93,7 @@ mkdir -p "$ROOTFS/build"
 (cd "$ROOT_DIR" && tar -cf - Cargo.toml Cargo.lock rust-toolchain.toml bins crates proto contracts packaging) \
   | tar -xf - -C "$ROOTFS/build"
 
-echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt, o3k-network, o3k-storage)"
+echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt, o3k-network, o3k-storage, o3k-enrollment-issuer)"
 chroot "$ROOTFS" /bin/bash -c '
   set -Eeuo pipefail
   cd /build
@@ -102,6 +102,7 @@ chroot "$ROOTFS" /bin/bash -c '
   cargo build --release --locked --features libvirt --bin o3k-compute-bin
   cargo build --release --locked --bin o3k-network-bin
   cargo build --release --locked --bin o3k-storage-bin
+  cargo build --release --locked --bin o3k-enrollment-issuer
   rustc --version > rustc-version.txt
 '
 
@@ -111,7 +112,8 @@ install -m 0755 "$ROOTFS/build/target/release/o3k" "$OUTPUT_DIR/o3k"
 install -m 0755 "$ROOTFS/build/target/release/o3k-compute-bin" "$OUTPUT_DIR/o3k-compute"
 install -m 0755 "$ROOTFS/build/target/release/o3k-network-bin" "$OUTPUT_DIR/o3k-network"
 install -m 0755 "$ROOTFS/build/target/release/o3k-storage-bin" "$OUTPUT_DIR/o3k-storage"
-(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute o3k-network o3k-storage > SHA256SUMS)
+install -m 0755 "$ROOTFS/build/target/release/o3k-enrollment-issuer" "$OUTPUT_DIR/o3k-enrollment-issuer"
+(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute o3k-network o3k-storage o3k-enrollment-issuer > SHA256SUMS)
 
 echo "==> recording the glibc floor proof (checked with the host readelf)"
 {
@@ -119,7 +121,7 @@ echo "==> recording the glibc floor proof (checked with the host readelf)"
   echo "rootfs Debian version: $(cat "$ROOTFS/etc/debian_version")"
   echo "rust toolchain: $(cat "$ROOTFS/build/rustc-version.txt") (rust-toolchain.toml channel $CHANNEL)"
   echo "source commit: $(git -C "$ROOT_DIR" rev-parse HEAD)"
-  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$OUTPUT_DIR/o3kd" "$OUTPUT_DIR/o3k" "$OUTPUT_DIR/o3k-compute" "$OUTPUT_DIR/o3k-storage"
+  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$OUTPUT_DIR/o3kd" "$OUTPUT_DIR/o3k" "$OUTPUT_DIR/o3k-compute" "$OUTPUT_DIR/o3k-storage" "$OUTPUT_DIR/o3k-enrollment-issuer"
 } | tee "$OUTPUT_DIR/glibc-floor.txt"
 {
   echo "rootfs: Debian $SUITE (bookworm)"
