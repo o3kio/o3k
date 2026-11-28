@@ -67,7 +67,8 @@ impl StorageVolumeIntent {
 
     pub fn deterministic_id(&self, kind: &str, action: StorageAction) -> Uuid {
         let action = format!("{action:?}");
-        let mut bytes = Vec::with_capacity(kind.len() + action.len() + self.idempotency_key.len() + 32);
+        let mut bytes =
+            Vec::with_capacity(kind.len() + action.len() + self.idempotency_key.len() + 32);
         bytes.extend_from_slice(kind.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(action.as_bytes());

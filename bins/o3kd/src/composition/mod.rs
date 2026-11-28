@@ -1874,16 +1874,25 @@ pub async fn build_composition_with_guard(
             }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
         });
     let native_volume_workflow: Option<Arc<dyn o3k_api::NativeVolumeWorkflow>> =
-        native_storage_provider.as_ref().map(|provider| {
-            Arc::new(NativeStorageVolumeWorkflow {
+        native_storage_provider.as_ref().and_then(|provider| {
+            let storage_fence = storage_fence_for_drain.clone()?;
+            let target_agent_id = std::env::var("O3K_STORAGE_AGENT_ID").ok()?;
+            let target_agent_epoch = std::env::var("O3K_STORAGE_AGENT_EPOCH")
+                .ok()?
+                .parse::<u64>()
+                .ok()?;
+            let workflow = o3k_reconciler::native_volume_workflow::NativeVolumeWorkflow::new(
+                store.clone(),
+                provider.clone(),
+                Arc::new(storage_fence),
+            );
+            Some(Arc::new(NativeStorageVolumeWorkflow {
                 store: store.clone(),
-                provider: provider.clone(),
-                metering: metering_observer.clone(),
+                workflow,
                 controller_epoch: storage_intent_epoch,
-                target_agent_id: std::env::var("O3K_STORAGE_AGENT_ID")
-                    .unwrap_or_else(|_| "local".into()),
-                target_agent_epoch: 1,
-            }) as Arc<dyn o3k_api::NativeVolumeWorkflow>
+                target_agent_id,
+                target_agent_epoch,
+            }) as Arc<dyn o3k_api::NativeVolumeWorkflow>)
         });
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(crate::native_adapters::GenericResourceApplication {

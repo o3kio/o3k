@@ -1062,8 +1062,11 @@ pub(crate) struct NativeStorageAttachmentWorkflow {
 /// storage provider and observes the provider before reporting success.
 pub(crate) struct NativeStorageVolumeWorkflow {
     pub(crate) store: Arc<o3k_store::O3kStore>,
-    pub(crate) provider: Arc<dyn o3k_storage::StorageProvider>,
-    pub(crate) metering: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+    pub(crate) workflow: o3k_reconciler::native_volume_workflow::NativeVolumeWorkflow<
+        o3k_store::O3kStore,
+        dyn o3k_storage::StorageProvider,
+        LocalStorageFence,
+    >,
     pub(crate) controller_epoch: u64,
     pub(crate) target_agent_id: String,
     pub(crate) target_agent_epoch: u64,
@@ -1082,33 +1085,17 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             volume_id: record.volume.id,
             project_id: record.volume.project_id.clone(),
             size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation + 1,
+            generation: record.volume.generation,
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch,
-            idempotency_key: format!(
-                "volume-create-{}-{}",
-                volume_id,
-                record.volume.generation + 1
-            ),
+            idempotency_key: format!("volume-create-{}-{}", volume_id, record.volume.generation),
             trace_id: "o3kd-native-volume".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
         };
-        let context = o3k_storage::StorageExecutionContext {
-            envelope: intent
-                .envelope(o3k_domain::StorageAction::CreateVolume)
-                .map_err(|e| e.to_string())?,
-        };
-        let request = o3k_storage::StorageVolumeRequest {
-            volume_id: record.volume.id,
-            project_id: record.volume.project_id.clone(),
-            size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation + 1,
-        };
-        self.provider
-            .create_volume_with_context(&request, &context)
+        self.workflow
+            .create(intent)
             .await
-            .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
@@ -1119,31 +1106,23 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "native volume disappeared".to_owned())?;
+        if record.volume.project_id != project_id {
+            return Err("native volume ownership mismatch".to_owned());
+        }
         let intent = o3k_reconciler::storage_volume_workflow::StorageVolumeIntent {
             volume_id: record.volume.id,
             project_id: project_id.into(),
             size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation + 1,
+            generation: record.volume.generation,
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch,
-            idempotency_key: format!("volume-delete-{volume_id}-{}", record.volume.generation + 1),
+            idempotency_key: format!("volume-delete-{volume_id}-{}", record.volume.generation),
             trace_id: "o3kd-native-volume".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
         };
-        let context = o3k_storage::StorageExecutionContext {
-            envelope: intent
-                .envelope(o3k_domain::StorageAction::DeleteVolume)
-                .map_err(|e| e.to_string())?,
-        };
-        let request = o3k_storage::StorageVolumeRequest {
-            volume_id: record.volume.id,
-            project_id: project_id.into(),
-            size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation + 1,
-        };
-        self.provider
-            .delete_volume_with_context(&request, &context)
+        self.workflow
+            .delete(intent)
             .await
             .map_err(|e| e.to_string())
     }

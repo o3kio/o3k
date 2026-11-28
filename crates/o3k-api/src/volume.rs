@@ -566,31 +566,21 @@ pub(crate) async fn create(
         volume,
         created_at: now_rfc3339(),
     };
-    let Some(provider) = state.storage_provider.clone() else {
+    if state.storage_provider.is_none() || state.native_volume_workflow.is_none() {
         return unavailable();
-    };
+    }
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let record = if let Some(workflow) = state.native_volume_workflow.as_ref() {
-                if workflow.create(record.volume.id.as_uuid()).await.is_err() {
-                    return unavailable();
-                }
-                match store.get_volume(record.volume.id.as_uuid()).await {
-                    Ok(Some(record)) => record,
-                    _ => return unavailable(),
-                }
-            } else {
-                match realize_native_volume_create(
-                    store.clone(),
-                    provider,
-                    record,
-                    state.metering_observer.as_ref(),
-                )
-                .await
-                {
-                    Ok(record) => record,
-                    Err(_) => return unavailable(),
-                }
+            let workflow = state
+                .native_volume_workflow
+                .as_ref()
+                .expect("checked above");
+            if workflow.create(record.volume.id.as_uuid()).await.is_err() {
+                return unavailable();
+            }
+            let record = match store.get_volume(record.volume.id.as_uuid()).await {
+                Ok(Some(record)) => record,
+                _ => return unavailable(),
             };
             (
                 StatusCode::ACCEPTED,
@@ -718,24 +708,15 @@ pub(crate) async fn delete(
         )
         .into_response();
     }
-    let Some(provider) = state.storage_provider.clone() else {
-        // Do not remove canonical state while a provider is unavailable: the
-        // durable row is the recovery inventory for an owned provider volume.
+    if state.storage_provider.is_none() || state.native_volume_workflow.is_none() {
         return unavailable();
     };
-    let deletion = if let Some(workflow) = state.native_volume_workflow.as_ref() {
-        workflow.delete(&project_id, id).await
-    } else {
-        remove_native_volume(
-            store.clone(),
-            provider,
-            &project_id,
-            id,
-            None,
-            state.metering_observer.as_ref(),
-        )
-        .await
-    };
+    let deletion = state
+        .native_volume_workflow
+        .as_ref()
+        .expect("checked above")
+        .delete(&project_id, id)
+        .await;
     match deletion {
         Ok(()) => match store.delete_volume(&project_id, id).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
