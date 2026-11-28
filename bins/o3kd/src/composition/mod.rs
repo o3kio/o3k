@@ -2121,9 +2121,12 @@ pub async fn build_composition_with_guard(
         state = state.with_storage_provider(provider);
     }
     if let Some(workflow) = native_volume_workflow {
+        workflow
+            .recover()
+            .await
+            .map_err(|error| format!("native volume recovery required before startup: {error}"))?;
         state = state.with_native_volume_workflow(workflow);
     }
-    o3k_api::recover_native_volumes(&state).await;
     let native_storage_recovery_task = if let Some(workflow) = native_attachment_workflow.clone() {
         state = state.with_native_attachment_workflow(workflow.clone());
         if let Err(error) = workflow.recover().await {

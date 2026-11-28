@@ -1085,11 +1085,11 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             volume_id: record.volume.id,
             project_id: record.volume.project_id.clone(),
             size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation,
+            generation: record.volume.generation.saturating_add(1),
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch,
-            idempotency_key: format!("volume-create-{}-{}", volume_id, record.volume.generation),
+            idempotency_key: format!("volume-create-{}-{}", volume_id, record.volume.generation.saturating_add(1)),
             trace_id: "o3kd-native-volume".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
         };
@@ -1113,11 +1113,11 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             volume_id: record.volume.id,
             project_id: project_id.into(),
             size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation,
+            generation: record.volume.generation.saturating_add(1),
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch,
-            idempotency_key: format!("volume-delete-{volume_id}-{}", record.volume.generation),
+            idempotency_key: format!("volume-delete-{volume_id}-{}", record.volume.generation.saturating_add(1)),
             trace_id: "o3kd-native-volume".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
         };
@@ -1128,7 +1128,7 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
     }
 
     async fn recover(&self) -> Result<(), String> {
-        Ok(())
+        self.workflow.recover().await.map_err(|e| e.to_string())
     }
 }
 

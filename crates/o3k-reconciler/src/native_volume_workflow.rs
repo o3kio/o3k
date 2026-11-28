@@ -29,6 +29,8 @@ pub enum NativeVolumeWorkflowError {
     IdempotencyConflict,
     #[error("provider error")]
     Provider(#[from] StorageProviderError),
+    #[error("native volume recovery required")]
+    RecoveryRequired,
 }
 
 pub struct NativeVolumeWorkflow<S, P: ?Sized, F> {
@@ -63,6 +65,14 @@ where
         intent: StorageVolumeIntent,
     ) -> Result<(), NativeVolumeWorkflowError> {
         self.execute(intent, StorageAction::DeleteVolume).await
+    }
+
+    pub async fn recover(&self) -> Result<(), NativeVolumeWorkflowError> {
+        let pending = self.store.list_recoverable_agent_commands().await?;
+        if !pending.is_empty() {
+            return Err(NativeVolumeWorkflowError::RecoveryRequired);
+        }
+        Ok(())
     }
 
     async fn execute(
@@ -149,6 +159,7 @@ where
         {
             let mut next = current.volume.clone();
             next.operation_id = Some(operation_id);
+            next.generation = intent.generation;
             next.state = match action {
                 StorageAction::CreateVolume => VolumeState::Creating,
                 StorageAction::DeleteVolume => VolumeState::Deleting,
@@ -190,6 +201,7 @@ where
                     } else {
                         VolumeState::Available
                     };
+                    next.generation = current.volume.generation.saturating_add(1);
                     next.operation_id = Some(operation_id);
                     if let Some(reference) = provider_reference {
                         next.provider_reference = Some(reference);
