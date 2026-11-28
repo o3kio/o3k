@@ -418,6 +418,17 @@ impl NodeRegistry {
         agent_epoch: &str,
         sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
     ) -> Result<(), Status> {
+        let _epoch = self.epoch_gate(agent_id).await.write_owned().await;
+        self.attach_connection_locked(agent_id, agent_epoch, sender)
+            .await
+    }
+
+    async fn attach_connection_locked(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+        sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
+    ) -> Result<(), Status> {
         let node = self
             .nodes
             .read()
@@ -1068,6 +1079,7 @@ impl NodeRegistry {
     /// stream. The public host-removal workflow owns when this is invoked;
     /// this primitive does not create a new removal authority.
     pub async fn revoke_agent_identity(&self, agent_id: &str) {
+        let _epoch_change = self.epoch_gate(agent_id).await.write_owned().await;
         self.authorized_agents.write().await.remove(agent_id);
         self.authorized_agent_epochs.write().await.remove(agent_id);
         self.connections.write().await.remove(agent_id);
@@ -1087,6 +1099,38 @@ impl NodeRegistry {
     ) -> Result<proto::RegisterResponse, Status> {
         validate_register(request).map_err(|status| *status)?;
         let _epoch_change = self.epoch_gate(&request.agent_id).await.write_owned().await;
+        self.register_locked(request).await
+    }
+
+    /// Atomically admits an authenticated control stream.  Authorization,
+    /// epoch registration, and connection attachment share the epoch gate so
+    /// revocation cannot interleave between them.
+    pub async fn register_authenticated_connection(
+        &self,
+        request: &proto::RegisterRequest,
+        certificate: &[u8],
+        sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
+    ) -> Result<proto::RegisterResponse, Status> {
+        validate_register(request).map_err(|status| *status)?;
+        let _epoch_change = self.epoch_gate(&request.agent_id).await.write_owned().await;
+        if !self
+            .is_authorized_for_epoch(&request.agent_id, certificate, &request.agent_epoch)
+            .await
+        {
+            return Err(Status::permission_denied(
+                "client certificate is not authorized for agent identity",
+            ));
+        }
+        let response = self.register_locked(request).await?;
+        self.attach_connection_locked(&request.agent_id, &request.agent_epoch, sender)
+            .await?;
+        Ok(response)
+    }
+
+    async fn register_locked(
+        &self,
+        request: &proto::RegisterRequest,
+    ) -> Result<proto::RegisterResponse, Status> {
         let now = SystemTime::now();
         let mut nodes = self.nodes.write().await;
         let desired = nodes
@@ -1294,9 +1338,8 @@ impl o3k_provider::AgentNodeRegistry for NodeRegistry {
         self.subscribe_events()
     }
 
-    async fn revoke_agent_identity(&self, agent_id: &str) -> Result<(), String> {
+    async fn revoke_agent_identity(&self, agent_id: &str) {
         self.revoke_agent_identity(agent_id).await;
-        Ok(())
     }
 }
 
@@ -2611,24 +2654,15 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         let Some(certificate) = certs.first() else {
             return Err(Status::permission_denied("client certificate is required"));
         };
-        if !peer_matches_agent(certificate.as_ref(), &register.agent_id)
-            || !self
-                .registry
-                .is_authorized_for_epoch(
-                    &register.agent_id,
-                    certificate.as_ref(),
-                    &register.agent_epoch,
-                )
-                .await
-        {
+        if !peer_matches_agent(certificate.as_ref(), &register.agent_id) {
             return Err(Status::permission_denied(
                 "client certificate is not authorized for agent identity",
             ));
         }
-        let response = self.registry.register(&register).await?;
         let (tx, rx) = mpsc::channel(32);
-        self.registry
-            .attach_connection(&register.agent_id, &register.agent_epoch, tx.clone())
+        let response = self
+            .registry
+            .register_authenticated_connection(&register, certificate.as_ref(), tx.clone())
             .await?;
         tx.send(Ok(proto::ControlResponse {
             body: Some(proto::control_response::Body::Register(response)),
