@@ -740,7 +740,7 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
   INSTALLED_FILES+=(bin/o3k-storage share/o3k/o3k-storage.service)
   if [[ $EUID -eq 0 ]]; then
     install -d -o root -g root -m 0700 /var/lib/o3k/storage
-    install -d -o root -g root -m 0750 "$CONFIG_DIR/storage"
+    install -d -o root -g o3k -m 0750 "$CONFIG_DIR/storage"
     # The bootstrap agent key is compute-owned (root:o3k-compute) and must not
     # be made readable by o3kd.  The storage client uses the same authenticated
     # identity authority, but gets a narrowly scoped copy for group o3k.

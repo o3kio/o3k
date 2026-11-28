@@ -149,6 +149,7 @@ grep -Fq 'DirectoryMode=0711' "$ROOT/packaging/o3k-enrollment-issuer.socket"
 grep -Fq 'SocketUser=o3k' "$ROOT/packaging/o3k-enrollment-issuer.socket"
 grep -Fq 'SocketMode=0600' "$ROOT/packaging/o3k-enrollment-issuer.socket"
 grep -Fq 'O3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json' "$ROOT/packaging/install.sh"
+grep -Fq 'install -d -o root -g o3k -m 0750 "$CONFIG_DIR/storage"' "$ROOT/packaging/install.sh"
 python3 - "$ROOT/packaging/install.sh" <<'PY'
 from pathlib import Path
 import sys
