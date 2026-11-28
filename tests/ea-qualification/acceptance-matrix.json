@@ -1,24 +1,40 @@
 {
   "spec": "SPEC-0052 \u00a78",
-  "campaign": "A then B-E",
-  "status": "NOT_RUN",
-  "candidate": null,
-  "source_sha": null,
-  "artifact_sha256": null,
-  "installer_sha256": null,
-  "topology": null,
+  "campaign": "RC1 single-host attempt; three-host campaign not started",
+  "status": "FAIL",
+  "candidate": "v0.4.1-rc.1",
+  "source_sha": "166ff450f8c721f6ac6396eee77ee324e17c8441",
+  "artifact_sha256": "632cb5c4f38d2946c11c978b8d142ade0b5f74e9cc073462db1f5bdb2b3cd2e7",
+  "installer_sha256": "5a7c80045403191aa6e9f149815798c41d538f68fd5f857b23a7207c5729d38d",
+  "topology": {
+    "campaign": "ea241127c",
+    "host": "o3k-ea-ea241127c-host-a",
+    "os": "Ubuntu 24.04.5 LTS x86_64",
+    "vcpus": 4,
+    "memory_mib": 8192,
+    "disk_gib": 20,
+    "physical_host": "dedicated nested-KVM/libvirt host"
+  },
   "checks": [
     {
       "id": 1,
       "requirement": "Release authentication",
-      "status": "NOT_RUN",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        "https://github.com/o3kio/o3k/actions/runs/45985190744",
+        "/home/ubuntu/o3k-testlab-images/ea241127c/evidence/rc1-qualification/release-verification.txt",
+        "/home/ubuntu/o3k-testlab-images/ea241127c/evidence/rc1-qualification/provenance-identity.json"
+      ]
     },
     {
       "id": 2,
       "requirement": "Fresh install",
-      "status": "NOT_RUN",
-      "evidence": []
+      "status": "FAIL",
+      "evidence": [
+        "/home/ubuntu/o3k-testlab-images/ea241127c/evidence/rc1-qualification/install-failure.json",
+        "/home/ubuntu/o3k-testlab-images/ea241127c/evidence/rc1-qualification/host-facts.txt"
+      ],
+      "reason": "Authenticated archive verification passed, then bundled A10 executable inspection failed because nm/binutils was unavailable before installer dependencies ran. No O3K or PostgreSQL state was created."
     },
     {
       "id": 3,
