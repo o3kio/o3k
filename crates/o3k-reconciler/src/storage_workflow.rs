@@ -428,7 +428,7 @@ where
         envelope
             .validate()
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
-        if command.agent_epoch != envelope.target_agent_epoch.to_string() {
+        if command.agent_epoch != envelope.target_agent_epoch {
             return Err(StorageWorkflowError::StaleAgentFence);
         }
         let record = self
