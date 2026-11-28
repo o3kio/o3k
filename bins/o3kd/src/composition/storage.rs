@@ -39,6 +39,7 @@ pub(crate) struct RemoteStorageProvider {
     expected_server_name: String,
     agent_id: String,
     agent_epoch: String,
+    controller_epoch: u64,
 }
 
 fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: u64) -> String {
@@ -46,7 +47,11 @@ fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: 
 }
 
 impl RemoteStorageProvider {
-    pub(crate) fn from_env(agent_id: String, agent_epoch: String) -> Result<Self, String> {
+    pub(crate) fn from_env(
+        agent_id: String,
+        agent_epoch: String,
+        controller_epoch: u64,
+    ) -> Result<Self, String> {
         let endpoint = std::env::var("O3K_STORAGE_ENDPOINT")
             .map_err(|_| "O3K_STORAGE_ENDPOINT is required".to_owned())?;
         let ca = std::fs::read(
@@ -84,6 +89,7 @@ impl RemoteStorageProvider {
             expected_server_name,
             agent_id,
             agent_epoch,
+            controller_epoch,
         })
     }
 
@@ -106,7 +112,7 @@ impl RemoteStorageProvider {
             resource_id,
             resource_generation: generation,
             project_id,
-            controller_epoch: 1,
+            controller_epoch: self.controller_epoch,
             target_agent_id: self.agent_id.clone(),
             target_agent_epoch: self.agent_epoch.clone(),
             deadline: "2099-01-01T00:00:00Z".into(),

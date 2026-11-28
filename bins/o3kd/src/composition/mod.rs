@@ -1706,6 +1706,7 @@ pub async fn build_composition_with_guard(
                     std::env::var("O3K_STORAGE_AGENT_EPOCH").map_err(|_| {
                         "O3K_STORAGE_AGENT_EPOCH is required for storage executor".to_owned()
                     })?,
+                    storage_intent_epoch(&controller_epoch),
                 )?,
             ) as Arc<dyn o3k_storage::StorageProvider>)
         } else {
