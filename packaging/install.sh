@@ -756,11 +756,33 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
     # the service's closed device policy otherwise denies all block devices.
     # The mapper glob covers thin LVs created after installation.
     install -d -o root -g root -m 0755 /etc/systemd/system/o3k-storage.service.d
+    # DevicePolicy=closed also hides the physical PV(s) that LVM must open
+    # while creating/removing thin LVs. Resolve them from the operator-selected
+    # VG rather than allowing all block devices. A VG with no discoverable PV
+    # is unsafe to install because the executor would not have a complete,
+    # bounded device policy.
+    storage_pv_paths="$(pvs --noheadings --options pv_name --select "vg_name=${O3K_LVM_VOLUME_GROUP}" 2>/dev/null | awk 'NF {print $1}')" || {
+      echo "storage installer: unable to resolve physical volumes for VG $O3K_LVM_VOLUME_GROUP" >&2
+      exit 1
+    }
+    [[ -n "$storage_pv_paths" ]] || {
+      echo "storage installer: configured VG $O3K_LVM_VOLUME_GROUP has no physical volume" >&2
+      exit 1
+    }
+    while IFS= read -r storage_pv_path; do
+      [[ "$storage_pv_path" == /dev/* && -b "$storage_pv_path" ]] || {
+        echo "storage installer: configured VG resolved an invalid physical volume" >&2
+        exit 1
+      }
+    done <<<"$storage_pv_paths"
     cat > /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf <<EOF
 [Service]
 DeviceAllow=/dev/$O3K_LVM_VOLUME_GROUP/* rw
 DeviceAllow=/dev/mapper/${O3K_LVM_VOLUME_GROUP}-* rw
 EOF
+    while IFS= read -r storage_pv_path; do
+      printf 'DeviceAllow=%s rw\n' "$storage_pv_path" >> /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
+    done <<<"$storage_pv_paths"
     chmod 0644 /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
     systemctl daemon-reload
   fi
