@@ -12,8 +12,11 @@
 //! The underlying protocol is O3K native HTTP API (ADR-0173/SPEC-0030).
 
 use serde_json::Value;
+#[cfg(test)]
 use std::fs::OpenOptions;
+#[cfg(test)]
 use std::io::Write;
+#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -40,6 +43,7 @@ const INIT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// Total deadline across all `bootstrap/init` attempts and backoffs.
 const INIT_TOTAL_DEADLINE: Duration = Duration::from_secs(12);
 
+#[cfg(test)]
 fn sync_storage_epoch_at(
     storage_env: &Path,
     daemon_env: &Path,

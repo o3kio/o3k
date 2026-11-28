@@ -241,6 +241,10 @@ impl StorageExecutor for Executor {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Feature unification can expose multiple Rustls crypto providers in
+    // workspace/all-features builds. Select the same explicit provider as the
+    // other O3K daemons before tonic constructs the server TLS state.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let address: SocketAddr = env::var("O3K_STORAGE_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9444".into())
         .parse()?;

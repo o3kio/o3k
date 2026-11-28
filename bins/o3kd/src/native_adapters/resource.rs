@@ -1628,6 +1628,39 @@ impl ResourceApplication for GenericResourceApplication {
             let Some(workflow) = self.volume_workflow.as_ref() else {
                 return Err(ResourceApplicationError::NotReady);
             };
+            // The durable storage command references the compatibility
+            // resource row by foreign key. Establish that projection before
+            // crossing the execution boundary; the canonical Volume row
+            // remains the lifecycle authority and is reconciled below.
+            match self
+                .store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: resource_id,
+                    kind: "volume".to_owned(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    generation: compatibility_generation as i64,
+                    observed_generation: compatibility_generation as i64,
+                    desired_state: "available".to_owned(),
+                    observed_state: "available".to_owned(),
+                    provider_id: None,
+                })
+                .await
+            {
+                Ok(()) => {}
+                Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                    let existing = self
+                        .store
+                        .get_resource(resource_id)
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                    if existing.kind != "volume"
+                        || existing.project_id != auth.effective_scope().id().as_str()
+                    {
+                        return Err(ResourceApplicationError::NotFound);
+                    }
+                }
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
             match self.store.insert_volume(&record).await {
                 Ok(()) => {}
                 Err(o3k_store::StoreError::ResourceAlreadyExists) => {
@@ -1672,30 +1705,6 @@ impl ResourceApplication for GenericResourceApplication {
                 tracing::error!(volume_id = %resource_id, %error, "native volume create failed");
                 ResourceApplicationError::Retryable
             })?;
-            // The legacy generic-resource index is a compatibility projection
-            // used by relationship tests and older native callers.  The
-            // canonical volume above remains the sole authority.
-            match self
-                .store
-                .insert_resource(&o3k_store::ResourceRecord {
-                    id: resource_id,
-                    kind: "volume".to_owned(),
-                    project_id: auth.effective_scope().id().as_str().to_owned(),
-                    // The native volume row is authoritative and has already
-                    // advanced through provider realization.  Keep the
-                    // compatibility projection at the same generation so
-                    // later lifecycle updates cannot be rejected as stale.
-                    generation: compatibility_generation as i64,
-                    observed_generation: compatibility_generation as i64,
-                    desired_state: "available".to_owned(),
-                    observed_state: "available".to_owned(),
-                    provider_id: None,
-                })
-                .await
-            {
-                Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
-                Err(_) => return Err(ResourceApplicationError::Internal),
-            }
             match self
                 .store
                 .insert_operation(&o3k_store::OperationRecord {

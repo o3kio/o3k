@@ -3313,6 +3313,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_volume_command_can_terminalize_after_projection_is_inserted()
+    -> Result<(), Box<dyn Error>> {
+        // Native storage commands carry a foreign key to the compatibility
+        // resource projection.  The controller must establish this row
+        // before dispatching the executor command.
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "volume".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "available".to_owned(),
+            observed_state: "available".to_owned(),
+            provider_id: None,
+        };
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "storage:volume".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        store
+            .insert_resource_and_operation(&resource, &operation, None)
+            .await?;
+        let command = AgentCommandRecord {
+            command_id: "native-volume-command".to_owned(),
+            idempotency_key: "native-volume-create".to_owned(),
+            operation_id: operation.id,
+            resource_id: resource.id,
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            payload_fingerprint_sha256: "a".repeat(64),
+            payload: b"native-volume".to_vec(),
+            state: AgentCommandState::Pending,
+            accepted_sequence: 0,
+            last_sequence: 0,
+            provider_operation_id: None,
+            provider_resource_id: None,
+        };
+        store.insert_agent_command(&command).await?;
+        let terminal = store
+            .update_agent_command(
+                &command.command_id,
+                AgentCommandState::Succeeded,
+                1,
+                1,
+                None,
+                Some("o3k-v-native-volume"),
+            )
+            .await?;
+        assert_eq!(terminal.state, AgentCommandState::Succeeded);
+        assert_eq!(
+            terminal.provider_resource_id.as_deref(),
+            Some("o3k-v-native-volume")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn operation_terminal_state_rejects_stale_in_flight_projection()
     -> Result<(), Box<dyn Error>> {
         let store = SqliteStore::connect("sqlite::memory:").await?;

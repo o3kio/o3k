@@ -837,6 +837,18 @@ ENV_FILE=/etc/o3k/o3kd.env
 O3K_BIN=/usr/local/bin/o3k
 API_URL=http://127.0.0.1:18080/o3k/v1
 
+# The storage executor and controller receive the epoch selected by the
+# canonical enrollment. Keep their durable configuration in step with the
+# joined compute identity before starting compute, so storage commands are
+# fenced by the same host generation.
+update_storage_epoch() {
+  epoch=$1
+  case "$epoch" in ''|*[!A-Fa-f0-9]*) die 'canonical agent epoch is invalid' ;; esac
+  [ "$EA_INSTALL" = 1 ] || return 0
+  O3K_STORAGE_AGENT_EPOCH=$epoch /usr/local/libexec/o3k-sync-storage-epoch "$epoch" \
+    || die 'cannot persist the canonical storage agent epoch'
+}
+
 # Read one shell-quoted scalar from the daemon env file. The generated
 # secrets are hex-only, so %q quoting is always plain; anything else fails
 # closed instead of misparsing a credential.
@@ -956,6 +968,7 @@ if [ "$join_ok" -ne 1 ]; then
     "$(tail -1 "$TMP_DIR/o3k-join.err" 2>/dev/null || echo 'no response')" >&2
   exit 1
 fi
+update_storage_epoch "$AGENT_EPOCH"
 
 BUILDING_BLOCK_ID=$(python3 - "$JOIN_OUT" <<'PY'
 import json

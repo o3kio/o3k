@@ -94,7 +94,7 @@ binary_builder = (root / "scripts/build-release-binaries-debian12.sh").read_text
 assert 'baseline binary is missing: $BINARIES_DIR/o3k-enrollment-issuer' in release_builder
 assert 'install -m 0755 "$BINARIES_DIR/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-enrollment-issuer"' in release_builder
 assert 'cargo build --release --locked --bin o3k-enrollment-issuer' in binary_builder
-assert 'o3k-enrollment-issuer > SHA256SUMS' in binary_builder
+assert 'o3k-enrollment-issuer o3k-storage > SHA256SUMS' in binary_builder
 qualification = (root / "tests/ea-qualification/ea-testlab.sh").read_text()
 assert '"ubuntu@$ip" "$@"' in qualification
 assert '- name: ubuntu' in qualification
@@ -110,6 +110,7 @@ grep -Fq 'o3k-sync-storage-epoch' "$ROOT/packaging/install.sh" "$ROOT/bins/o3k/s
 grep -Fq 'install -o o3k -g o3k -m 0640' "$ROOT/packaging/install.sh"
 ! grep -Fq 'O3K_STORAGE_TLS_KEY=$TLS_DIR/agent-key.pem' "$ROOT/packaging/install.sh"
 grep -Fq 'o3k-storage.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh" "$ROOT/packaging/make-release.sh"
+grep -Fq 'check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-storage-bin' "$ROOT/packaging/make-release.sh"
 grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'DeviceAllow=/dev/mapper/control rw' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'update_storage_epoch "$AGENT_EPOCH"' "$WRAPPER"
@@ -119,12 +120,11 @@ import sys
 
 wrapper = Path(sys.argv[1]).read_text()
 join = wrapper.index("if [ \"$join_ok\" -ne 1 ]; then")
-epoch = wrapper.index('update_storage_epoch "$AGENT_EPOCH"')
+epoch = wrapper.index('update_storage_epoch "$AGENT_EPOCH"', join)
 compute = wrapper.index('systemctl start o3k-compute.service')
 assert join < epoch < compute
 assert 'O3K_STORAGE_AGENT_EPOCH=$epoch' in wrapper
-assert 'systemctl restart o3k-storage.service' in wrapper
-assert 'systemctl restart o3kd.service' in wrapper
+assert '/usr/local/libexec/o3k-sync-storage-epoch "$epoch"' in wrapper
 PY
 grep -Fq 'o3k-enrollment-issuer" --export-ca' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA' "$ROOT/packaging/install.sh"

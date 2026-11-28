@@ -148,7 +148,11 @@ else
   if [[ "$PROFILE" == libvirt ]]; then
     install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"
     install -m 0755 "$ROOT_DIR/target/release/o3k-network-bin" "$OUT_DIR/bin/o3k-network"
-    if [[ "${O3K_PRODUCT_PROFILE_ID:-}" == "o3k-early-access-v1" ]]; then cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-storage-bin; install -m 0755 "$ROOT_DIR/target/release/o3k-storage-bin" "$OUT_DIR/bin/o3k-storage"; fi
+    if [[ "${O3K_PRODUCT_PROFILE_ID:-}" == "o3k-early-access-v1" ]]; then
+      cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-storage-bin
+      bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-storage-bin"
+      install -m 0755 "$ROOT_DIR/target/release/o3k-storage-bin" "$OUT_DIR/bin/o3k-storage"
+    fi
     if [[ "${O3K_PRODUCT_PROFILE_ID:-}" == "o3k-early-access-v1" ]]; then cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-enrollment-issuer; install -m 0755 "$ROOT_DIR/target/release/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-enrollment-issuer"; fi
   fi
 fi

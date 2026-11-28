@@ -74,6 +74,19 @@ fn context_matches_call(
         && envelope.canonical_payload_fingerprint == fingerprint
 }
 
+fn native_lvm_reference(
+    resource_id: String,
+) -> Result<o3k_domain::StorageProviderReference, StorageProviderError> {
+    let reference = o3k_domain::StorageProviderReference {
+        provider: "lvm".into(),
+        resource_id,
+    };
+    reference
+        .validate()
+        .map_err(|_| StorageProviderError::CommandFailed)?;
+    Ok(reference)
+}
+
 impl RemoteStorageProvider {
     pub(crate) fn from_env(
         agent_id: String,
@@ -268,13 +281,10 @@ impl StorageProvider for RemoteStorageProvider {
             )
             .await?;
         Ok(StorageVolumeObservation {
-            provider_reference: o
-                .provider_resource_id
-                .map(|resource_id| o3k_domain::StorageProviderReference {
-                    provider: "o3k-storage".into(),
-                    resource_id,
-                })
-                .ok_or(StorageProviderError::CommandFailed)?,
+            provider_reference: native_lvm_reference(
+                o.provider_resource_id
+                    .ok_or(StorageProviderError::CommandFailed)?,
+            )?,
             size_bytes: request.size_bytes,
             owned: true,
             available: o.resource_state == "available",
@@ -303,13 +313,10 @@ impl StorageProvider for RemoteStorageProvider {
             )
             .await?;
         Ok(StorageVolumeObservation {
-            provider_reference: o
-                .provider_resource_id
-                .map(|resource_id| o3k_domain::StorageProviderReference {
-                    provider: "o3k-storage".into(),
-                    resource_id,
-                })
-                .ok_or(StorageProviderError::CommandFailed)?,
+            provider_reference: native_lvm_reference(
+                o.provider_resource_id
+                    .ok_or(StorageProviderError::CommandFailed)?,
+            )?,
             size_bytes: request.size_bytes,
             owned: true,
             available: o.resource_state == "available",
@@ -439,13 +446,10 @@ impl StorageProvider for RemoteStorageProvider {
             )
             .await?;
         Ok(StorageVolumeObservation {
-            provider_reference: o
-                .provider_resource_id
-                .map(|resource_id| o3k_domain::StorageProviderReference {
-                    provider: "o3k-storage".into(),
-                    resource_id,
-                })
-                .ok_or(StorageProviderError::CommandFailed)?,
+            provider_reference: native_lvm_reference(
+                o.provider_resource_id
+                    .ok_or(StorageProviderError::CommandFailed)?,
+            )?,
             size_bytes: request.size_bytes,
             owned: true,
             available: o.resource_state == "available",
@@ -471,13 +475,10 @@ impl StorageProvider for RemoteStorageProvider {
             )
             .await?;
         Ok(StorageVolumeObservation {
-            provider_reference: o
-                .provider_resource_id
-                .map(|resource_id| o3k_domain::StorageProviderReference {
-                    provider: "o3k-storage".into(),
-                    resource_id,
-                })
-                .ok_or(StorageProviderError::CommandFailed)?,
+            provider_reference: native_lvm_reference(
+                o.provider_resource_id
+                    .ok_or(StorageProviderError::CommandFailed)?,
+            )?,
             size_bytes: request.size_bytes,
             owned: true,
             available: o.resource_state == "available",
@@ -1278,7 +1279,10 @@ pub(crate) fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
 
 #[cfg(test)]
 mod remote_protocol_tests {
-    use super::{context_matches_call, inject_wire_fencing_token, remote_idempotency_key};
+    use super::{
+        context_matches_call, inject_wire_fencing_token, native_lvm_reference,
+        remote_idempotency_key,
+    };
     use o3k_domain::{StorageAction, StorageCommandEnvelope};
     use uuid::Uuid;
 
@@ -1297,7 +1301,20 @@ mod remote_protocol_tests {
     }
 
     #[test]
-    fn context_identity_is_preserved_while_live_fence_is_injected() {
+    fn remote_executor_volume_identity_is_the_lvm_backend_identity()
+    -> Result<(), o3k_storage::StorageProviderError> {
+        let reference = native_lvm_reference("o3k-v-00000000000000000000000000000007".into())?;
+        assert_eq!(reference.provider, "lvm");
+        assert_eq!(
+            reference.resource_id,
+            "o3k-v-00000000000000000000000000000007"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_identity_is_preserved_while_live_fence_is_injected()
+    -> Result<(), o3k_storage::StorageProviderError> {
         let make = |suffix: &str| StorageCommandEnvelope {
             protocol_version: 1,
             command_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, suffix.as_bytes()),
@@ -1315,13 +1332,14 @@ mod remote_protocol_tests {
             action: StorageAction::CreateVolume,
             canonical_payload_fingerprint: "a".repeat(64),
         };
-        let first = inject_wire_fencing_token(&make("one"), 8).expect("wire envelope");
-        let second = inject_wire_fencing_token(&make("two"), 8).expect("wire envelope");
+        let first = inject_wire_fencing_token(&make("one"), 8)?;
+        let second = inject_wire_fencing_token(&make("two"), 8)?;
         assert_eq!(first.fencing_token, 8);
         assert_eq!(second.fencing_token, 8);
         assert_ne!(first.command_id, second.command_id);
         assert_ne!(first.operation_id, second.operation_id);
         assert_ne!(first.idempotency_key, second.idempotency_key);
+        Ok(())
     }
 
     #[test]

@@ -35,8 +35,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
 use o3k_kernel::{
-    AuthContext, Clock, ManifestRegistry, MeterUsageReport, OwnershipScope, Principal, PrincipalId,
-    ResourceType, ScopeId, ScopeKind, UsageGranularity, UsageQuery, UserPrincipal,
+    AuthContext, Clock, LifecycleMeteringObserver, ManifestRegistry, MeterUsageReport,
+    OwnershipScope, Principal, PrincipalId, ResourceType, ScopeId, ScopeKind, UsageGranularity,
+    UsageQuery, UserPrincipal,
 };
 use o3k_native_api::auth::TokenIssuer;
 use o3k_native_api::metering::MeteringReader;
@@ -565,6 +566,11 @@ async fn volume_application(
         Arc::new(o3kd::native_adapters::ServerReaderAdapter {
             service: compute.clone(),
         });
+    let volume_workflow: Arc<dyn o3k_api::NativeVolumeWorkflow> = Arc::new(TestVolumeWorkflow {
+        store: store.clone(),
+        provider: Some(provider.clone()),
+        metering: Some(adapter.clone()),
+    });
     let application = Arc::new(o3kd::native_adapters::GenericResourceApplication {
         compute,
         image: None,
@@ -582,10 +588,134 @@ async fn volume_application(
         public_allocator: None,
         network_external_realm_id: None,
         attachment_workflow: None,
-        volume_workflow: None,
+        volume_workflow: Some(volume_workflow),
         metering: Some(adapter),
     });
     Ok((descriptor, application))
+}
+
+/// Explicit durable execution fixture for process-level metering tests.  The
+/// production composition supplies the native workflow; tests must configure
+/// the same boundary rather than relying on the removed provider bypass.
+struct TestVolumeWorkflow {
+    store: Arc<O3kStore>,
+    provider: Option<Arc<dyn StorageProvider>>,
+    metering: Option<Arc<o3kd::native_adapters::MeteringAdapter>>,
+}
+
+#[async_trait::async_trait]
+impl o3k_api::NativeVolumeWorkflow for TestVolumeWorkflow {
+    async fn create(&self, volume_id: Uuid) -> Result<(), String> {
+        let current = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("volume missing")?;
+        if let Some(provider) = &self.provider {
+            provider
+                .create_volume(&o3k_storage::StorageVolumeRequest {
+                    volume_id: volume_id.into(),
+                    project_id: current.volume.project_id.clone(),
+                    size_bytes: current.volume.size_bytes,
+                    generation: current.volume.generation,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        let mut creating = current.volume.clone();
+        creating.state = o3k_domain::VolumeState::Creating;
+        creating.generation += 1;
+        let creating = current
+            .volume
+            .clone()
+            .transition(creating)
+            .map_err(|e| e.to_string())?;
+        let record = self
+            .store
+            .update_volume(
+                current.volume.generation,
+                &o3k_store::VolumeRecord {
+                    volume: creating,
+                    created_at: current.created_at,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut available = record.volume.clone();
+        available.state = o3k_domain::VolumeState::Available;
+        available.generation += 1;
+        available.provider_reference = Some(o3k_domain::StorageProviderReference {
+            provider: "test".into(),
+            resource_id: volume_id.to_string(),
+        });
+        self.store
+            .update_volume(
+                record.volume.generation,
+                &o3k_store::VolumeRecord {
+                    volume: record
+                        .volume
+                        .transition(available)
+                        .map_err(|e| e.to_string())?,
+                    created_at: record.created_at,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(metering) = &self.metering {
+            metering
+                .observe_allocation(
+                    o3k_api::VOLUME_ALLOCATION_METER,
+                    &current.volume.project_id,
+                    &volume_id.to_string(),
+                    current.volume.size_bytes,
+                    true,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
+        let current = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("volume missing")?;
+        if current.volume.project_id != project_id {
+            return Err("owner mismatch".into());
+        }
+        if let Some(provider) = &self.provider {
+            provider
+                .delete_volume(&o3k_storage::StorageVolumeRequest {
+                    volume_id: volume_id.into(),
+                    project_id: project_id.into(),
+                    size_bytes: current.volume.size_bytes,
+                    generation: current.volume.generation,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(metering) = &self.metering {
+            metering
+                .observe_allocation(
+                    o3k_api::VOLUME_ALLOCATION_METER,
+                    project_id,
+                    &volume_id.to_string(),
+                    current.volume.size_bytes,
+                    false,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn volume_query(scope: &str, start_ms: i64, end_ms: i64) -> UsageQuery {
@@ -751,6 +881,22 @@ async fn recovery_closes_interrupted_volume_delete() -> TestResult {
         size_bytes: 1024 * 1024 * 1024,
         generation: 1,
     };
+    let current = store
+        .get_volume(volume_id)
+        .await?
+        .ok_or("volume row missing")?;
+    let mut deleting = current.volume.clone();
+    deleting.state = o3k_domain::VolumeState::Deleting;
+    deleting.generation += 1;
+    store
+        .update_volume(
+            current.volume.generation,
+            &o3k_store::VolumeRecord {
+                volume: current.volume.transition(deleting)?,
+                created_at: current.created_at,
+            },
+        )
+        .await?;
     provider
         .delete_volume(&request)
         .await
@@ -816,11 +962,17 @@ async fn cinder_runtime(
     )
     .await?;
     let provider: Arc<dyn StorageProvider> = Arc::new(InMemoryStorageProvider::default());
+    let workflow: Arc<dyn o3k_api::NativeVolumeWorkflow> = Arc::new(TestVolumeWorkflow {
+        store: store.clone(),
+        provider: Some(provider.clone()),
+        metering: Some(adapter.clone()),
+    });
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_storage_store(store)
         .with_storage_provider(provider)
-        .with_metering_observer(adapter);
+        .with_metering_observer(adapter)
+        .with_native_volume_workflow(workflow);
     state.set_ready(true);
     Ok(o3k_api::router_with_state(state))
 }
