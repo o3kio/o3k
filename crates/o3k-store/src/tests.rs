@@ -225,6 +225,27 @@ mod tests {
                 .await
                 .is_err()
         );
+        let unbound = EnrollmentGrantRecord {
+            grant_id: "grant-unbound".into(),
+            agent_id: "node-2".into(),
+            agent_epoch: String::new(),
+            token_digest: "digest-unbound".into(),
+            issued_at_unix_ms: 10,
+            expires_at_unix_ms: 100,
+            used_at_unix_ms: None,
+        };
+        store.insert_enrollment_grant(&unbound).await?;
+        let consumed = store
+            .consume_enrollment_grant("grant-unbound", "epoch-first-use", "digest-unbound", 20)
+            .await?;
+        assert_eq!(consumed.agent_epoch, "epoch-first-use");
+        assert_eq!(consumed.used_at_unix_ms, Some(20));
+        assert!(
+            store
+                .consume_enrollment_grant("grant-unbound", "epoch-replay", "digest-unbound", 21,)
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

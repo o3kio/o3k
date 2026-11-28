@@ -402,6 +402,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     let (ca_key, ca_cert) =
         ensure_ca(&ca_dir, &legacy_key, &legacy_cert).map_err(std::io::Error::other)?;
+    if std::env::args().nth(1).as_deref() == Some("--export-ca") {
+        // Installer-only mode: expose the public trust anchor so the
+        // controller's compute listener can authenticate identities issued
+        // by this installation-local CA. The private key remains root-only.
+        std::io::stdout().write_all(&ca_cert.to_pem()?)?;
+        return Ok(());
+    }
     // systemd socket activation uses stdin/stdout for one connection (Accept=yes).
     let mut input = std::io::stdin().lock();
     let result = peer_ok(&input)

@@ -713,6 +713,11 @@ MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
 mv -f -- "$MANIFEST_TEMP" "$INSTALL_MANIFEST"
 chmod 0644 "$INSTALL_MANIFEST"
 ENV_FILE="$CONFIG_DIR/o3kd.env"
+source "$ROOT_DIR/packaging/config-env.sh"
+# Verify the previous content ledger before generating passwords or migrating
+# any settings. This permits an intentional versioned value update while
+# still rejecting operator edits before they can be overwritten.
+o3k_verify_config_ledger "$CONFIG_DIR"
 O3K_PASSWORD_FILE="$ENV_FILE" \
   O3K_KOLLA_PASSWORD_FILE="${O3K_KOLLA_PASSWORD_FILE:-/etc/kolla/passwords.yml}" \
   bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$ENV_FILE"
@@ -868,15 +873,35 @@ if [[ "$PROFILE" == libvirt ]]; then
   # Listen on 127.0.0.1:18080 like the disposable-testlab path
   # (O3K_LISTEN_ADDR) instead of the default 127.0.0.1:8080; the unit does not
   # hardcode a listen address so this env governs.
+  COMPUTE_CLIENT_CA="$TLS_DIR/ca.pem"
+  if [[ "$EA_INSTALL" == 1 ]]; then
+    # Enrolled compute identities are signed by the root-owned installation
+    # issuer, while the local bootstrap agent uses the bootstrap CA. Trust
+    # both at the controller listener so both identities use the same
+    # authenticated admission path.
+    # The public CA bundle is read by the unprivileged o3kd service. Grant
+    # directory traversal to its group while keeping the issuer CA subdir
+    # itself private (root:root 0700).
+    install -d -m 0750 -o root -g o3k "$CONFIG_DIR/ea"
+    issuer_ca="$("$PREFIX/bin/o3k-enrollment-issuer" --export-ca)" || die "cannot initialize EA enrollment CA"
+    trust_tmp="$(mktemp "$CONFIG_DIR/ea/.compute-client-ca.XXXXXX")"
+    chmod 0600 "$trust_tmp"
+    cat "$TLS_DIR/ca.pem" >"$trust_tmp"
+    printf '\n' >>"$trust_tmp"
+    printf '%s\n' "$issuer_ca" >>"$trust_tmp"
+    chmod 0644 "$trust_tmp"
+    install_owned_system_file "$trust_tmp" "$CONFIG_DIR/ea/compute-client-ca.pem" 0644
+    rm -f "$trust_tmp"
+    COMPUTE_CLIENT_CA="$CONFIG_DIR/ea/compute-client-ca.pem"
+  fi
   for setting in \
     "O3K_PROVIDER=agent" \
     "O3K_LISTEN_ADDR=127.0.0.1:18080" \
     "O3K_COMPUTE_SERVER_CERTIFICATE=$TLS_DIR/server.pem" \
     "O3K_COMPUTE_SERVER_PRIVATE_KEY=$TLS_DIR/server-key.pem" \
-    "O3K_COMPUTE_CLIENT_CA=$TLS_DIR/ca.pem" \
+    "O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA" \
     "O3K_COMPUTE_AUTHORIZED_AGENTS=$(<"$TLS_DIR/agent-id")=$FINGERPRINT"; do
-    key="${setting%%=*}"
-    grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
+    o3k_upsert_env_setting "$ENV_FILE" "$setting"
   done
   # Only authenticated EA installs have the root-owned issuer socket. C1
   # must never inherit these listener settings from a shared environment.
@@ -888,8 +913,7 @@ if [[ "$PROFILE" == libvirt ]]; then
     for setting in \
       "O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443" \
       "O3K_ENROLLMENT_SIGNER=$O3K_ENROLLMENT_SIGNER"; do
-      key="${setting%%=*}"
-      grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
+      o3k_upsert_env_setting "$ENV_FILE" "$setting"
     done
   fi
   # The compute agent reads its identity from ITS data directory
@@ -921,28 +945,6 @@ if [[ "$PROFILE" == libvirt ]]; then
   config_file_specs+=(o3k-compute.env tls/ca.pem tls/server.pem tls/server-key.pem \
     tls/agent.pem tls/agent-key.pem tls/agent-id tls/agent-fingerprint)
 fi
-if [[ -e "$CONFIG_FILE_LEDGER" ]]; then
-  [[ -f "$CONFIG_FILE_LEDGER" && ! -L "$CONFIG_FILE_LEDGER" ]] || {
-    echo "refusing invalid configuration ownership ledger: $CONFIG_FILE_LEDGER" >&2
-    exit 2
-  }
-  while IFS=$'\t' read -r marker relative digest extra; do
-    [[ -z "${extra:-}" && "$marker" == o3k-config-file-v1 && "$relative" != /* \
-      && "$digest" =~ ^[0-9a-f]{64}$ ]] || {
-      echo "refusing malformed configuration ownership ledger: $CONFIG_FILE_LEDGER" >&2
-      exit 2
-    }
-    [[ -f "$CONFIG_DIR/$relative" && ! -L "$CONFIG_DIR/$relative" ]] || {
-      echo "refusing missing configuration file recorded in ledger: $relative" >&2
-      exit 2
-    }
-    [[ "$(sha256sum "$CONFIG_DIR/$relative" | awk '{print $1}')" == "$digest" ]] || {
-      echo "refusing to overwrite operator-modified configuration file: $relative" >&2
-      exit 2
-    }
-  done <"$CONFIG_FILE_LEDGER"
-fi
-
 # Client credentials for the public OpenStack CLI (issue #613 §9). Both files
 # are derived from the daemon environment on every run; the bootstrap password
 # is preserved by generate-passwords.sh, so regeneration never invents a

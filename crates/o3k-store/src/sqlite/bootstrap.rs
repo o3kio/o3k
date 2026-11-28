@@ -143,17 +143,21 @@ impl SqliteStore {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let row = sqlx::query("SELECT grant_id,agent_id,agent_epoch,token_digest,issued_at_unix_ms,expires_at_unix_ms,used_at_unix_ms FROM enrollment_grants WHERE grant_id=?").bind(id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::ResourceNotFound)?;
         let g = grant(row)?;
-        if g.agent_epoch.is_empty()
-            || g.agent_epoch != epoch
+        if epoch.trim().is_empty()
+            || (!g.agent_epoch.is_empty() && g.agent_epoch != epoch)
             || g.token_digest != digest
             || g.used_at_unix_ms.is_some()
             || now >= g.expires_at_unix_ms
         {
             return Err(StoreError::OwnershipConflict);
         }
-        let updated = sqlx::query("UPDATE enrollment_grants SET used_at_unix_ms=? WHERE grant_id=? AND used_at_unix_ms IS NULL")
+        let updated = sqlx::query("UPDATE enrollment_grants SET agent_epoch=?, used_at_unix_ms=? WHERE grant_id=? AND token_digest=? AND used_at_unix_ms IS NULL AND expires_at_unix_ms>? AND (agent_epoch='' OR agent_epoch=?)")
+            .bind(epoch)
             .bind(i64::try_from(now).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?)
             .bind(id)
+            .bind(digest)
+            .bind(i64::try_from(now).map_err(|_| StoreError::Corrupt("grant timestamp overflow".into()))?)
+            .bind(epoch)
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
@@ -162,6 +166,7 @@ impl SqliteStore {
         }
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(EnrollmentGrantRecord {
+            agent_epoch: epoch.to_owned(),
             used_at_unix_ms: Some(now),
             ..g
         })

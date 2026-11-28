@@ -11,7 +11,7 @@ trap cleanup EXIT
 BUNDLE_DIR="$WORK_DIR/bundle"
 mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging" "$BUNDLE_DIR/scripts"
 for file in \
-  install.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
+  install.sh config-env.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
   bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service o3k-network.service 50-o3k-libvirt.rules backup-trust.example.json; do
   cp "$ROOT_DIR/packaging/$file" "$BUNDLE_DIR/packaging/$file"
 done
@@ -94,6 +94,7 @@ CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR
 cmp -s "$BUNDLE_DIR/bin/o3kd" "$PREFIX/bin/o3kd"
 cmp -s "$BUNDLE_DIR/bin/o3k" "$PREFIX/bin/o3k"
 [[ -f "$PREFIX/share/o3k/o3kd.service" ]]
+[[ -f "$BUNDLE_DIR/packaging/config-env.sh" ]]
 [[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]
 cmp -s "$BUNDLE_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json"
 cmp -s "$BUNDLE_DIR/SHA256SUMS" "$PREFIX/share/o3k/SHA256SUMS"
@@ -241,6 +242,9 @@ if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   O3K_RELEASE_DIST_DIR="$ASSET_DIST" \
   O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
     bash "$ROOT_DIR/packaging/make-release.sh" "$ASSET_VERSION" fake
+  cmp -s "$ROOT_DIR/packaging/config-env.sh" \
+    "$ASSET_DIST/o3k-$ASSET_VERSION/packaging/config-env.sh" \
+    || { echo "release bundle config-env.sh is missing or out of sync" >&2; exit 1; }
   [[ -f "$ASSET_DIST/install.sh" && -x "$ASSET_DIST/install.sh" ]] \
     || { echo "install.sh release asset missing or not 0755" >&2; exit 1; }
   cmp -s "$ROOT_DIR/packaging/get-o3k.sh" "$ASSET_DIST/install.sh" \
