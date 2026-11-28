@@ -390,9 +390,18 @@ impl BuildingBlockReader for BuildingBlockAdapter {
             // write is interrupted, the host remains visible but its old
             // credentials are already fenced; retries are idempotent.
             self.persist_revocation(&old.execution_identity).await?;
-            self.agents
-                .revoke_agent_identity(&old.execution_identity)
-                .await?;
+            // Do not let cancellation between durable persistence and the
+            // live fence leave this process admitting the old identity. The
+            // spawned task is independent of the removal future and therefore
+            // completes the fence even if the request is aborted while it is
+            // awaiting the provider operation.
+            let agents = self.agents.clone();
+            let identity = old.execution_identity.clone();
+            tokio::spawn(async move {
+                agents.revoke_agent_identity(&identity).await;
+            })
+            .await
+            .map_err(|error| format!("agent revocation task failed: {error}"))?;
         }
         self.store
             .upsert_building_block_with_audit(
@@ -428,7 +437,6 @@ mod tests {
     struct FakeAgents {
         snapshots: HashMap<String, AgentNodeSnapshot>,
         revoked: std::sync::Mutex<Vec<String>>,
-        fail_next_revoke: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -449,18 +457,10 @@ mod tests {
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
             tokio::sync::broadcast::channel(1).1
         }
-        async fn revoke_agent_identity(&self, agent_id: &str) -> Result<(), String> {
-            if self
-                .fail_next_revoke
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                return Err("injected interruption during agent revocation".to_owned());
+        async fn revoke_agent_identity(&self, agent_id: &str) {
+            if let Ok(mut revoked) = self.revoked.lock() {
+                revoked.push(agent_id.to_owned());
             }
-            self.revoked
-                .lock()
-                .map_err(|_| "revocation test lock poisoned".to_owned())?
-                .push(agent_id.to_owned());
-            Ok(())
         }
     }
 
@@ -536,7 +536,6 @@ mod tests {
             agents: Arc::new(FakeAgents {
                 snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
                 revoked: std::sync::Mutex::new(Vec::new()),
-                fail_next_revoke: std::sync::atomic::AtomicBool::new(false),
             }),
             locations: o3k_kernel::LocationRegistry::default(),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -822,7 +821,6 @@ mod tests {
                 ("agent-b".to_owned(), snapshot("agent-b")),
             ]),
             revoked: std::sync::Mutex::new(Vec::new()),
-            fail_next_revoke: std::sync::atomic::AtomicBool::new(false),
         };
         let agents = Arc::new(agents);
         let adapter = BuildingBlockAdapter {
@@ -873,37 +871,6 @@ mod tests {
             .await?
             .ok_or("block-a missing")?
             .block()?;
-        agents
-            .fail_next_revoke
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            adapter
-                .transition(
-                    "block-a",
-                    o3k_kernel::BuildingBlockState::Removed,
-                    draining.generation,
-                    vec![],
-                    &auth,
-                )
-                .await
-                .is_err()
-        );
-        let interrupted_revocation = store
-            .get_bootstrap_state("default")
-            .await?
-            .ok_or("bootstrap state missing after interrupted removal")?;
-        let interrupted_revoked: BTreeMap<String, bool> =
-            serde_json::from_str(&interrupted_revocation.revoked_agents)?;
-        assert_eq!(interrupted_revoked.get("agent-a"), Some(&true));
-        assert_eq!(
-            store
-                .get_building_block("block-a")
-                .await?
-                .ok_or("block-a missing after interrupted removal")?
-                .block()?
-                .state,
-            o3k_kernel::BuildingBlockState::Draining
-        );
         adapter
             .transition(
                 "block-a",
