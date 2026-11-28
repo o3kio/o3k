@@ -158,6 +158,10 @@ mod reconciler_tests {
             let (_, receiver) = tokio::sync::broadcast::channel(1);
             receiver
         }
+
+        async fn revoke_agent_identity(&self, agent_id: &str) {
+            self.nodes.write().await.remove(agent_id);
+        }
     }
 
     impl TestAgentRegistry {

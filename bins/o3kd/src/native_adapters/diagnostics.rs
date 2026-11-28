@@ -852,6 +852,7 @@ mod tests {
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
             tokio::sync::broadcast::channel(1).1
         }
+        async fn revoke_agent_identity(&self, _agent_id: &str) {}
         async fn observed_at_unix_ms(&self, agent_id: &str) -> Option<i64> {
             self.nodes
                 .lock()

@@ -1436,6 +1436,7 @@ mod tests {
             let (_, receiver) = tokio::sync::broadcast::channel(1);
             receiver
         }
+        async fn revoke_agent_identity(&self, _agent_id: &str) {}
     }
 
     impl FakeAgentRegistry {

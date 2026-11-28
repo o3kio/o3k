@@ -8,13 +8,16 @@ use o3k_kernel::{
 use o3k_native_api::building_block::{BuildingBlockReader, BuildingBlockView, CapacityDimension};
 use o3k_placement::{PlacementLedger, ProviderState};
 use o3k_provider::AgentNodeRegistry;
-use o3k_store::{AuditEventRecord, BuildingBlockRecord, ComputeRepository, O3kStore};
+use o3k_store::{
+    AuditEventRecord, BootstrapRepository, BuildingBlockRecord, ComputeRepository, O3kStore,
+};
 
 pub struct BuildingBlockAdapter {
     pub store: Arc<O3kStore>,
     pub placement: PlacementLedger,
     pub agents: Arc<dyn AgentNodeRegistry>,
     pub locations: LocationRegistry,
+    pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn now() -> String {
@@ -22,6 +25,27 @@ fn now() -> String {
 }
 
 impl BuildingBlockAdapter {
+    async fn persist_revocation(&self, agent_id: &str) -> Result<(), String> {
+        let Some(mut state) = self
+            .store
+            .get_bootstrap_state("default")
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("bootstrap state is missing".to_owned());
+        };
+        let mut revoked: BTreeMap<String, bool> = serde_json::from_str(&state.revoked_agents)
+            .map_err(|_| "bootstrap revocation state is corrupt".to_owned())?;
+        revoked.insert(agent_id.to_owned(), true);
+        state.revoked_agents =
+            serde_json::to_string(&revoked).map_err(|error| error.to_string())?;
+        self.store
+            .upsert_bootstrap_state(&state)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// Project lifecycle gates into Placement, which remains the scheduling
     /// authority. The projection must be durable before a drain races with a
     /// new create.
@@ -247,6 +271,76 @@ impl BuildingBlockAdapter {
         })
         .collect())
     }
+
+    /// Apply a building-block transition when the caller already holds
+    /// `lifecycle_lock`. Bootstrap join shares that lock across enrollment and
+    /// readiness publication, so it must not call the lock-taking trait entry
+    /// point recursively.
+    pub(super) async fn transition_locked(
+        &self,
+        id: &str,
+        target: BuildingBlockState,
+        expected_generation: u64,
+        auth: &AuthContext,
+    ) -> Result<BuildingBlockView, String> {
+        let current = self
+            .store
+            .get_building_block(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "building block not found".to_owned())?;
+        let old = current.block().map_err(|e| e.to_string())?;
+        if old.generation != expected_generation {
+            return Err("stale generation".into());
+        }
+        let blockers = if matches!(
+            target,
+            BuildingBlockState::Draining | BuildingBlockState::Removed
+        ) {
+            self.derived_blockers(&old).await?
+        } else {
+            Vec::new()
+        };
+        let next = old
+            .transition(target, blockers)
+            .map_err(|e| e.to_string())?;
+        let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
+        let projected_state = match target {
+            BuildingBlockState::Enrolling => Some(ProviderState::Unavailable),
+            BuildingBlockState::Ready => None,
+            BuildingBlockState::Unavailable | BuildingBlockState::Failed => {
+                Some(ProviderState::Unavailable)
+            }
+            BuildingBlockState::Draining => Some(ProviderState::Draining),
+            BuildingBlockState::Removed => Some(ProviderState::Deleted),
+        };
+        if let Some(state) = projected_state {
+            self.project_provider_state(&old, state).await?;
+        }
+        if target == BuildingBlockState::Removed {
+            self.persist_revocation(&old.execution_identity).await?;
+            let agents = self.agents.clone();
+            let identity = old.execution_identity.clone();
+            tokio::spawn(async move {
+                agents.revoke_agent_identity(&identity).await;
+            })
+            .await
+            .map_err(|error| format!("agent revocation task failed: {error}"))?;
+        }
+        self.store
+            .upsert_building_block_with_audit(
+                &record,
+                Some(old.generation),
+                &self.audit(&next, auth, "ManageBuildingBlock"),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if target == BuildingBlockState::Ready {
+            self.project_provider_state(&next, ProviderState::Enabled)
+                .await?;
+        }
+        self.view(next).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -323,57 +417,10 @@ impl BuildingBlockReader for BuildingBlockAdapter {
         _blockers: Vec<DrainBlocker>,
         auth: &AuthContext,
     ) -> Result<BuildingBlockView, String> {
-        let current = self
-            .store
-            .get_building_block(id)
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        let _ = _blockers;
+        self.transition_locked(id, target, expected_generation, auth)
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "building block not found".to_owned())?;
-        let old = current.block().map_err(|e| e.to_string())?;
-        if old.generation != expected_generation {
-            return Err("stale generation".into());
-        }
-        let blockers = if matches!(
-            target,
-            BuildingBlockState::Draining | BuildingBlockState::Removed
-        ) {
-            self.derived_blockers(&old).await?
-        } else {
-            Vec::new()
-        };
-        let next = old
-            .transition(target, blockers)
-            .map_err(|e| e.to_string())?;
-        let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
-        // Close capacity before recording a drain/unavailable/removal
-        // transition. If the block write fails, remaining closed is
-        // fail-safe and prevents new work from entering the requested drain.
-        let projected_state = match target {
-            BuildingBlockState::Enrolling => Some(ProviderState::Unavailable),
-            BuildingBlockState::Ready => None,
-            BuildingBlockState::Unavailable | BuildingBlockState::Failed => {
-                Some(ProviderState::Unavailable)
-            }
-            BuildingBlockState::Draining => Some(ProviderState::Draining),
-            BuildingBlockState::Removed => Some(ProviderState::Deleted),
-        };
-        if let Some(state) = projected_state {
-            self.project_provider_state(&old, state).await?;
-        }
-        self.store
-            .upsert_building_block_with_audit(
-                &record,
-                Some(old.generation),
-                &self.audit(&next, auth, "ManageBuildingBlock"),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        // Capacity is reopened only after the durable block reaches Ready.
-        if target == BuildingBlockState::Ready {
-            self.project_provider_state(&next, ProviderState::Enabled)
-                .await?;
-        }
-        self.view(next).await
     }
 }
 
@@ -386,13 +433,16 @@ mod tests {
         AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentEpochLease,
         AgentEvent, AgentNodeRegistry, AgentNodeSnapshot,
     };
-    use o3k_store::{DurableStore, ResourceRecord};
+    use o3k_store::{BootstrapRepository, BootstrapStateRecord, DurableStore, ResourceRecord};
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
     use uuid::Uuid;
 
     struct FakeAgents {
         snapshots: HashMap<String, AgentNodeSnapshot>,
+        revoked: std::sync::Mutex<Vec<String>>,
+        revoke_started: Option<Arc<tokio::sync::Notify>>,
+        revoke_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait::async_trait]
@@ -412,6 +462,17 @@ mod tests {
         }
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
             tokio::sync::broadcast::channel(1).1
+        }
+        async fn revoke_agent_identity(&self, agent_id: &str) {
+            if let Some(started) = &self.revoke_started {
+                started.notify_one();
+            }
+            if let Some(release) = &self.revoke_release {
+                release.notified().await;
+            }
+            if let Ok(mut revoked) = self.revoked.lock() {
+                revoked.push(agent_id.to_owned());
+            }
         }
     }
 
@@ -461,6 +522,7 @@ mod tests {
         Box<dyn std::error::Error>,
     > {
         let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        initialize_bootstrap_state(&store).await?;
         let placement = o3k_placement::PlacementLedger::open(
             std::env::temp_dir().join(format!("o3k-bb-drain-{}", Uuid::now_v7())),
             store.clone(),
@@ -485,8 +547,12 @@ mod tests {
             placement,
             agents: Arc::new(FakeAgents {
                 snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
+                revoked: std::sync::Mutex::new(Vec::new()),
+                revoke_started: None,
+                revoke_release: None,
             }),
             locations: o3k_kernel::LocationRegistry::default(),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let auth = operator_context();
         adapter
@@ -511,6 +577,25 @@ mod tests {
             )
             .await?;
         Ok((store, adapter))
+    }
+
+    async fn initialize_bootstrap_state(
+        store: &o3k_store::O3kStore,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .upsert_bootstrap_state(&BootstrapStateRecord {
+                state_id: "default".to_owned(),
+                generation: 1,
+                phase: "initialized".to_owned(),
+                cloud_identity_id: "cloud-default".to_owned(),
+                cloud_profile_id: "default".to_owned(),
+                enrolled_agents: "{}".to_owned(),
+                enrolled_agent_epochs: "{}".to_owned(),
+                revoked_agents: "{}".to_owned(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await?;
+        Ok(())
     }
 
     fn drain_workload_blockers(view: &o3k_native_api::building_block::BuildingBlockView) -> u64 {
@@ -722,6 +807,7 @@ mod tests {
     async fn removed_block_leaves_operator_list_but_stays_durable()
     -> Result<(), Box<dyn std::error::Error>> {
         let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        initialize_bootstrap_state(&store).await?;
         let placement = o3k_placement::PlacementLedger::open(
             std::env::temp_dir().join(format!("o3k-bb-list-{}", Uuid::now_v7())),
             store.clone(),
@@ -748,12 +834,17 @@ mod tests {
                 ("agent-a".to_owned(), snapshot("agent-a")),
                 ("agent-b".to_owned(), snapshot("agent-b")),
             ]),
+            revoked: std::sync::Mutex::new(Vec::new()),
+            revoke_started: None,
+            revoke_release: None,
         };
+        let agents = Arc::new(agents);
         let adapter = BuildingBlockAdapter {
             store: store.clone(),
             placement,
-            agents: Arc::new(agents),
+            agents: agents.clone(),
             locations: o3k_kernel::LocationRegistry::default(),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let auth = operator_context();
 
@@ -806,6 +897,19 @@ mod tests {
             )
             .await?;
 
+        let bootstrap = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing after host removal")?;
+        let revoked: BTreeMap<String, bool> = serde_json::from_str(&bootstrap.revoked_agents)?;
+        assert_eq!(revoked.get("agent-a"), Some(&true));
+        let live_revocations = agents
+            .revoked
+            .lock()
+            .map_err(|_| "revocation test lock poisoned")?
+            .clone();
+        assert_eq!(live_revocations, vec!["agent-a"]);
+
         // The durable tombstone stays for audit...
         let tombstone = store
             .get_building_block("block-a")
@@ -821,6 +925,113 @@ mod tests {
             .map(|view| view.block.id)
             .collect();
         assert_eq!(listed, BTreeSet::from(["block-b".to_owned()]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_removal_still_completes_live_agent_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        initialize_bootstrap_state(&store).await?;
+        let placement = o3k_placement::PlacementLedger::open(
+            std::env::temp_dir().join(format!("o3k-bb-cancel-{}", Uuid::now_v7())),
+            store.clone(),
+        )
+        .await?;
+        placement
+            .register_provider(
+                "agent-a",
+                BTreeMap::from([(
+                    "VCPU".to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                )]),
+            )
+            .await?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agents = Arc::new(FakeAgents {
+            snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
+            revoked: std::sync::Mutex::new(Vec::new()),
+            revoke_started: Some(started.clone()),
+            revoke_release: Some(release.clone()),
+        });
+        let adapter = BuildingBlockAdapter {
+            store: store.clone(),
+            placement,
+            agents: agents.clone(),
+            locations: o3k_kernel::LocationRegistry::default(),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let auth = operator_context();
+        adapter
+            .enroll(
+                o3k_kernel::BuildingBlock::enrolling(
+                    "block-a",
+                    "agent-a",
+                    vec!["agent-a".to_owned()],
+                    None,
+                    None,
+                )?,
+                &auth,
+            )
+            .await?;
+        let ready = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Ready,
+                1,
+                vec![],
+                &auth,
+            )
+            .await?;
+        adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                ready.block.generation,
+                vec![],
+                &auth,
+            )
+            .await?;
+        let draining = store
+            .get_building_block("block-a")
+            .await?
+            .ok_or("block-a missing after drain")?
+            .block()?;
+        let removal = tokio::spawn({
+            let adapter = adapter;
+            async move {
+                adapter
+                    .transition(
+                        "block-a",
+                        o3k_kernel::BuildingBlockState::Removed,
+                        draining.generation,
+                        vec![],
+                        &auth,
+                    )
+                    .await
+            }
+        });
+        started.notified().await;
+        removal.abort();
+        release.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let bootstrap = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing after cancellation")?;
+        let revoked: BTreeMap<String, bool> = serde_json::from_str(&bootstrap.revoked_agents)?;
+        assert_eq!(revoked.get("agent-a"), Some(&true));
+        let live_revocations = agents
+            .revoked
+            .lock()
+            .map_err(|_| "revocation test lock poisoned")?;
+        assert_eq!(live_revocations.as_slice(), ["agent-a"]);
         Ok(())
     }
 

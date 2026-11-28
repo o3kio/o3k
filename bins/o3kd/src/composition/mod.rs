@@ -2050,55 +2050,58 @@ pub async fn build_composition_with_guard(
         server_reader,
         volume_reader,
         network_reader,
-    )?
-    .with_bootstrap_workflow(std::sync::Arc::new(
-        crate::native_adapters::BootstrapAdapter {
-            store: store.clone(),
-            placement: placement.clone(),
-            agents: std::sync::Arc::new(registry.clone()),
-            locations: native_locations.clone(),
-            bootstrap_secret: config
-                .bootstrap_secret()
-                .map(|secret| secret.expose().to_owned()),
-            lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            readiness: state.clone(),
-        },
-    ))
-    .with_composition_reader(std::sync::Arc::new(
-        crate::native_adapters::CloudProfileAdapter {
-            store: store.clone(),
-            registry: canonical_manifest_registry.clone(),
-        },
-    ))
-    .with_building_block_reader(std::sync::Arc::new(
-        crate::native_adapters::BuildingBlockAdapter {
-            store: store.clone(),
-            placement: placement.clone(),
-            agents: std::sync::Arc::new(registry.clone()),
-            locations: native_locations.clone(),
-        },
-    ))
-    .with_locations(std::sync::Arc::new(
-        o3k_native_api::topology::TopologyGuard::new(native_locations.clone()),
-    ))
-    .with_topology_store(store.clone())
-    .with_operation_reader(operation_reader)
-    .with_quota_reader(std::sync::Arc::new(
-        crate::native_adapters::QuotaReaderAdapter::new(store.clone()),
-    ))
-    .with_audit_reader(std::sync::Arc::new(
-        crate::native_adapters::AuditReaderAdapter {
-            store: store.clone(),
-        },
-    ))
-    .with_governance_reader(std::sync::Arc::new(
-        crate::native_adapters::GovernanceReaderAdapter {
-            store: native_api_store.clone(),
-            identity: governance_identity,
-        },
-    ))
-    .with_resource_application(generic_application)
-    .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+    )?;
+    let lifecycle_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let native_state = native_state
+        .with_bootstrap_workflow(std::sync::Arc::new(
+            crate::native_adapters::BootstrapAdapter {
+                store: store.clone(),
+                placement: placement.clone(),
+                agents: std::sync::Arc::new(registry.clone()),
+                locations: native_locations.clone(),
+                bootstrap_secret: config
+                    .bootstrap_secret()
+                    .map(|secret| secret.expose().to_owned()),
+                lock: lifecycle_lock.clone(),
+                readiness: state.clone(),
+            },
+        ))
+        .with_composition_reader(std::sync::Arc::new(
+            crate::native_adapters::CloudProfileAdapter {
+                store: store.clone(),
+                registry: canonical_manifest_registry.clone(),
+            },
+        ))
+        .with_building_block_reader(std::sync::Arc::new(
+            crate::native_adapters::BuildingBlockAdapter {
+                store: store.clone(),
+                placement: placement.clone(),
+                agents: std::sync::Arc::new(registry.clone()),
+                locations: native_locations.clone(),
+                lifecycle_lock,
+            },
+        ))
+        .with_locations(std::sync::Arc::new(
+            o3k_native_api::topology::TopologyGuard::new(native_locations.clone()),
+        ))
+        .with_topology_store(store.clone())
+        .with_operation_reader(operation_reader)
+        .with_quota_reader(std::sync::Arc::new(
+            crate::native_adapters::QuotaReaderAdapter::new(store.clone()),
+        ))
+        .with_audit_reader(std::sync::Arc::new(
+            crate::native_adapters::AuditReaderAdapter {
+                store: store.clone(),
+            },
+        ))
+        .with_governance_reader(std::sync::Arc::new(
+            crate::native_adapters::GovernanceReaderAdapter {
+                store: native_api_store.clone(),
+                identity: governance_identity,
+            },
+        ))
+        .with_resource_application(generic_application)
+        .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     let native_lifecycle_registry = native_state
         .lifecycle_registry()
         .ok_or_else(|| "lifecycle registry not configured".to_owned())?;
