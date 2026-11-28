@@ -729,6 +729,11 @@ fi
 if [[ "$STORAGE_ENABLED" == 1 ]]; then
   install_owned_file "$STORAGE_BINARY" "$PREFIX/bin/o3k-storage-bin" bin/o3k-storage 0755
   install_owned_file "$ROOT_DIR/packaging/o3k-storage.service" "$PREFIX/share/o3k/o3k-storage.service" share/o3k/o3k-storage.service 0644
+  if [[ $EUID -eq 0 ]]; then
+    install -o root -g root -m 0755 "$ROOT_DIR/packaging/o3k-sync-storage-epoch" /usr/local/libexec/o3k-sync-storage-epoch
+    install -o root -g root -m 0440 "$ROOT_DIR/packaging/o3k-sync-storage-epoch.sudoers" /etc/sudoers.d/o3k-sync-storage-epoch
+    visudo -cf /etc/sudoers.d/o3k-sync-storage-epoch >/dev/null
+  fi
   INSTALLED_FILES+=(bin/o3k-storage share/o3k/o3k-storage.service)
   if [[ $EUID -eq 0 ]]; then
     install -d -o root -g root -m 0700 /var/lib/o3k/storage

@@ -127,24 +127,15 @@ fn sync_storage_epoch_after_join(epoch: &str) -> Result<(), String> {
     if !storage.exists() {
         return Ok(());
     }
-    let changed = sync_storage_epoch_at(&storage, Path::new("/etc/o3k/o3kd.env"), epoch)?;
-    if changed {
-        let status = std::process::Command::new("systemctl")
-            .args(["restart", "o3k-storage.service"])
-            .status()
-            .map_err(|e| format!("cannot restart storage executor: {e}"))?;
-        if !status.success() {
-            return Err("storage executor restart failed".to_owned());
-        }
-        let status = std::process::Command::new("systemctl")
-            .args(["restart", "o3kd.service"])
-            .status()
-            .map_err(|e| format!("cannot restart controller: {e}"))?;
-        if !status.success() {
-            return Err("controller restart failed".to_owned());
-        }
+    let status = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/libexec/o3k-sync-storage-epoch", epoch])
+        .status()
+        .map_err(|e| format!("cannot invoke storage epoch helper: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("storage epoch helper failed; join admission denied".to_owned())
     }
-    Ok(())
 }
 
 /// Returns the effective API base URL from environment or default.
