@@ -2495,8 +2495,8 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn corrupt_durable_revocation_metadata_fails_closed() {
-        let bootstrap = o3k_store::BootstrapStateRecord {
+    fn corrupt_durable_admission_metadata_fails_closed() {
+        let mut bootstrap = o3k_store::BootstrapStateRecord {
             state_id: "default".into(),
             generation: 3,
             phase: "ready".into(),
@@ -2504,10 +2504,31 @@ mod tests {
             cloud_profile_id: "default".into(),
             enrolled_agents: r#"{"host-a":"fingerprint"}"#.into(),
             enrolled_agent_epochs: r#"{"host-a":"epoch-1"}"#.into(),
-            revoked_agents: "not-json".into(),
+            revoked_agents: r#"{"host-a":true}"#.into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         };
-        assert!(durable_admission_metadata(&bootstrap).is_err());
+        for (field, value) in [
+            ("enrolled_agents", "not-json"),
+            ("enrolled_agents", "[\"host-a\"]"),
+            ("enrolled_agent_epochs", "not-json"),
+            ("enrolled_agent_epochs", "[\"epoch-1\"]"),
+            ("revoked_agents", "not-json"),
+            ("revoked_agents", "[\"host-a\"]"),
+        ] {
+            match field {
+                "enrolled_agents" => bootstrap.enrolled_agents = value.into(),
+                "enrolled_agent_epochs" => bootstrap.enrolled_agent_epochs = value.into(),
+                "revoked_agents" => bootstrap.revoked_agents = value.into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                durable_admission_metadata(&bootstrap).is_err(),
+                "{field} value should fail closed: {value}"
+            );
+            bootstrap.enrolled_agents = r#"{"host-a":"fingerprint"}"#.into();
+            bootstrap.enrolled_agent_epochs = r#"{"host-a":"epoch-1"}"#.into();
+            bootstrap.revoked_agents = r#"{"host-a":true}"#.into();
+        }
     }
 
     #[derive(Clone, Default)]
