@@ -2,7 +2,8 @@
 # scripts/build-release-binaries-debian12.sh — build the release binaries on
 # the Debian 12 (bookworm) glibc 2.36 baseline
 #
-# The release binaries (o3kd, o3k, o3k-compute-bin --features libvirt) must
+# The release binaries (o3kd, o3k, o3k-compute-bin --features libvirt,
+# o3k-network, o3k-enrollment-issuer) must
 # execute
 # on every advertised target: Ubuntu 24.04 and Debian 12. Debian 12 ships
 # glibc 2.36, so a binary built on a newer baseline (Ubuntu 24.04's glibc
@@ -24,7 +25,8 @@
 #
 # Usage: bash scripts/build-release-binaries-debian12.sh [OUTPUT_DIR]
 #   OUTPUT_DIR defaults to $ROOT_DIR/target/release-debian12 and receives
-#   o3kd, o3k, o3k-compute, SHA256SUMS, glibc-floor.txt, and build-info.txt.
+#   o3kd, o3k, o3k-compute, o3k-network, o3k-enrollment-issuer, SHA256SUMS,
+#   glibc-floor.txt, and build-info.txt.
 #   Then assemble the release bundle from the baseline binaries:
 #     O3K_RELEASE_BINARIES_DIR="$OUTPUT_DIR" \
 #       packaging/make-release.sh VERSION libvirt
@@ -93,7 +95,7 @@ mkdir -p "$ROOTFS/build"
 (cd "$ROOT_DIR" && tar -cf - Cargo.toml Cargo.lock rust-toolchain.toml bins crates proto contracts packaging) \
   | tar -xf - -C "$ROOTFS/build"
 
-echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt, o3k-network)"
+echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt, o3k-network, o3k-enrollment-issuer)"
 chroot "$ROOTFS" /bin/bash -c '
   set -Eeuo pipefail
   cd /build
@@ -101,6 +103,7 @@ chroot "$ROOTFS" /bin/bash -c '
   cargo build --release --locked --bin o3kd --bin o3k
   cargo build --release --locked --features libvirt --bin o3k-compute-bin
   cargo build --release --locked --bin o3k-network-bin
+  cargo build --release --locked --bin o3k-enrollment-issuer
   rustc --version > rustc-version.txt
 '
 
@@ -109,7 +112,8 @@ install -m 0755 "$ROOTFS/build/target/release/o3kd" "$OUTPUT_DIR/o3kd"
 install -m 0755 "$ROOTFS/build/target/release/o3k" "$OUTPUT_DIR/o3k"
 install -m 0755 "$ROOTFS/build/target/release/o3k-compute-bin" "$OUTPUT_DIR/o3k-compute"
 install -m 0755 "$ROOTFS/build/target/release/o3k-network-bin" "$OUTPUT_DIR/o3k-network"
-(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute o3k-network > SHA256SUMS)
+install -m 0755 "$ROOTFS/build/target/release/o3k-enrollment-issuer" "$OUTPUT_DIR/o3k-enrollment-issuer"
+(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute o3k-network o3k-enrollment-issuer > SHA256SUMS)
 
 echo "==> recording the glibc floor proof (checked with the host readelf)"
 {
@@ -117,7 +121,7 @@ echo "==> recording the glibc floor proof (checked with the host readelf)"
   echo "rootfs Debian version: $(cat "$ROOTFS/etc/debian_version")"
   echo "rust toolchain: $(cat "$ROOTFS/build/rustc-version.txt") (rust-toolchain.toml channel $CHANNEL)"
   echo "source commit: $(git -C "$ROOT_DIR" rev-parse HEAD)"
-  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$OUTPUT_DIR/o3kd" "$OUTPUT_DIR/o3k" "$OUTPUT_DIR/o3k-compute"
+  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$OUTPUT_DIR/o3kd" "$OUTPUT_DIR/o3k" "$OUTPUT_DIR/o3k-compute" "$OUTPUT_DIR/o3k-network" "$OUTPUT_DIR/o3k-enrollment-issuer"
 } | tee "$OUTPUT_DIR/glibc-floor.txt"
 {
   echo "rootfs: Debian $SUITE (bookworm)"

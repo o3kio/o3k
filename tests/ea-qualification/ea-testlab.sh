@@ -213,7 +213,7 @@ ssh_guest() {
   ssh -i "$SSH_KEY" \
     -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$KNOWN_HOSTS" -o HostKeyAlias="$domain" \
-    "o3k@$ip" "$@"
+    "ubuntu@$ip" "$@"
 }
 
 provision() {
@@ -321,7 +321,7 @@ EOF
 #cloud-config
 hostname: $domain
 users:
-  - name: o3k
+  - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     groups: [sudo, kvm]

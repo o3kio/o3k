@@ -109,6 +109,8 @@ if [[ -n "$BINARIES_DIR" ]]; then
     # the o3k-small-edge-v1 boundary (PP.1 resolution of the PP.0 gap).
     [[ -f "$BINARIES_DIR/o3k-network" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3k-network" >&2; exit 2; }
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3k-network"
+    [[ -f "$BINARIES_DIR/o3k-enrollment-issuer" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3k-enrollment-issuer" >&2; exit 2; }
+    bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3k-enrollment-issuer"
   fi
 else
   cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
@@ -131,6 +133,7 @@ if [[ -n "$BINARIES_DIR" ]]; then
   if [[ "$PROFILE" == libvirt ]]; then
     install -m 0755 "$BINARIES_DIR/o3k-compute" "$OUT_DIR/bin/o3k-compute"
     install -m 0755 "$BINARIES_DIR/o3k-network" "$OUT_DIR/bin/o3k-network"
+    install -m 0755 "$BINARIES_DIR/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-enrollment-issuer"
   fi
 else
   install -m 0755 "$ROOT_DIR/target/release/o3kd" "$OUT_DIR/bin/o3kd"
