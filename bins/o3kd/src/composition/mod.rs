@@ -254,6 +254,41 @@ fn unix_time_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+/// Parse the durable admission projection before rehydrating the live agent
+/// registry.  These fields are security authority, so malformed persisted
+/// JSON must fail startup instead of silently authorizing an incomplete set.
+fn durable_admission_metadata(
+    bootstrap: &o3k_store::BootstrapStateRecord,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, bool>,
+    ),
+    std::io::Error,
+> {
+    Ok((
+        serde_json::from_str(&bootstrap.enrolled_agents).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid durable bootstrap enrolled_agents: {error}"),
+            )
+        })?,
+        serde_json::from_str(&bootstrap.enrolled_agent_epochs).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid durable bootstrap enrolled_agent_epochs: {error}"),
+            )
+        })?,
+        serde_json::from_str(&bootstrap.revoked_agents).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid durable bootstrap revoked_agents: {error}"),
+            )
+        })?,
+    ))
+}
+
 /// Resolve the native LVM provider configuration from the three `O3K_LVM_*`
 /// environment values. Unset and set-but-empty values both mean "provider not
 /// configured"; a partial configuration (some values set, others unset or
@@ -1248,12 +1283,7 @@ pub async fn build_composition_with_guard(
     // only certificate fingerprints, so no private or certificate material is
     // loaded at restart and environment configuration cannot override it.
     if let Some(bootstrap) = store.get_bootstrap_state("default").await? {
-        let enrolled: std::collections::BTreeMap<String, String> =
-            serde_json::from_str(&bootstrap.enrolled_agents).unwrap_or_default();
-        let epochs: std::collections::BTreeMap<String, String> =
-            serde_json::from_str(&bootstrap.enrolled_agent_epochs).unwrap_or_default();
-        let revoked: std::collections::BTreeMap<String, bool> =
-            serde_json::from_str(&bootstrap.revoked_agents).unwrap_or_default();
+        let (enrolled, epochs, revoked) = durable_admission_metadata(&bootstrap)?;
         for (agent_id, fingerprint) in enrolled {
             if revoked.get(&agent_id).copied().unwrap_or(false) {
                 tracing::info!(agent_id = %agent_id, "not rehydrating revoked compute identity");
@@ -2454,8 +2484,8 @@ mod pp4_endpoint_lifecycle;
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonCreateResolver, NetworkBindingProjector, locations_from_declarations,
-        placement_consumer_ids, resolve_native_lvm_config,
+        DaemonCreateResolver, NetworkBindingProjector, durable_admission_metadata,
+        locations_from_declarations, placement_consumer_ids, resolve_native_lvm_config,
     };
     use crate::composition::compute::validate_inspect_probe_paths;
     use o3k_compute::PortBindingProjector;
@@ -2463,6 +2493,22 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    #[test]
+    fn corrupt_durable_revocation_metadata_fails_closed() {
+        let bootstrap = o3k_store::BootstrapStateRecord {
+            state_id: "default".into(),
+            generation: 3,
+            phase: "ready".into(),
+            cloud_identity_id: "cloud".into(),
+            cloud_profile_id: "default".into(),
+            enrolled_agents: r#"{"host-a":"fingerprint"}"#.into(),
+            enrolled_agent_epochs: r#"{"host-a":"epoch-1"}"#.into(),
+            revoked_agents: "not-json".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        assert!(durable_admission_metadata(&bootstrap).is_err());
+    }
 
     #[derive(Clone, Default)]
     struct RecordingNetworkDispatcher {
