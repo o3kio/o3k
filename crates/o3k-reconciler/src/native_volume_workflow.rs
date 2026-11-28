@@ -94,6 +94,8 @@ where
                 Err(StorageProviderError::NotFound)
                     if record.envelope.action == StorageAction::DeleteVolume =>
                 {
+                    self.converge_recovered_volume(&payload, StorageAction::DeleteVolume, None)
+                        .await?;
                     self.store
                         .update_agent_command(
                             &command.command_id,
@@ -129,6 +131,13 @@ where
                 _ => false,
             };
             if converged {
+                let reference = if record.envelope.action == StorageAction::CreateVolume {
+                    Some(observed.provider_reference.clone())
+                } else {
+                    None
+                };
+                self.converge_recovered_volume(&payload, record.envelope.action, reference)
+                    .await?;
                 self.store
                     .update_agent_command(
                         &command.command_id,
@@ -150,6 +159,53 @@ where
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    async fn converge_recovered_volume(
+        &self,
+        payload: &o3k_domain::StorageVolumeCommandPayload,
+        action: StorageAction,
+        provider_reference: Option<o3k_domain::StorageProviderReference>,
+    ) -> Result<(), NativeVolumeWorkflowError> {
+        let current = self
+            .store
+            .get_volume(payload.volume_id.as_uuid())
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if current.volume.project_id != payload.project_id
+            || current.volume.size_bytes != payload.size_bytes
+        {
+            return Err(NativeVolumeWorkflowError::Invalid);
+        }
+        let target = match action {
+            StorageAction::CreateVolume => VolumeState::Available,
+            StorageAction::DeleteVolume => VolumeState::Deleted,
+            _ => return Err(NativeVolumeWorkflowError::Invalid),
+        };
+        if current.volume.state == target {
+            return Ok(());
+        }
+        let mut next = current.volume.clone();
+        next.state = target;
+        next.generation = current.volume.generation.saturating_add(1);
+        if let Some(reference) = provider_reference {
+            next.provider_reference = Some(reference);
+        }
+        let next = current
+            .volume
+            .clone()
+            .transition(next)
+            .map_err(|_| NativeVolumeWorkflowError::Invalid)?;
+        self.store
+            .update_volume(
+                current.volume.generation,
+                &VolumeRecord {
+                    volume: next,
+                    created_at: current.created_at.clone(),
+                },
+            )
+            .await?;
         Ok(())
     }
 
