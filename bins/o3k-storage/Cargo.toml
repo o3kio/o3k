@@ -23,6 +23,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 o3k-controller-protocol = { path = "../../crates/o3k-controller-protocol" }
 tempfile.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

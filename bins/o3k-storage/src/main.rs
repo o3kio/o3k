@@ -83,11 +83,27 @@ impl StorageExecutor for Executor {
                 "storage payload does not match command envelope",
             ));
         }
-        if let Some(existing) = self
+        if self
             .journal
-            .get(&envelope.idempotency_key)
+            .get_envelope(&envelope.idempotency_key)
             .map_err(|_| Status::internal("journal lookup failed"))?
+            .is_some()
         {
+            // Re-enter the journal's authoritative replay path. This checks
+            // exact envelope identity, the configured agent epoch, and the
+            // current durable controller fence before returning an outcome.
+            let existing = self
+                .journal
+                .accept(envelope.clone(), &self.agent_id, &self.agent_epoch)
+                .map_err(|error| match error {
+                    o3k_storage::StorageJournalError::Conflict => Status::failed_precondition(
+                        "storage idempotency key conflicts with an existing command",
+                    ),
+                    o3k_storage::StorageJournalError::Stale => {
+                        Status::failed_precondition("storage command fence is stale")
+                    }
+                    _ => Status::internal("journal replay validation failed"),
+                })?;
             // Accepted/Running means the provider side effect may have happened
             // before this process lost the response.  Never replay a mutation
             // blindly: return an explicit unknown outcome for controller

@@ -118,17 +118,17 @@ impl StorageJournal {
         // ControllerEpoch identifies the process session, but is not the
         // takeover fence.  Durable WorkLease fencing_token is authoritative;
         // a restarted controller may present a new session epoch.
+        // Reject stale-fence replays before the idempotency fast path. A
+        // replaced controller must not revive an old command by reusing its
+        // key.
+        if *current_token != 0 && envelope.fencing_token < *current_token {
+            return Err(StorageJournalError::Stale);
+        }
         if let Some(existing) = records
             .iter()
             .find(|record| record.envelope.idempotency_key == envelope.idempotency_key)
         {
-            return if existing.envelope == envelope
-                || (existing.envelope.action == envelope.action
-                    && existing.envelope.resource_id == envelope.resource_id
-                    && existing.envelope.canonical_payload_fingerprint
-                        == envelope.canonical_payload_fingerprint
-                    && envelope.fencing_token <= existing.envelope.fencing_token)
-            {
+            return if existing.envelope == envelope {
                 Ok(existing.observation.clone())
             } else {
                 Err(StorageJournalError::Conflict)
@@ -150,18 +150,6 @@ impl StorageJournal {
             device_path: None,
         };
         let next_controller_epoch = envelope.controller_epoch;
-        if *current_token != 0 && envelope.fencing_token < *current_token {
-            if let Some(existing) = records.iter().find(|record| {
-                record.envelope.idempotency_key == envelope.idempotency_key
-                    && record.envelope.action == envelope.action
-                    && record.envelope.resource_id == envelope.resource_id
-                    && record.envelope.canonical_payload_fingerprint
-                        == envelope.canonical_payload_fingerprint
-            }) {
-                return Ok(existing.observation.clone());
-            }
-            return Err(StorageJournalError::Stale);
-        }
         let next_fencing_token = envelope.fencing_token;
         let mut candidate = records.clone();
         candidate.push(JournalRecord {
@@ -539,7 +527,10 @@ mod journal_tests {
         let journal = StorageJournal::open(&journal_path).expect("reopen after takeover");
         let mut old_duplicate = envelope("fence-a", &"a".repeat(64));
         old_duplicate.fencing_token = 1;
-        assert!(journal.accept(old_duplicate, "storage-a", "7").is_ok());
+        assert!(matches!(
+            journal.accept(old_duplicate, "storage-a", "7"),
+            Err(StorageJournalError::Stale)
+        ));
         let _ = std::fs::remove_file(journal_path);
     }
 
