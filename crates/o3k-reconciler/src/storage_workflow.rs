@@ -36,7 +36,7 @@ pub struct StorageAttachmentIntent {
     pub delete_on_termination: bool,
     pub controller_epoch: u64,
     pub target_agent_id: String,
-    pub target_agent_epoch: u64,
+    pub target_agent_epoch: String,
     pub idempotency_key: String,
     pub trace_id: String,
     pub deadline: String,
@@ -49,7 +49,7 @@ impl StorageAttachmentIntent {
             || self.controller_epoch == 0
             || self.target_agent_id.is_empty()
             || self.target_agent_id.len() > 128
-            || self.target_agent_epoch == 0
+            || self.target_agent_epoch.is_empty()
             || self.idempotency_key.is_empty()
             || self.idempotency_key.len() > 256
             || self.trace_id.is_empty()
@@ -260,7 +260,7 @@ where
                 operation_id,
                 resource_id: intent.attachment_id.as_uuid(),
                 agent_id: intent.target_agent_id.clone(),
-                agent_epoch: intent.target_agent_epoch.to_string(),
+                agent_epoch: intent.target_agent_epoch.clone(),
                 payload_fingerprint_sha256: fingerprint,
                 payload,
                 state: AgentCommandState::Pending,
@@ -377,7 +377,7 @@ where
                 operation_id,
                 resource_id: intent.attachment_id.as_uuid(),
                 agent_id: intent.target_agent_id,
-                agent_epoch: intent.target_agent_epoch.to_string(),
+                agent_epoch: intent.target_agent_epoch.clone(),
                 payload_fingerprint_sha256: fingerprint,
                 payload,
                 state: AgentCommandState::Pending,
@@ -992,7 +992,7 @@ where
             // The provider boundary fills the live WorkLease fence.
             fencing_token: 0,
             target_agent_id: intent.target_agent_id.clone(),
-            target_agent_epoch: intent.target_agent_epoch.to_string(),
+            target_agent_epoch: intent.target_agent_epoch.clone(),
             deadline: intent.deadline.clone(),
             trace_id: intent.trace_id.clone(),
             action,
@@ -1055,7 +1055,7 @@ fn intent_from_attachment(
         delete_on_termination: attachment.delete_on_termination,
         controller_epoch: envelope.controller_epoch,
         target_agent_id: envelope.target_agent_id.clone(),
-        target_agent_epoch: envelope.target_agent_epoch.parse().unwrap_or_default(),
+        target_agent_epoch: envelope.target_agent_epoch.clone(),
         idempotency_key: envelope.idempotency_key.clone(),
         trace_id: envelope.trace_id.clone(),
         deadline: envelope.deadline.clone(),
@@ -1274,7 +1274,7 @@ mod tests {
             delete_on_termination: attachment.delete_on_termination,
             controller_epoch: 7,
             target_agent_id: "host-a".to_owned(),
-            target_agent_epoch: 3,
+            target_agent_epoch: "3".into(),
             idempotency_key: "attach-once".to_owned(),
             trace_id: "trace-attach".to_owned(),
             deadline: "2026-08-19T00:00:00Z".to_owned(),

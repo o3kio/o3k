@@ -1069,7 +1069,7 @@ pub(crate) struct NativeStorageVolumeWorkflow {
     >,
     pub(crate) controller_epoch: u64,
     pub(crate) target_agent_id: String,
-    pub(crate) target_agent_epoch: u64,
+    pub(crate) target_agent_epoch: String,
 }
 
 #[async_trait]
@@ -1088,7 +1088,7 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             generation: record.volume.generation.saturating_add(1),
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
-            target_agent_epoch: self.target_agent_epoch,
+            target_agent_epoch: self.target_agent_epoch.clone(),
             idempotency_key: format!(
                 "volume-create-{}-{}",
                 volume_id,
@@ -1120,7 +1120,7 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             generation: record.volume.generation.saturating_add(1),
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
-            target_agent_epoch: self.target_agent_epoch,
+            target_agent_epoch: self.target_agent_epoch.clone(),
             idempotency_key: format!(
                 "volume-delete-{volume_id}-{}",
                 record.volume.generation.saturating_add(1)
@@ -1139,12 +1139,11 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
     }
 }
 
-// Native LVM execution is intentionally in-process in this bounded profile;
-// there is no independently restartable storage-agent session to register.
-// The durable controller work lease above is the real storage mutation fence.
-// This protocol value is therefore only the required target-agent field and
-// must never be treated as storage-agent ownership or restart identity.
-const LOCAL_STORAGE_TARGET_AGENT_EPOCH: u64 = 1;
+// Native volume and attachment mutations are dispatched through the configured
+// authenticated storage executor. The controller's durable work lease remains
+// the canonical mutation fence; the target identity and opaque epoch bind each
+// envelope to the enrolled executor instance.
+const LOCAL_STORAGE_TARGET_AGENT_EPOCH: &str = "1";
 
 #[async_trait]
 impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
@@ -1244,8 +1243,10 @@ pub(crate) fn native_storage_intent(
         access_mode: attachment.access_mode,
         delete_on_termination: attachment.delete_on_termination,
         controller_epoch,
-        target_agent_id: "local".to_owned(),
-        target_agent_epoch: LOCAL_STORAGE_TARGET_AGENT_EPOCH,
+        target_agent_id: std::env::var("O3K_STORAGE_AGENT_ID")
+            .unwrap_or_else(|_| "local".to_owned()),
+        target_agent_epoch: std::env::var("O3K_STORAGE_AGENT_EPOCH")
+            .unwrap_or_else(|_| LOCAL_STORAGE_TARGET_AGENT_EPOCH.to_owned()),
         idempotency_key: format!("native-{operation}:{}", attachment.id),
         trace_id: format!("native-{operation}:{}", attachment.id),
         deadline: "2099-01-01T00:00:00.000".to_owned(),

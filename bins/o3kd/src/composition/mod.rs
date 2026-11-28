@@ -1877,10 +1877,7 @@ pub async fn build_composition_with_guard(
         native_storage_provider.as_ref().and_then(|provider| {
             let storage_fence = storage_fence_for_drain.clone()?;
             let target_agent_id = std::env::var("O3K_STORAGE_AGENT_ID").ok()?;
-            let target_agent_epoch = std::env::var("O3K_STORAGE_AGENT_EPOCH")
-                .ok()?
-                .parse::<u64>()
-                .ok()?;
+            let target_agent_epoch = std::env::var("O3K_STORAGE_AGENT_EPOCH").ok()?;
             let workflow = o3k_reconciler::native_volume_workflow::NativeVolumeWorkflow::new(
                 store.clone(),
                 provider.clone(),

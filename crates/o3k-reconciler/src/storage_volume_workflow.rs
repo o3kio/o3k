@@ -22,7 +22,7 @@ pub struct StorageVolumeIntent {
     pub generation: u64,
     pub controller_epoch: u64,
     pub target_agent_id: String,
-    pub target_agent_epoch: u64,
+    pub target_agent_epoch: String,
     pub idempotency_key: String,
     pub trace_id: String,
     pub deadline: String,
@@ -43,7 +43,7 @@ impl StorageVolumeIntent {
             || self.controller_epoch == 0
             || self.target_agent_id.is_empty()
             || self.target_agent_id.len() > 128
-            || self.target_agent_epoch == 0
+            || self.target_agent_epoch.is_empty()
             || self.idempotency_key.is_empty()
             || self.idempotency_key.len() > 256
             || self.trace_id.is_empty()
@@ -101,7 +101,7 @@ impl StorageVolumeIntent {
             // The provider boundary fills the live WorkLease fence.
             fencing_token: 0,
             target_agent_id: self.target_agent_id.clone(),
-            target_agent_epoch: self.target_agent_epoch.to_string(),
+            target_agent_epoch: self.target_agent_epoch.clone(),
             deadline: self.deadline.clone(),
             trace_id: self.trace_id.clone(),
             action,
@@ -122,7 +122,7 @@ mod tests {
             generation: 2,
             controller_epoch: 3,
             target_agent_id: "agent".into(),
-            target_agent_epoch: 4,
+            target_agent_epoch: "4".into(),
             idempotency_key: "volume-create-7".into(),
             trace_id: "trace".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
@@ -137,6 +137,23 @@ mod tests {
         assert!(a.validate().is_ok());
         assert_eq!(a.resource_id, intent().volume_id.to_string());
         Ok(())
+    }
+
+    #[test]
+    fn envelope_preserves_opaque_enrolled_executor_epoch() {
+        let mut intent = intent();
+        intent.target_agent_id = "compute-storage-a".into();
+        intent.target_agent_epoch = "550e8400-e29b-41d4-a716-446655440000".into();
+
+        let envelope = intent
+            .envelope(StorageAction::CreateVolume)
+            .expect("envelope");
+
+        assert_eq!(envelope.target_agent_id, "compute-storage-a");
+        assert_eq!(
+            envelope.target_agent_epoch,
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
     }
 
     #[test]

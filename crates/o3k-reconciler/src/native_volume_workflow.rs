@@ -265,6 +265,12 @@ where
         if revoked.get(agent_id).copied().unwrap_or(false) {
             return Err(NativeVolumeWorkflowError::StaleFence);
         }
+        let enrolled: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&state.enrolled_agents)
+                .map_err(|_| NativeVolumeWorkflowError::StaleFence)?;
+        if !enrolled.contains_key(agent_id) || state.phase != "ready" {
+            return Err(NativeVolumeWorkflowError::StaleFence);
+        }
         let epochs: std::collections::BTreeMap<String, String> =
             serde_json::from_str(&state.enrolled_agent_epochs)
                 .map_err(|_| NativeVolumeWorkflowError::StaleFence)?;
