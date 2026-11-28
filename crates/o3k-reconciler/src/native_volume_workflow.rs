@@ -27,6 +27,8 @@ pub enum NativeVolumeWorkflowError {
     StaleFence,
     #[error("idempotency conflict")]
     IdempotencyConflict,
+    #[error("provider reference mismatch")]
+    ProviderReferenceMismatch,
     #[error("provider error")]
     Provider(#[from] StorageProviderError),
     #[error("native volume recovery required")]
@@ -323,6 +325,19 @@ where
             .get_volume(intent.volume_id.as_uuid())
             .await?
             .ok_or(StoreError::ResourceNotFound)?;
+        if action == StorageAction::DeleteVolume {
+            let Some(expected) = current.volume.provider_reference.as_ref() else {
+                return Err(NativeVolumeWorkflowError::ProviderReferenceMismatch);
+            };
+            match self
+                .provider
+                .inspect_volume_with_context(&request, &context)
+                .await
+            {
+                Ok(observed) if observed.provider_reference == *expected => {}
+                _ => return Err(NativeVolumeWorkflowError::ProviderReferenceMismatch),
+            }
+        }
         if intent.generation != current.volume.generation.saturating_add(1) {
             return Err(NativeVolumeWorkflowError::Invalid);
         }
@@ -417,6 +432,12 @@ where
                 Ok(())
             }
             Err(e) if e.is_unknown_outcome() => {
+                if action == StorageAction::DeleteVolume {
+                    let _ = self
+                        .provider
+                        .inspect_volume_with_context(&request, &context)
+                        .await;
+                }
                 self.store
                     .update_agent_command(
                         &command_id,
