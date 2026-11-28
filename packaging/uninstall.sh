@@ -212,6 +212,8 @@ if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3kd.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-storage.service 2>/dev/null || true
+  if [[ -f /usr/local/libexec/o3k-sync-storage-epoch ]] && [[ "$(stat -c '%u:%a' /usr/local/libexec/o3k-sync-storage-epoch 2>/dev/null)" == "0:755" ]]; then rm -f /usr/local/libexec/o3k-sync-storage-epoch; fi
+  if [[ -f /etc/sudoers.d/o3k-sync-storage-epoch ]] && [[ "$(stat -c '%u:%a' /etc/sudoers.d/o3k-sync-storage-epoch 2>/dev/null)" == "0:440" ]] && grep -Fqx 'o3k ALL=(root) NOPASSWD: /usr/local/libexec/o3k-sync-storage-epoch *' /etc/sudoers.d/o3k-sync-storage-epoch; then rm -f /etc/sudoers.d/o3k-sync-storage-epoch; fi
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
 remove_owned_system_file() {

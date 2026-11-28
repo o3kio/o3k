@@ -4,8 +4,10 @@ set -eu
 [ "$#" -eq 1 ] || exit 2
 epoch=$1
 case "$epoch" in ''|*[!A-Za-z0-9_-]*) exit 2;; esac
-storage=/etc/o3k/storage/o3k-storage.env
-daemon=/etc/o3k/o3kd.env
+root=/etc/o3k
+if [ "${O3K_EPOCH_HELPER_TEST:-0}" = 1 ]; then root=${O3K_EPOCH_HELPER_ROOT:?}; fi
+storage=$root/storage/o3k-storage.env
+daemon=$root/o3kd.env
 [ -f "$storage" ] && [ -f "$daemon" ] || exit 0
 tmpdir=/etc/o3k/storage
 tmp=$(mktemp "$tmpdir/.epoch.XXXXXX")
@@ -16,7 +18,7 @@ chmod --reference="$storage" "$tmp"
 chown --reference="$storage" "$tmp"
 sync -f "$tmp"
 mv -f "$tmp" "$storage"
-tmp2=$(mktemp /etc/o3k/.epoch.XXXXXX)
+tmp2=$(mktemp "$root/.epoch.XXXXXX")
 trap 'rm -f "$tmp" "$tmp2"' EXIT
 sed "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$epoch/" "$daemon" >"$tmp2"
 grep -q '^O3K_STORAGE_AGENT_EPOCH=' "$tmp2" || exit 1
@@ -24,7 +26,9 @@ chmod --reference="$daemon" "$tmp2"
 chown --reference="$daemon" "$tmp2"
 sync -f "$tmp2"
 mv -f "$tmp2" "$daemon"
-sync -f /etc/o3k/storage
-sync -f /etc/o3k
-systemctl restart o3k-storage.service
-systemctl restart o3kd.service
+sync -f "$root/storage"
+sync -f "$root"
+if [ "${O3K_EPOCH_HELPER_TEST:-0}" != 1 ]; then
+  systemctl restart o3k-storage.service
+  systemctl restart o3kd.service
+fi
