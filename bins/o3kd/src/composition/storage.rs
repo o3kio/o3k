@@ -1089,7 +1089,11 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch,
-            idempotency_key: format!("volume-create-{}-{}", volume_id, record.volume.generation.saturating_add(1)),
+            idempotency_key: format!(
+                "volume-create-{}-{}",
+                volume_id,
+                record.volume.generation.saturating_add(1)
+            ),
             trace_id: "o3kd-native-volume".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
         };
@@ -1117,7 +1121,10 @@ impl o3k_api::NativeVolumeWorkflow for NativeStorageVolumeWorkflow {
             controller_epoch: self.controller_epoch,
             target_agent_id: self.target_agent_id.clone(),
             target_agent_epoch: self.target_agent_epoch,
-            idempotency_key: format!("volume-delete-{volume_id}-{}", record.volume.generation.saturating_add(1)),
+            idempotency_key: format!(
+                "volume-delete-{volume_id}-{}",
+                record.volume.generation.saturating_add(1)
+            ),
             trace_id: "o3kd-native-volume".into(),
             deadline: "2099-01-01T00:00:00Z".into(),
         };
