@@ -338,28 +338,36 @@ where
         .map_err(|_| NativeVolumeWorkflowError::Invalid)?;
         let command_id = envelope.command_id.to_string();
         let command_record = AgentCommandRecord {
-                command_id: command_id.clone(),
-                idempotency_key: intent.idempotency_key.clone(),
-                operation_id,
-                resource_id: intent.volume_id.as_uuid(),
-                agent_id: intent.target_agent_id.clone(),
-                agent_epoch: intent.target_agent_epoch.to_string(),
-                payload_fingerprint_sha256: fingerprint,
-                payload,
-                state: AgentCommandState::Pending,
-                accepted_sequence: 0,
-                last_sequence: 0,
-                provider_operation_id: None,
-                provider_resource_id: None,
-            };
+            command_id: command_id.clone(),
+            idempotency_key: intent.idempotency_key.clone(),
+            operation_id,
+            resource_id: intent.volume_id.as_uuid(),
+            agent_id: intent.target_agent_id.clone(),
+            agent_epoch: intent.target_agent_epoch.to_string(),
+            payload_fingerprint_sha256: fingerprint,
+            payload,
+            state: AgentCommandState::Pending,
+            accepted_sequence: 0,
+            last_sequence: 0,
+            provider_operation_id: None,
+            provider_resource_id: None,
+        };
         match self.store.insert_agent_command(&command_record).await {
             Ok(_) => {}
             Err(StoreError::IdempotencyConflict | StoreError::ResourceAlreadyExists) => {
-                let existing = self.store.get_agent_command_by_idempotency_key(&intent.idempotency_key).await?;
-                if existing.command_id != command_id || existing.payload_fingerprint_sha256 != command_record.payload_fingerprint_sha256 {
+                let existing = self
+                    .store
+                    .get_agent_command_by_idempotency_key(&intent.idempotency_key)
+                    .await?;
+                if existing.command_id != command_id
+                    || existing.payload_fingerprint_sha256
+                        != command_record.payload_fingerprint_sha256
+                {
                     return Err(NativeVolumeWorkflowError::IdempotencyConflict);
                 }
-                if matches!(existing.state, AgentCommandState::Succeeded) { return Ok(()); }
+                if matches!(existing.state, AgentCommandState::Succeeded) {
+                    return Ok(());
+                }
             }
             Err(error) => return Err(error.into()),
         }
