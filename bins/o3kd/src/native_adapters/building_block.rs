@@ -997,7 +997,7 @@ mod tests {
         let draining = store
             .get_building_block("block-a")
             .await?
-            .unwrap()
+            .ok_or("block-a missing after drain")?
             .block()?;
         let removal = tokio::spawn({
             let adapter = adapter;
@@ -1017,10 +1017,17 @@ mod tests {
         removal.abort();
         release.notify_one();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let bootstrap = store.get_bootstrap_state("default").await?.unwrap();
+        let bootstrap = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing after cancellation")?;
         let revoked: BTreeMap<String, bool> = serde_json::from_str(&bootstrap.revoked_agents)?;
         assert_eq!(revoked.get("agent-a"), Some(&true));
-        assert_eq!(agents.revoked.lock().unwrap().as_slice(), ["agent-a"]);
+        let live_revocations = agents
+            .revoked
+            .lock()
+            .map_err(|_| "revocation test lock poisoned")?;
+        assert_eq!(live_revocations.as_slice(), ["agent-a"]);
         Ok(())
     }
 

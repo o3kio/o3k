@@ -5368,7 +5368,10 @@ mod tests {
         let result = registry
             .register_authenticated_connection(&register("node", "epoch-2"), certificate, sender)
             .await;
-        assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
+        assert!(matches!(
+            result,
+            Err(status) if status.code() == tonic::Code::PermissionDenied
+        ));
         assert!(!registry.is_current_connection("node", "epoch-2").await);
         assert!(
             !registry
