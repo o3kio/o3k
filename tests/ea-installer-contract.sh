@@ -89,6 +89,16 @@ executable_check = wrapper.index('release bundle executable verification failed'
 service_start = wrapper.index('systemctl enable --now libvirtd')
 assert integrity < ea_preflight < install_tools < executable_check < service_start
 assert 'openssh-client binutils libvirt-daemon-system' in wrapper
+release_builder = (root / "packaging/make-release.sh").read_text()
+binary_builder = (root / "scripts/build-release-binaries-debian12.sh").read_text()
+assert 'baseline binary is missing: $BINARIES_DIR/o3k-enrollment-issuer' in release_builder
+assert 'install -m 0755 "$BINARIES_DIR/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-enrollment-issuer"' in release_builder
+assert 'cargo build --release --locked --bin o3k-enrollment-issuer' in binary_builder
+assert 'o3k-enrollment-issuer > SHA256SUMS' in binary_builder
+qualification = (root / "tests/ea-qualification/ea-testlab.sh").read_text()
+assert '"ubuntu@$ip" "$@"' in qualification
+assert '- name: ubuntu' in qualification
+assert '- name: o3k\n' not in qualification
 PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
