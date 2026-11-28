@@ -956,6 +956,17 @@ if [ "$join_ok" -ne 1 ]; then
     "$(tail -1 "$TMP_DIR/o3k-join.err" 2>/dev/null || echo 'no response')" >&2
   exit 1
 fi
+# The enrollment epoch is the canonical host fence.  Replace the bootstrap
+# placeholder in both storage and controller environments only after the
+# authenticated join succeeds; this keeps a failed/replayed join fail-closed.
+if [ "$EA_INSTALL" = 1 ] && [ -f /etc/o3k/storage/o3k-storage.env ]; then
+  sed -i "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$AGENT_EPOCH/" \
+    /etc/o3k/storage/o3k-storage.env
+  sed -i "s/^O3K_STORAGE_AGENT_EPOCH=.*/O3K_STORAGE_AGENT_EPOCH=$AGENT_EPOCH/" \
+    /etc/o3k/o3kd.env
+  systemctl restart o3k-storage.service
+  systemctl restart o3kd.service
+fi
 BUILDING_BLOCK_ID=$(python3 - "$JOIN_OUT" <<'PY'
 import json
 import sys

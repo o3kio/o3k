@@ -38,7 +38,7 @@ pub(crate) struct RemoteStorageProvider {
     key: Vec<u8>,
     expected_server_name: String,
     agent_id: String,
-    agent_epoch: u64,
+    agent_epoch: String,
 }
 
 fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: u64) -> String {
@@ -46,7 +46,7 @@ fn remote_idempotency_key(action: StorageAction, resource_id: &str, generation: 
 }
 
 impl RemoteStorageProvider {
-    pub(crate) fn from_env(agent_id: String, agent_epoch: u64) -> Result<Self, String> {
+    pub(crate) fn from_env(agent_id: String, agent_epoch: String) -> Result<Self, String> {
         let endpoint = std::env::var("O3K_STORAGE_ENDPOINT")
             .map_err(|_| "O3K_STORAGE_ENDPOINT is required".to_owned())?;
         let ca = std::fs::read(
@@ -72,7 +72,7 @@ impl RemoteStorageProvider {
             || cert.is_empty()
             || key.is_empty()
             || agent_id.is_empty()
-            || agent_epoch == 0
+            || agent_epoch.trim().is_empty()
         {
             return Err("incomplete storage executor identity configuration".to_owned());
         }
@@ -106,9 +106,9 @@ impl RemoteStorageProvider {
             resource_id,
             resource_generation: generation,
             project_id,
-            controller_epoch: self.agent_epoch,
+            controller_epoch: 1,
             target_agent_id: self.agent_id.clone(),
-            target_agent_epoch: self.agent_epoch,
+            target_agent_epoch: self.agent_epoch.clone(),
             deadline: "2099-01-01T00:00:00Z".into(),
             trace_id: "o3kd-storage".into(),
             action,
