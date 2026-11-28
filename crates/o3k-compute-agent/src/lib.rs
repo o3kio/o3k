@@ -5345,6 +5345,39 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn previously_checked_stream_cannot_attach_after_revocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        let certificate = b"old-agent-certificate";
+        let fingerprint: [u8; 32] = Sha256::digest(certificate).into();
+        registry
+            .authorize_agent_fingerprint_with_epoch("node", fingerprint, "epoch-2")
+            .await?;
+        // Model the TLS check that used to happen before registration.  The
+        // second check inside register_authenticated_connection is the race
+        // closing operation.
+        assert!(
+            registry
+                .is_authorized_for_epoch("node", certificate, "epoch-2")
+                .await
+        );
+        registry.revoke_agent_identity("node").await;
+
+        let (sender, _receiver) = mpsc::channel(1);
+        let result = registry
+            .register_authenticated_connection(&register("node", "epoch-2"), certificate, sender)
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
+        assert!(!registry.is_current_connection("node", "epoch-2").await);
+        assert!(
+            !registry
+                .is_authorized_for_epoch("node", certificate, "epoch-2")
+                .await
+        );
+        Ok(())
+    }
+
     /// Issue #606: every successful registration must wake the inventory
     /// publisher immediately, so a restarted agent's real capacity is visible
     /// to placement without waiting for the next 5 s tick. A re-registration
