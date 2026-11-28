@@ -96,8 +96,8 @@ assert 'install -m 0755 "$BINARIES_DIR/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-
 assert 'cargo build --release --locked --bin o3k-enrollment-issuer' in binary_builder
 assert 'o3k-enrollment-issuer o3k-storage > SHA256SUMS' in binary_builder
 qualification = (root / "tests/ea-qualification/ea-testlab.sh").read_text()
-assert '"ubuntu@$ip" "$@"' in qualification
-assert '- name: ubuntu' in qualification
+assert '"ea@$ip" "$@"' in qualification
+assert '- name: ea' in qualification
 assert '- name: o3k\n' not in qualification
 PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
@@ -113,6 +113,7 @@ grep -Fq 'o3k-storage.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uni
 grep -Fq 'check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-storage-bin' "$ROOT/packaging/make-release.sh"
 grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'DeviceAllow=/dev/mapper/control rw' "$ROOT/packaging/o3k-storage.service"
+grep -Fq 'ReadWritePaths=/var/lib/o3k/storage /etc/lvm/archive /etc/lvm/backup /run/lock/lvm /run/lvm' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'update_storage_epoch "$AGENT_EPOCH"' "$WRAPPER"
 python3 - "$WRAPPER" <<'PY'
 from pathlib import Path

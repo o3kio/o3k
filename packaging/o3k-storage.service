@@ -15,7 +15,10 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 UMask=0077
-ReadWritePaths=/var/lib/o3k/storage
+# LVM needs the dedicated journal plus its bounded metadata archive/backup,
+# lock, and runtime hint directories. ProtectSystem keeps every other path
+# read-only for the executor.
+ReadWritePaths=/var/lib/o3k/storage /etc/lvm/archive /etc/lvm/backup /run/lock/lvm /run/lvm
 CapabilityBoundingSet=CAP_SYS_ADMIN
 AmbientCapabilities=CAP_SYS_ADMIN
 PrivateDevices=false
