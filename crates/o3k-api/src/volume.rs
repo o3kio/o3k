@@ -571,15 +571,9 @@ pub(crate) async fn create(
     }
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let record = if let Some(workflow) = state.native_volume_workflow.as_ref() {
-                if workflow.create(record.volume.id.as_uuid()).await.is_err() { return unavailable(); }
-                match store.get_volume(record.volume.id.as_uuid()).await { Ok(Some(record)) => record, _ => return unavailable() }
-            } else {
-                match realize_native_volume_create(store.clone(), state.storage_provider.clone().expect("checked above"), record, state.metering_observer.as_ref()).await {
-                    Ok(record) => record,
-                    Err(_) => return unavailable(),
-                }
-            };
+            let Some(workflow) = state.native_volume_workflow.as_ref() else { return unavailable(); };
+            if workflow.create(record.volume.id.as_uuid()).await.is_err() { return unavailable(); }
+            let record = match store.get_volume(record.volume.id.as_uuid()).await { Ok(Some(record)) => record, _ => return unavailable() };
             (
                 StatusCode::ACCEPTED,
                 Json(VolumeResponse {
@@ -709,11 +703,8 @@ pub(crate) async fn delete(
     if state.storage_provider.is_none() {
         return unavailable();
     };
-    let deletion = if let Some(workflow) = state.native_volume_workflow.as_ref() {
-        workflow.delete(&project_id, id).await
-    } else {
-        remove_native_volume(store.clone(), state.storage_provider.clone().expect("checked above"), &project_id, id, None, state.metering_observer.as_ref()).await
-    };
+    let Some(workflow) = state.native_volume_workflow.as_ref() else { return unavailable(); };
+    let deletion = workflow.delete(&project_id, id).await;
     match deletion {
         Ok(()) => match store.delete_volume(&project_id, id).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),

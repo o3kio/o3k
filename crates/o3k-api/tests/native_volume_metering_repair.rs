@@ -50,6 +50,26 @@ struct RepairProvider {
     volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
 }
 
+struct TestNativeWorkflow {
+    store: Arc<TestStore>,
+    provider: Arc<RepairProvider>,
+    meter: Arc<dyn LifecycleMeteringObserver>,
+}
+
+#[async_trait]
+impl o3k_api::NativeVolumeWorkflow for TestNativeWorkflow {
+    async fn create(&self, volume_id: Uuid) -> Result<(), String> {
+        let record = self.store.get_volume(volume_id).await.map_err(|e| e.to_string())?.ok_or("missing volume")?;
+        let record = o3k_api::realize_native_volume_create(self.store.clone(), self.provider.clone(), record, Some(&self.meter)).await?;
+        let _ = record;
+        Ok(())
+    }
+    async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
+        o3k_api::remove_native_volume(self.store.clone(), self.provider.clone(), project_id, volume_id, None, Some(&self.meter)).await
+    }
+    async fn recover(&self) -> Result<(), String> { Ok(()) }
+}
+
 #[async_trait]
 impl StorageProvider for RepairProvider {
     async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
@@ -267,12 +287,14 @@ async fn lost_open_observation_is_repaired_by_the_next_volume_read()
     .await?;
     let compute = ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()));
     let meter = Arc::new(ToggleVolumeMeter::new(store.clone(), BASE_MS));
+    let workflow = Arc::new(TestNativeWorkflow { store: store.clone(), provider: Arc::new(RepairProvider::default()), meter: meter.clone() });
     let state = AppState::new()
         .with_identity(identity)
         .with_compute(compute)
         .with_storage_store(store.clone())
         .with_storage_provider(Arc::new(RepairProvider::default()))
-        .with_metering_observer(meter.clone());
+        .with_metering_observer(meter.clone())
+        .with_native_volume_workflow(workflow);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
     let auth = token(&app).await?;
@@ -395,12 +417,14 @@ async fn deleting_volume_read_does_not_close_the_open_interval()
     let compute = ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()));
     let provider = Arc::new(RepairProvider::default());
     let meter = Arc::new(ToggleVolumeMeter::new(store.clone(), BASE_MS));
+    let workflow = Arc::new(TestNativeWorkflow { store: store.clone(), provider: provider.clone(), meter: meter.clone() });
     let state = AppState::new()
         .with_identity(identity)
         .with_compute(compute)
         .with_storage_store(store.clone())
         .with_storage_provider(provider.clone())
-        .with_metering_observer(meter.clone());
+        .with_metering_observer(meter.clone())
+        .with_native_volume_workflow(workflow);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
     let auth = token(&app).await?;
