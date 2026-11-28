@@ -254,19 +254,18 @@ fn unix_time_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+type DurableAdmissionMetadata = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, bool>,
+);
+
 /// Parse the durable admission projection before rehydrating the live agent
 /// registry.  These fields are security authority, so malformed persisted
 /// JSON must fail startup instead of silently authorizing an incomplete set.
 fn durable_admission_metadata(
     bootstrap: &o3k_store::BootstrapStateRecord,
-) -> Result<
-    (
-        std::collections::BTreeMap<String, String>,
-        std::collections::BTreeMap<String, String>,
-        std::collections::BTreeMap<String, bool>,
-    ),
-    std::io::Error,
-> {
+) -> Result<DurableAdmissionMetadata, std::io::Error> {
     Ok((
         serde_json::from_str(&bootstrap.enrolled_agents).map_err(|error| {
             std::io::Error::new(
