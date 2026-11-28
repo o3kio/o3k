@@ -2,9 +2,8 @@ use o3k_controller_protocol::storage::{
     ExecuteResponse, StorageCommand, StorageObservation as WireObservation,
     storage_executor_server::{StorageExecutor, StorageExecutorServer},
 };
-use o3k_domain::{
-    StorageAction, StorageCommandEnvelope, StorageCommandPayload, storage_payload_fingerprint,
-};
+use o3k_domain::{StorageAction, StorageCommandEnvelope, StorageCommandPayload};
+use o3k_storage::storage_payload_fingerprint;
 use o3k_storage::{
     LvmConfig, LvmStorageProvider, StorageAttachmentRequest, StorageJournal, StorageProvider,
     StorageVolumeRequest,

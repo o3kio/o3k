@@ -5,10 +5,10 @@ use o3k_controller_protocol::storage::{
 use o3k_domain::{
     StorageAction, StorageAttachmentCommandPayload, StorageCapabilities, StorageCommandEnvelope,
     StorageCommandPayload, StorageObservation, StorageOperationState, StorageVolumeCommandPayload,
-    storage_payload_fingerprint,
 };
 use o3k_provider::BlockDeviceAttachment;
 use o3k_reconciler;
+use o3k_storage::storage_payload_fingerprint;
 use o3k_storage::{
     self, PreparedAttachment, StorageAttachmentObservation, StorageAttachmentRequest,
     StorageProvider, StorageProviderError, StorageSnapshotObservation, StorageSnapshotRequest,

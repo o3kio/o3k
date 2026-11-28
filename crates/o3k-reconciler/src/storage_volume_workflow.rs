@@ -7,8 +7,9 @@
 
 use o3k_domain::{
     StorageAction, StorageCommandEnvelope, StorageCommandPayload, StorageVolumeCommandPayload,
-    VolumeId, storage_payload_fingerprint,
+    VolumeId,
 };
+use o3k_storage::storage_payload_fingerprint;
 use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
