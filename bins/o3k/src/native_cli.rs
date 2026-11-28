@@ -12,6 +12,9 @@
 //! The underlying protocol is O3K native HTTP API (ADR-0173/SPEC-0030).
 
 use serde_json::Value;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -75,13 +78,46 @@ fn sync_storage_epoch_at(
         replace(&daemon).ok_or_else(|| "controller environment lacks storage epoch".to_owned())?;
     let storage =
         replace(&storage).ok_or_else(|| "storage environment lacks agent epoch".to_owned())?;
+    let mut staged = Vec::new();
     for (path, data) in [(daemon_env, daemon), (storage_env, storage)] {
-        let tmp = path.with_extension(format!("epoch-{}.tmp", std::process::id()));
-        std::fs::write(&tmp, data).map_err(|e| format!("cannot stage epoch update: {e}"))?;
-        if let Err(error) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
+        let metadata =
+            std::fs::metadata(path).map_err(|e| format!("cannot stat epoch file: {e}"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| "epoch file has no parent".to_owned())?;
+        let tmp = parent.join(format!(
+            ".{}.epoch-{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| format!("cannot stage epoch update: {e}"))?;
+        file.set_permissions(std::fs::Permissions::from_mode(
+            metadata.permissions().mode() & 0o7777,
+        ))
+        .map_err(|e| format!("cannot preserve epoch permissions: {e}"))?;
+        file.write_all(data.as_bytes())
+            .map_err(|e| format!("cannot write epoch update: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync epoch update: {e}"))?;
+        staged.push((tmp, path));
+    }
+    for (tmp, path) in &staged {
+        if let Err(error) = std::fs::rename(tmp, path) {
+            for (leftover, _) in &staged {
+                let _ = std::fs::remove_file(leftover);
+            }
             return Err(format!("cannot commit epoch update: {error}"));
         }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "epoch file has no parent".to_owned())?;
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| format!("cannot sync epoch directory: {e}"))?;
     }
     Ok(true)
 }
