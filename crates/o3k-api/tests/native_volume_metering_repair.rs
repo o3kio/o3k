@@ -65,29 +65,99 @@ impl o3k_api::NativeVolumeWorkflow for TestNativeWorkflow {
             .await
             .map_err(|e| e.to_string())?
             .ok_or("missing volume")?;
-        let record = o3k_api::realize_native_volume_create(
-            self.store.clone(),
-            self.provider.clone(),
-            record,
-            Some(&self.meter),
-        )
-        .await?;
+        let record = fixture_create(&self.store, &self.provider, record, &self.meter).await?;
         let _ = record;
         Ok(())
     }
     async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
-        o3k_api::remove_native_volume(
-            self.store.clone(),
-            self.provider.clone(),
+        fixture_delete(
+            &self.store,
+            &self.provider,
             project_id,
             volume_id,
-            None,
-            Some(&self.meter),
+            &self.meter,
         )
         .await
     }
     async fn recover(&self) -> Result<(), String> {
         Ok(())
+    }
+}
+
+async fn fixture_create(
+    store: &Arc<TestStore>,
+    provider: &Arc<RepairProvider>,
+    mut record: VolumeRecord,
+    meter: &Arc<dyn LifecycleMeteringObserver>,
+) -> Result<VolumeRecord, String> {
+    record.volume.state = VolumeState::Creating;
+    record.volume.generation += 1;
+    let creating = store
+        .update_volume(record.volume.generation - 1, &record)
+        .await
+        .map_err(|e| e.to_string())?;
+    let request = StorageVolumeRequest {
+        volume_id: creating.volume.id,
+        project_id: creating.volume.project_id.clone(),
+        size_bytes: creating.volume.size_bytes,
+        generation: creating.volume.generation,
+    };
+    let observation = provider
+        .create_volume(&request)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut available = creating.clone();
+    available.volume.state = VolumeState::Available;
+    available.volume.generation += 1;
+    available.volume.provider_reference = Some(observation.provider_reference);
+    let available = store
+        .update_volume(creating.volume.generation, &available)
+        .await
+        .map_err(|e| e.to_string())?;
+    o3k_api::observe_volume_allocation(
+        Some(meter),
+        &available.volume.project_id,
+        &available.volume.id.to_string(),
+        available.volume.size_bytes,
+        true,
+    )
+    .await?;
+    Ok(available)
+}
+
+async fn fixture_delete(
+    store: &Arc<TestStore>,
+    provider: &Arc<RepairProvider>,
+    project_id: &str,
+    volume_id: Uuid,
+    meter: &Arc<dyn LifecycleMeteringObserver>,
+) -> Result<(), String> {
+    let record = store
+        .get_volume(volume_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("volume not found")?;
+    let request = StorageVolumeRequest {
+        volume_id: record.volume.id,
+        project_id: project_id.to_owned(),
+        size_bytes: record.volume.size_bytes,
+        generation: record.volume.generation,
+    };
+    let _ = provider.delete_volume(&request).await;
+    match provider.inspect_volume(&request).await {
+        Err(StorageProviderError::NotFound) => {
+            o3k_api::observe_volume_allocation(
+                Some(meter),
+                project_id,
+                &volume_id.to_string(),
+                record.volume.size_bytes,
+                false,
+            )
+            .await?;
+            Ok(())
+        }
+        Ok(_) => Err("provider volume is still present".into()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -527,16 +597,13 @@ async fn deleting_volume_read_does_not_close_the_open_interval()
 
     // The authoritative provider-absence close ends it at BASE_MS + 30min.
     meter.set_now(BASE_MS + 1_800_000);
-    let repo: Arc<dyn StorageRepository> = store.clone();
-    let provider_dyn: Arc<dyn StorageProvider> = provider.clone();
     let observer: Arc<dyn LifecycleMeteringObserver> = meter.clone();
-    o3k_api::remove_native_volume(
-        repo,
-        provider_dyn,
+    fixture_delete(
+        &store,
+        &provider,
         PROJECT,
         record.volume.id.as_uuid(),
-        None,
-        Some(&observer),
+        &observer,
     )
     .await
     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;

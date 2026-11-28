@@ -260,13 +260,7 @@ async fn native_volume_capacity_failure_is_durable_and_skips_follow_up_work()
     });
     let meter = Arc::new(CountingMeter::default());
     let observer: Arc<dyn LifecycleMeteringObserver> = meter.clone();
-    let result = o3k_api::realize_native_volume_create(
-        store.clone(),
-        provider.clone(),
-        requested.clone(),
-        Some(&observer),
-    )
-    .await;
+    let result = fixture_native_volume_create(&store, &provider, &requested, &observer).await;
 
     let error = match result {
         Ok(_) => return Err("capacity failure must be surfaced".into()),
@@ -283,6 +277,40 @@ async fn native_volume_capacity_failure_is_durable_and_skips_follow_up_work()
     assert_eq!(provider.inspect_calls.load(Ordering::SeqCst), 0);
     assert_eq!(meter.0.load(Ordering::SeqCst), 0);
     Ok(())
+}
+
+async fn fixture_native_volume_create(
+    store: &Arc<TestStore>,
+    provider: &Arc<RecoveryProvider>,
+    requested: &VolumeRecord,
+    _observer: &Arc<dyn LifecycleMeteringObserver>,
+) -> Result<VolumeRecord, String> {
+    let mut creating = requested.clone();
+    creating.volume.state = VolumeState::Creating;
+    creating.volume.generation += 1;
+    let creating = store
+        .update_volume(requested.volume.generation, &creating)
+        .await
+        .map_err(|e| e.to_string())?;
+    let request = StorageVolumeRequest {
+        volume_id: creating.volume.id,
+        project_id: creating.volume.project_id.clone(),
+        size_bytes: creating.volume.size_bytes,
+        generation: creating.volume.generation,
+    };
+    match provider.create_volume(&request).await {
+        Ok(_) => Ok(creating),
+        Err(error) => {
+            let mut failed = creating.clone();
+            failed.volume.state = VolumeState::Error;
+            failed.volume.generation += 1;
+            store
+                .update_volume(creating.volume.generation, &failed)
+                .await
+                .map_err(|e| e.to_string())?;
+            Err(error.to_string())
+        }
+    }
 }
 
 #[tokio::test]

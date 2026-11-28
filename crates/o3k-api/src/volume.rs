@@ -259,17 +259,16 @@ fn volume_not_found() -> Response {
     keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found").into_response()
 }
 
-/// Shared provider-backed native Volume lifecycle used by both the Cinder
-/// projection and the native `volume:volume` adapter.  Compatibility wire
-/// formats remain outside this function; canonical persistence, provider
-/// observation, and the metering projection are deliberately single-sourced
-/// here so no caller can durably create a volume without opening its meter.
-pub async fn realize_native_volume_create(
-    store: Arc<dyn o3k_store::StorageRepository>,
-    provider: Arc<dyn o3k_storage::StorageProvider>,
-    record: VolumeRecord,
-    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
-) -> Result<VolumeRecord, String> {
+fn volume_observation_matches(record: &VolumeRecord, observation: &o3k_storage::StorageVolumeObservation) -> bool {
+    observation.owned && observation.size_bytes == record.volume.size_bytes
+}
+
+fn available_volume_observation_matches(record: &VolumeRecord, observation: &o3k_storage::StorageVolumeObservation) -> bool {
+    volume_observation_matches(record, observation) && observation.available
+}
+
+/* Native volume mutations are owned by NativeVolumeWorkflow in the controller. */
+/*
     let mut creating = record.clone();
     creating.volume.state = VolumeState::Creating;
     creating.volume.generation = record
@@ -357,7 +356,7 @@ fn available_volume_observation_matches(
 /// `Deleting` until an explicit provider absence observation succeeds. The
 /// allocation meter is closed at that same durable point so every caller
 /// (Cinder projection and native adapter) closes exactly once.
-pub async fn remove_native_volume(
+async fn remove_native_volume_legacy(
     store: Arc<dyn o3k_store::StorageRepository>,
     provider: Arc<dyn o3k_storage::StorageProvider>,
     project_id: &str,
@@ -430,6 +429,7 @@ pub async fn remove_native_volume(
         Err(error) => Err(error.to_string()),
     }
 }
+*/
 
 async fn scoped_store(
     state: &AppState,

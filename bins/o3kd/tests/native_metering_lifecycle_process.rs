@@ -743,18 +743,16 @@ async fn recovery_closes_interrupted_volume_delete() -> TestResult {
     // gone and the canonical row is durably `Deleting`, but the close
     // observation never happened.
     clock.set(BASE_MS + 90_000);
-    o3k_api::remove_native_volume(
-        store.clone(),
-        provider.clone(),
-        "project-a",
-        volume_id,
-        None,
-        // Model the crash window: the provider deletion happened but the close
-        // observation did not, so recovery must close the interval.
-        None,
-    )
-    .await
-    .map_err(|error| format!("remove_native_volume: {error}"))?;
+    let request = o3k_storage::StorageVolumeRequest {
+        volume_id: volume_id.into(),
+        project_id: "project-a".into(),
+        size_bytes: 1024 * 1024 * 1024,
+        generation: 1,
+    };
+    provider
+        .delete_volume(&request)
+        .await
+        .map_err(|error| format!("fixture delete: {error}"))?;
     let deleting = store
         .get_volume(volume_id)
         .await?
