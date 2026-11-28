@@ -126,6 +126,7 @@ async fn build_runtime(
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: None,
             metering: None,
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {

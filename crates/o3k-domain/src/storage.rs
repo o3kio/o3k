@@ -6,6 +6,26 @@
 //! observations, never to these resources.
 
 use serde::{Deserialize, Serialize};
+
+fn deserialize_epoch<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Epoch {
+        Text(String),
+        Number(u64),
+    }
+    Ok(match Epoch::deserialize(deserializer)? {
+        Epoch::Text(value) => value,
+        Epoch::Number(value) => value.to_string(),
+    })
+}
+
+fn default_protocol_version() -> u16 {
+    1
+}
 use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
@@ -89,6 +109,7 @@ pub enum StorageAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageCommandEnvelope {
+    #[serde(default = "default_protocol_version")]
     pub protocol_version: u16,
     pub command_id: Uuid,
     pub operation_id: Uuid,
@@ -99,12 +120,53 @@ pub struct StorageCommandEnvelope {
     /// Controller fencing epoch. Storage agents must reject commands from a
     /// controller that no longer owns the durable work lease.
     pub controller_epoch: u64,
+    /// Monotonic durable WorkLease fence. This is distinct from the
+    /// controller process epoch and is never derived from it.
+    #[serde(default)]
+    pub fencing_token: u64,
     pub target_agent_id: String,
-    pub target_agent_epoch: u64,
+    #[serde(deserialize_with = "deserialize_epoch")]
+    pub target_agent_epoch: String,
     pub deadline: String,
     pub trace_id: String,
     pub action: StorageAction,
     pub canonical_payload_fingerprint: String,
+}
+
+/// Typed, provider-neutral command body persisted alongside the envelope.
+/// Keeping this body durable makes replay independent of transient controller
+/// objects while ensuring provider paths and credentials never cross the
+/// canonical boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum StorageCommandPayload {
+    Volume(StorageVolumeCommandPayload),
+    Attachment(StorageAttachmentCommandPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageVolumeCommandPayload {
+    pub volume_id: VolumeId,
+    pub project_id: String,
+    pub size_bytes: u64,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageAttachmentCommandPayload {
+    pub attachment_id: VolumeAttachmentId,
+    pub volume_id: VolumeId,
+    pub server_id: Uuid,
+    pub project_id: String,
+    pub access_mode: AttachmentAccessMode,
+    pub delete_on_termination: bool,
+    pub volume_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageCommandRecord {
+    pub envelope: StorageCommandEnvelope,
+    pub payload: StorageCommandPayload,
 }
 
 impl StorageCommandEnvelope {
@@ -116,7 +178,7 @@ impl StorageCommandEnvelope {
             || self.project_id.is_empty()
             || self.controller_epoch == 0
             || self.target_agent_id.is_empty()
-            || self.target_agent_epoch == 0
+            || self.target_agent_epoch.trim().is_empty()
             || self.deadline.is_empty()
             || self.trace_id.is_empty()
             || self.canonical_payload_fingerprint.is_empty()
@@ -139,7 +201,23 @@ impl StorageCommandEnvelope {
         }
         Ok(())
     }
+
+    /// Validates an envelope crossing the privileged executor boundary.
+    /// Persisted workflow intents may be explicitly unfenced until execution
+    /// injects the live durable WorkLease token.
+    pub fn validate_for_rpc(&self) -> Result<(), StorageValidationError> {
+        self.validate()?;
+        if self.fencing_token == 0 {
+            return Err(StorageValidationError::InvalidCommandEnvelope);
+        }
+        Ok(())
+    }
 }
+
+/// Compute the fingerprint used to bind a wire payload to its command
+/// envelope.  Callers must pass the typed payload's serde representation;
+/// keeping this helper in the domain crate prevents controller and executor
+/// implementations from silently choosing different digest encodings.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageOperationState {
@@ -153,7 +231,8 @@ pub enum StorageOperationState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageObservation {
     pub agent_id: String,
-    pub agent_epoch: u64,
+    #[serde(deserialize_with = "deserialize_epoch")]
+    pub agent_epoch: String,
     pub resource_id: String,
     pub provider_resource_id: Option<String>,
     pub operation_id: Uuid,
@@ -164,13 +243,15 @@ pub struct StorageObservation {
     pub resource_state: String,
     pub error_category: Option<StorageErrorCategory>,
     pub redacted_message: Option<String>,
+    #[serde(default)]
+    pub device_path: Option<String>,
 }
 
 impl StorageObservation {
     pub fn validate(&self) -> Result<(), StorageValidationError> {
         if self.agent_id.is_empty()
             || self.agent_id.len() > 128
-            || self.agent_epoch == 0
+            || self.agent_epoch.trim().is_empty()
             || self.resource_id.is_empty()
             || self.resource_id.len() > 256
             || self.resource_generation == 0
@@ -753,8 +834,9 @@ mod tests {
             resource_generation: 1,
             project_id: "project-a".to_owned(),
             controller_epoch: 1,
+            fencing_token: 0,
             target_agent_id: "storage-a".to_owned(),
-            target_agent_epoch: 1,
+            target_agent_epoch: "epoch-1".into(),
             deadline: "2026-08-19T00:00:00Z".to_owned(),
             trace_id: "trace-1".to_owned(),
             action: StorageAction::InspectVolume,
@@ -764,7 +846,7 @@ mod tests {
 
         let observation = StorageObservation {
             agent_id: "storage-a".to_owned(),
-            agent_epoch: 1,
+            agent_epoch: "epoch-1".into(),
             resource_id: "volume-1".to_owned(),
             provider_resource_id: None,
             operation_id: Uuid::from_u128(9),
@@ -775,6 +857,7 @@ mod tests {
             resource_state: "available".to_owned(),
             error_category: None,
             redacted_message: None,
+            device_path: None,
         };
         assert!(observation.validate().is_ok());
     }

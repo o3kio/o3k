@@ -131,6 +131,7 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
             private_key: fixture("agent-key-pkcs8.pem"),
         },
         identity_file: identity.clone(),
+        agent_epoch: None,
         host_label: "mtls-test-host".to_owned(),
         software_version: "test".to_owned(),
         heartbeat_interval: Duration::from_millis(25),

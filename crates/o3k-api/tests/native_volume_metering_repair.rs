@@ -50,6 +50,117 @@ struct RepairProvider {
     volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
 }
 
+struct TestNativeWorkflow {
+    store: Arc<TestStore>,
+    provider: Arc<RepairProvider>,
+    meter: Arc<dyn LifecycleMeteringObserver>,
+}
+
+#[async_trait]
+impl o3k_api::NativeVolumeWorkflow for TestNativeWorkflow {
+    async fn create(&self, volume_id: Uuid) -> Result<(), String> {
+        let record = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("missing volume")?;
+        let record = fixture_create(&self.store, &self.provider, record, &self.meter).await?;
+        let _ = record;
+        Ok(())
+    }
+    async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
+        fixture_delete(
+            &self.store,
+            &self.provider,
+            project_id,
+            volume_id,
+            &self.meter,
+        )
+        .await
+    }
+    async fn recover(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+async fn fixture_create(
+    store: &Arc<TestStore>,
+    provider: &Arc<RepairProvider>,
+    mut record: VolumeRecord,
+    meter: &Arc<dyn LifecycleMeteringObserver>,
+) -> Result<VolumeRecord, String> {
+    record.volume.state = VolumeState::Creating;
+    record.volume.generation += 1;
+    let creating = store
+        .update_volume(record.volume.generation - 1, &record)
+        .await
+        .map_err(|e| e.to_string())?;
+    let request = StorageVolumeRequest {
+        volume_id: creating.volume.id,
+        project_id: creating.volume.project_id.clone(),
+        size_bytes: creating.volume.size_bytes,
+        generation: creating.volume.generation,
+    };
+    let observation = provider
+        .create_volume(&request)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut available = creating.clone();
+    available.volume.state = VolumeState::Available;
+    available.volume.generation += 1;
+    available.volume.provider_reference = Some(observation.provider_reference);
+    let available = store
+        .update_volume(creating.volume.generation, &available)
+        .await
+        .map_err(|e| e.to_string())?;
+    o3k_api::observe_volume_allocation(
+        Some(meter),
+        &available.volume.project_id,
+        &available.volume.id.to_string(),
+        available.volume.size_bytes,
+        true,
+    )
+    .await?;
+    Ok(available)
+}
+
+async fn fixture_delete(
+    store: &Arc<TestStore>,
+    provider: &Arc<RepairProvider>,
+    project_id: &str,
+    volume_id: Uuid,
+    meter: &Arc<dyn LifecycleMeteringObserver>,
+) -> Result<(), String> {
+    let record = store
+        .get_volume(volume_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("volume not found")?;
+    let request = StorageVolumeRequest {
+        volume_id: record.volume.id,
+        project_id: project_id.to_owned(),
+        size_bytes: record.volume.size_bytes,
+        generation: record.volume.generation,
+    };
+    let _ = provider.delete_volume(&request).await;
+    match provider.inspect_volume(&request).await {
+        Err(StorageProviderError::NotFound) => {
+            o3k_api::observe_volume_allocation(
+                Some(meter),
+                project_id,
+                &volume_id.to_string(),
+                record.volume.size_bytes,
+                false,
+            )
+            .await?;
+            Ok(())
+        }
+        Ok(_) => Err("provider volume is still present".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[async_trait]
 impl StorageProvider for RepairProvider {
     async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
@@ -267,12 +378,18 @@ async fn lost_open_observation_is_repaired_by_the_next_volume_read()
     .await?;
     let compute = ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()));
     let meter = Arc::new(ToggleVolumeMeter::new(store.clone(), BASE_MS));
+    let workflow = Arc::new(TestNativeWorkflow {
+        store: store.clone(),
+        provider: Arc::new(RepairProvider::default()),
+        meter: meter.clone(),
+    });
     let state = AppState::new()
         .with_identity(identity)
         .with_compute(compute)
         .with_storage_store(store.clone())
         .with_storage_provider(Arc::new(RepairProvider::default()))
-        .with_metering_observer(meter.clone());
+        .with_metering_observer(meter.clone())
+        .with_native_volume_workflow(workflow);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
     let auth = token(&app).await?;
@@ -395,12 +512,18 @@ async fn deleting_volume_read_does_not_close_the_open_interval()
     let compute = ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()));
     let provider = Arc::new(RepairProvider::default());
     let meter = Arc::new(ToggleVolumeMeter::new(store.clone(), BASE_MS));
+    let workflow = Arc::new(TestNativeWorkflow {
+        store: store.clone(),
+        provider: provider.clone(),
+        meter: meter.clone(),
+    });
     let state = AppState::new()
         .with_identity(identity)
         .with_compute(compute)
         .with_storage_store(store.clone())
         .with_storage_provider(provider.clone())
-        .with_metering_observer(meter.clone());
+        .with_metering_observer(meter.clone())
+        .with_native_volume_workflow(workflow);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
     let auth = token(&app).await?;
@@ -474,16 +597,13 @@ async fn deleting_volume_read_does_not_close_the_open_interval()
 
     // The authoritative provider-absence close ends it at BASE_MS + 30min.
     meter.set_now(BASE_MS + 1_800_000);
-    let repo: Arc<dyn StorageRepository> = store.clone();
-    let provider_dyn: Arc<dyn StorageProvider> = provider.clone();
     let observer: Arc<dyn LifecycleMeteringObserver> = meter.clone();
-    o3k_api::remove_native_volume(
-        repo,
-        provider_dyn,
+    fixture_delete(
+        &store,
+        &provider,
         PROJECT,
         record.volume.id.as_uuid(),
-        None,
-        Some(&observer),
+        &observer,
     )
     .await
     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;

@@ -36,6 +36,9 @@ pub struct GenericResourceApplication {
     pub realm_deletion: Option<Arc<dyn RealmDeletionWorkflow>>,
     pub store: Arc<o3k_store::unified::O3kStore>,
     pub storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
+    /// Canonical native volume execution boundary. Generic resource routes
+    /// must not mutate the provider directly.
+    pub volume_workflow: Option<Arc<dyn o3k_api::NativeVolumeWorkflow>>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
     pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
     pub external_controllers: Arc<BTreeMap<String, Arc<o3k_service_sdk::GrpcControllerAdapter>>>,
@@ -1622,9 +1625,42 @@ impl ResourceApplication for GenericResourceApplication {
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
             let compatibility_generation = record.volume.generation;
-            let Some(provider) = self.storage_provider.clone() else {
+            let Some(workflow) = self.volume_workflow.as_ref() else {
                 return Err(ResourceApplicationError::NotReady);
             };
+            // The durable storage command references the compatibility
+            // resource row by foreign key. Establish that projection before
+            // crossing the execution boundary; the canonical Volume row
+            // remains the lifecycle authority and is reconciled below.
+            match self
+                .store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: resource_id,
+                    kind: "volume".to_owned(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    generation: compatibility_generation as i64,
+                    observed_generation: compatibility_generation as i64,
+                    desired_state: "available".to_owned(),
+                    observed_state: "available".to_owned(),
+                    provider_id: None,
+                })
+                .await
+            {
+                Ok(()) => {}
+                Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                    let existing = self
+                        .store
+                        .get_resource(resource_id)
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                    if existing.kind != "volume"
+                        || existing.project_id != auth.effective_scope().id().as_str()
+                    {
+                        return Err(ResourceApplicationError::NotFound);
+                    }
+                }
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
             match self.store.insert_volume(&record).await {
                 Ok(()) => {}
                 Err(o3k_store::StoreError::ResourceAlreadyExists) => {
@@ -1665,38 +1701,10 @@ impl ResourceApplication for GenericResourceApplication {
                 }
                 Err(_) => return Err(ResourceApplicationError::Internal),
             }
-            o3k_api::realize_native_volume_create(
-                self.store.clone(),
-                provider,
-                record,
-                self.metering.as_ref(),
-            )
-            .await
-            .map_err(|_| ResourceApplicationError::Retryable)?;
-            // The legacy generic-resource index is a compatibility projection
-            // used by relationship tests and older native callers.  The
-            // canonical volume above remains the sole authority.
-            match self
-                .store
-                .insert_resource(&o3k_store::ResourceRecord {
-                    id: resource_id,
-                    kind: "volume".to_owned(),
-                    project_id: auth.effective_scope().id().as_str().to_owned(),
-                    // The native volume row is authoritative and has already
-                    // advanced through provider realization.  Keep the
-                    // compatibility projection at the same generation so
-                    // later lifecycle updates cannot be rejected as stale.
-                    generation: compatibility_generation as i64,
-                    observed_generation: compatibility_generation as i64,
-                    desired_state: "available".to_owned(),
-                    observed_state: "available".to_owned(),
-                    provider_id: None,
-                })
-                .await
-            {
-                Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
-                Err(_) => return Err(ResourceApplicationError::Internal),
-            }
+            workflow.create(resource_id).await.map_err(|error| {
+                tracing::error!(volume_id = %resource_id, %error, "native volume create failed");
+                ResourceApplicationError::Retryable
+            })?;
             match self
                 .store
                 .insert_operation(&o3k_store::OperationRecord {
@@ -3224,7 +3232,7 @@ impl ResourceApplication for GenericResourceApplication {
                     if existing.state != o3k_store::OperationState::Succeeded {
                         // A retry can arrive after provider deletion but before
                         // the first request persisted its terminal operation.
-                        let Some(provider) = self.storage_provider.clone() else {
+                        let Some(workflow) = self.volume_workflow.as_ref() else {
                             return Err(ResourceApplicationError::NotReady);
                         };
                         if let Some(record) = self
@@ -3236,19 +3244,13 @@ impl ResourceApplication for GenericResourceApplication {
                             if record.volume.project_id != auth.effective_scope().id().as_str() {
                                 return Err(ResourceApplicationError::NotFound);
                             }
-                            o3k_api::remove_native_volume(
-                    self.store.clone(),
-                    provider,
-                    auth.effective_scope().id().as_str(),
-                    resource_id,
-                    Some(operation_id),
-                    self.metering.as_ref(),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
-                    ResourceApplicationError::Retryable
-                })?;
+                            workflow
+                                .delete(auth.effective_scope().id().as_str(), resource_id)
+                                .await
+                                .map_err(|error| {
+                                    tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
+                                    ResourceApplicationError::Retryable
+                                })?;
                             let bookkeeping = self
                                 .store
                                 .get_resource(resource_id)
@@ -3328,7 +3330,7 @@ impl ResourceApplication for GenericResourceApplication {
                     .get(&o3k_native_api::resource::LifecycleOperation::Delete)
                     .cloned()
                     .ok_or(ResourceApplicationError::UnsupportedOperation)?;
-                let Some(provider) = self.storage_provider.clone() else {
+                let Some(workflow) = self.volume_workflow.as_ref() else {
                     return Err(ResourceApplicationError::NotReady);
                 };
                 // The native volume table is the lifecycle authority, while
@@ -3414,19 +3416,13 @@ impl ResourceApplication for GenericResourceApplication {
                         resource: None,
                     });
                 }
-                o3k_api::remove_native_volume(
-                    self.store.clone(),
-                    provider,
-                    auth.effective_scope().id().as_str(),
-                    resource_id,
-                    Some(operation_id),
-                    self.metering.as_ref(),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
-                    ResourceApplicationError::Retryable
-                })?;
+                workflow
+                    .delete(auth.effective_scope().id().as_str(), resource_id)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
+                        ResourceApplicationError::Retryable
+                    })?;
                 let bookkeeping = self
                     .store
                     .get_resource(resource_id)

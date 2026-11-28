@@ -290,6 +290,13 @@ fn configured_network_and_storage_workers_drain_in_real_daemon()
         .env("O3K_LVM_VOLUME_GROUP", "o3k-drain-test")
         .env("O3K_LVM_THIN_POOL", "pool")
         .env("O3K_LVM_PROVIDER_NAMESPACE", "drain-test")
+        .env("O3K_STORAGE_ENDPOINT", "https://127.0.0.1:1")
+        .env("O3K_STORAGE_TLS_CA", fixtures.join("ca.pem"))
+        .env("O3K_STORAGE_TLS_CERT", fixtures.join("server-chain.pem"))
+        .env("O3K_STORAGE_TLS_KEY", fixtures.join("server-key.pem"))
+        .env("O3K_STORAGE_SERVER_NAME", "localhost")
+        .env("O3K_STORAGE_AGENT_ID", "drain-agent")
+        .env("O3K_STORAGE_AGENT_EPOCH", "epoch-1")
         // Capability probing must not invoke host LVM tools. Empty recovery
         // state still enables the real storage recovery worker/fence.
         .env("PATH", directory.0.join("no-host-executables"))

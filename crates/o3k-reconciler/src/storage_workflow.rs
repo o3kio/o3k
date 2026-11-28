@@ -9,9 +9,11 @@
 
 use async_trait::async_trait;
 use o3k_domain::{
-    AttachmentAccessMode, StorageAction, StorageCommandEnvelope, VolumeAttachment,
-    VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
+    AttachmentAccessMode, StorageAction, StorageAttachmentCommandPayload, StorageCommandEnvelope,
+    StorageCommandPayload, StorageCommandRecord, VolumeAttachment, VolumeAttachmentId,
+    VolumeAttachmentState, VolumeId, VolumeState,
 };
+use o3k_storage::storage_payload_fingerprint;
 use o3k_storage::{
     PreparedAttachment, StorageAttachmentRequest, StorageProvider, StorageProviderError,
 };
@@ -20,7 +22,6 @@ use o3k_store::{
     StorageRepository, StoreError, VolumeAttachmentRecordV1,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
@@ -35,7 +36,7 @@ pub struct StorageAttachmentIntent {
     pub delete_on_termination: bool,
     pub controller_epoch: u64,
     pub target_agent_id: String,
-    pub target_agent_epoch: u64,
+    pub target_agent_epoch: String,
     pub idempotency_key: String,
     pub trace_id: String,
     pub deadline: String,
@@ -48,7 +49,7 @@ impl StorageAttachmentIntent {
             || self.controller_epoch == 0
             || self.target_agent_id.is_empty()
             || self.target_agent_id.len() > 128
-            || self.target_agent_epoch == 0
+            || self.target_agent_epoch.is_empty()
             || self.idempotency_key.is_empty()
             || self.idempotency_key.len() > 256
             || self.trace_id.is_empty()
@@ -62,8 +63,7 @@ impl StorageAttachmentIntent {
     }
 
     fn fingerprint(&self) -> Result<String, StorageWorkflowError> {
-        let bytes = serde_json::to_vec(self).map_err(|_| StorageWorkflowError::InvalidIntent)?;
-        Ok(hex_digest(&bytes))
+        storage_payload_fingerprint(self).map_err(|_| StorageWorkflowError::InvalidIntent)
     }
 }
 
@@ -138,7 +138,7 @@ pub trait StorageControllerFence: Send + Sync {
     }
 }
 
-pub struct StorageAttachmentWorkflow<S, P, C, F> {
+pub struct StorageAttachmentWorkflow<S, P: ?Sized, C, F> {
     store: Arc<S>,
     provider: Arc<P>,
     compute: Arc<C>,
@@ -148,7 +148,7 @@ pub struct StorageAttachmentWorkflow<S, P, C, F> {
 impl<S, P, C, F> StorageAttachmentWorkflow<S, P, C, F>
 where
     S: DurableStore + StorageRepository + Send + Sync + 'static,
-    P: StorageProvider + 'static,
+    P: StorageProvider + ?Sized + 'static,
     C: ComputeAttachmentExecutor + 'static,
     F: StorageControllerFence + 'static,
 {
@@ -217,6 +217,11 @@ where
         {
             return Err(StorageWorkflowError::InvalidIntent);
         }
+        let volume = self
+            .store
+            .get_volume(record.attachment.volume_id.as_uuid())
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
 
         let operation_id = deterministic_storage_id("operation", &intent.idempotency_key);
         let command_id = deterministic_storage_id("command", &intent.idempotency_key);
@@ -228,8 +233,14 @@ where
             fingerprint.clone(),
             StorageAction::PrepareAttachment,
         )?;
-        let payload =
-            serde_json::to_vec(&envelope).map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let payload = serde_json::to_vec(&StorageCommandRecord {
+            envelope: envelope.clone(),
+            payload: StorageCommandPayload::Attachment(attachment_payload(
+                &intent,
+                volume.volume.generation,
+            )),
+        })
+        .map_err(|_| StorageWorkflowError::InvalidIntent)?;
         self.store
             .insert_operation(&OperationRecord {
                 id: operation_id,
@@ -249,7 +260,7 @@ where
                 operation_id,
                 resource_id: intent.attachment_id.as_uuid(),
                 agent_id: intent.target_agent_id.clone(),
-                agent_epoch: intent.target_agent_epoch.to_string(),
+                agent_epoch: intent.target_agent_epoch.clone(),
                 payload_fingerprint_sha256: fingerprint,
                 payload,
                 state: AgentCommandState::Pending,
@@ -324,6 +335,11 @@ where
         {
             return Err(StorageWorkflowError::InvalidIntent);
         }
+        let volume = self
+            .store
+            .get_volume(record.attachment.volume_id.as_uuid())
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
         let operation_id = deterministic_storage_id("operation", &intent.idempotency_key);
         let command_id = deterministic_storage_id("command", &intent.idempotency_key);
         let envelope = self.envelope(
@@ -334,8 +350,14 @@ where
             fingerprint.clone(),
             StorageAction::TerminateAttachment,
         )?;
-        let payload =
-            serde_json::to_vec(&envelope).map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let payload = serde_json::to_vec(&StorageCommandRecord {
+            envelope: envelope.clone(),
+            payload: StorageCommandPayload::Attachment(attachment_payload(
+                &intent,
+                volume.volume.generation,
+            )),
+        })
+        .map_err(|_| StorageWorkflowError::InvalidIntent)?;
         self.store
             .insert_operation(&OperationRecord {
                 id: operation_id,
@@ -355,7 +377,7 @@ where
                 operation_id,
                 resource_id: intent.attachment_id.as_uuid(),
                 agent_id: intent.target_agent_id,
-                agent_epoch: intent.target_agent_epoch.to_string(),
+                agent_epoch: intent.target_agent_epoch.clone(),
                 payload_fingerprint_sha256: fingerprint,
                 payload,
                 state: AgentCommandState::Pending,
@@ -402,12 +424,11 @@ where
         }
         self.fence.assert_current(controller_epoch).await?;
         let command = self.store.get_agent_command(command_id).await?;
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         envelope
             .validate()
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
-        if command.agent_epoch != envelope.target_agent_epoch.to_string() {
+        if command.agent_epoch != envelope.target_agent_epoch {
             return Err(StorageWorkflowError::StaleAgentFence);
         }
         let record = self
@@ -502,8 +523,7 @@ where
         volume_generation: u64,
         controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         self.execute_attach_from_command_with_intent(
             intent,
             envelope,
@@ -521,8 +541,7 @@ where
         record: VolumeAttachmentRecordV1,
         controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         let volume = self
             .store
             .get_volume(record.attachment.volume_id.as_uuid())
@@ -602,7 +621,16 @@ where
             .await?
             .ok_or(StoreError::ResourceNotFound)?;
         let request = attachment_request(&record.attachment, volume.volume.generation, &envelope);
-        match self.provider.terminate_attachment(&request).await {
+        match self
+            .provider
+            .terminate_attachment_with_context(
+                &request,
+                &o3k_storage::StorageExecutionContext {
+                    envelope: envelope.clone(),
+                },
+            )
+            .await
+        {
             Err(error) if error.is_unknown_outcome() => {
                 self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
@@ -632,8 +660,7 @@ where
         volume_generation: u64,
         controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
-            .map_err(|_| StorageWorkflowError::InvalidIntent)?;
+        let envelope = decode_command_envelope(&command.payload)?;
         let intent = intent_from_attachment(&envelope, &record.attachment);
         self.execute_attach_from_command_with_intent(
             intent,
@@ -668,7 +695,16 @@ where
             )
             .await?;
         let request = attachment_request(&record.attachment, volume_generation, &envelope);
-        let prepared = match self.provider.prepare_attachment(&request).await {
+        let prepared = match self
+            .provider
+            .prepare_attachment_with_context(
+                &request,
+                &o3k_storage::StorageExecutionContext {
+                    envelope: envelope.clone(),
+                },
+            )
+            .await
+        {
             Ok(value) => value,
             Err(error) if error.is_unknown_outcome() => {
                 self.fence.assert_current(controller_epoch).await?;
@@ -953,8 +989,10 @@ where
             resource_generation: generation,
             project_id: intent.project_id.clone(),
             controller_epoch: intent.controller_epoch,
+            // The provider boundary fills the live WorkLease fence.
+            fencing_token: 0,
             target_agent_id: intent.target_agent_id.clone(),
-            target_agent_epoch: intent.target_agent_epoch,
+            target_agent_epoch: intent.target_agent_epoch.clone(),
             deadline: intent.deadline.clone(),
             trace_id: intent.trace_id.clone(),
             action,
@@ -1017,23 +1055,44 @@ fn intent_from_attachment(
         delete_on_termination: attachment.delete_on_termination,
         controller_epoch: envelope.controller_epoch,
         target_agent_id: envelope.target_agent_id.clone(),
-        target_agent_epoch: envelope.target_agent_epoch,
+        target_agent_epoch: envelope.target_agent_epoch.clone(),
         idempotency_key: envelope.idempotency_key.clone(),
         trace_id: envelope.trace_id.clone(),
         deadline: envelope.deadline.clone(),
     }
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn deterministic_storage_id(kind: &str, idempotency_key: &str) -> Uuid {
     let name = format!("o3k-storage:{kind}:{idempotency_key}");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
+}
+
+fn decode_command_envelope(bytes: &[u8]) -> Result<StorageCommandEnvelope, StorageWorkflowError> {
+    if let Ok(envelope) = serde_json::from_slice::<StorageCommandEnvelope>(bytes) {
+        return Ok(envelope);
+    }
+    if let Ok(record) = serde_json::from_slice::<StorageCommandRecord>(bytes) {
+        return Ok(record.envelope);
+    }
+    // Read-only compatibility for commands written before typed payloads were
+    // introduced. New mutations always use StorageCommandRecord.
+    serde_json::from_slice::<StorageCommandEnvelope>(bytes)
+        .map_err(|_| StorageWorkflowError::InvalidIntent)
+}
+
+fn attachment_payload(
+    intent: &StorageAttachmentIntent,
+    volume_generation: u64,
+) -> StorageAttachmentCommandPayload {
+    StorageAttachmentCommandPayload {
+        attachment_id: intent.attachment_id,
+        volume_id: intent.volume_id,
+        server_id: intent.server_id,
+        project_id: intent.project_id.clone(),
+        access_mode: intent.access_mode,
+        delete_on_termination: intent.delete_on_termination,
+        volume_generation,
+    }
 }
 
 #[cfg(test)]
@@ -1215,7 +1274,7 @@ mod tests {
             delete_on_termination: attachment.delete_on_termination,
             controller_epoch: 7,
             target_agent_id: "host-a".to_owned(),
-            target_agent_epoch: 3,
+            target_agent_epoch: "3".into(),
             idempotency_key: "attach-once".to_owned(),
             trace_id: "trace-attach".to_owned(),
             deadline: "2026-08-19T00:00:00Z".to_owned(),
@@ -1422,7 +1481,7 @@ mod tests {
         assert_eq!(result.attachment_state, VolumeAttachmentState::Attached);
         assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 2);
         let recovered = store.get_agent_command(&command.command_id).await.unwrap();
-        let envelope: StorageCommandEnvelope = serde_json::from_slice(&recovered.payload).unwrap();
+        let envelope = decode_command_envelope(&recovered.payload).unwrap();
         assert_eq!(envelope.controller_epoch, 7);
     }
 }

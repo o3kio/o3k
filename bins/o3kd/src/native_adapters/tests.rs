@@ -151,6 +151,100 @@ mod native_compute_tests {
         }
     }
 
+    struct FakeNativeVolumeWorkflow {
+        store: Arc<o3k_store::unified::O3kStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_api::NativeVolumeWorkflow for FakeNativeVolumeWorkflow {
+        async fn create(&self, volume_id: Uuid) -> Result<(), String> {
+            let current = self
+                .store
+                .get_volume(volume_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "volume missing".to_owned())?;
+            let expected_generation = current.volume.generation;
+            let mut creating = current.volume.clone();
+            creating.state = o3k_domain::VolumeState::Creating;
+            creating.generation = creating.generation.saturating_add(1);
+            let creating = current
+                .volume
+                .clone()
+                .transition(creating)
+                .map_err(|error| error.to_string())?;
+            let creating = self
+                .store
+                .update_volume(
+                    expected_generation,
+                    &o3k_store::VolumeRecord {
+                        volume: creating,
+                        created_at: current.created_at.clone(),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut next = creating.volume.clone();
+            let creating_generation = creating.volume.generation;
+            next.state = o3k_domain::VolumeState::Available;
+            next.generation = next.generation.saturating_add(1);
+            next.provider_reference = Some(o3k_domain::StorageProviderReference {
+                provider: "lvm".to_owned(),
+                resource_id: format!("o3k-v-{}", volume_id.simple()),
+            });
+            let next = creating
+                .volume
+                .transition(next)
+                .map_err(|error| error.to_string())?;
+            self.store
+                .update_volume(
+                    creating_generation,
+                    &o3k_store::VolumeRecord {
+                        volume: next,
+                        created_at: creating.created_at,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+
+        async fn delete(&self, project_id: &str, volume_id: Uuid) -> Result<(), String> {
+            let current = self
+                .store
+                .get_volume(volume_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "volume missing".to_owned())?;
+            if current.volume.project_id != project_id {
+                return Err("volume owner mismatch".to_owned());
+            }
+            let expected_generation = current.volume.generation;
+            let mut next = current.volume.clone();
+            next.state = o3k_domain::VolumeState::Deleted;
+            next.generation = next.generation.saturating_add(1);
+            let next = current
+                .volume
+                .transition(next)
+                .map_err(|error| error.to_string())?;
+            self.store
+                .update_volume(
+                    expected_generation,
+                    &o3k_store::VolumeRecord {
+                        volume: next,
+                        created_at: current.created_at,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+
+        async fn recover(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     fn context(project: &str) -> AuthContext {
         AuthContext::new(
             Principal::User(UserPrincipal::new(
@@ -437,6 +531,18 @@ mod native_compute_tests {
         Uuid,
         Arc<o3k_network::NetworkService>,
     ) {
+        setup_with_network_and_volume_workflow(false).await
+    }
+
+    async fn setup_with_network_and_volume_workflow(
+        enable_volume_workflow: bool,
+    ) -> (
+        axum::Router,
+        Arc<o3k_store::unified::O3kStore>,
+        Arc<FakeComputeProvider>,
+        Uuid,
+        Arc<o3k_network::NetworkService>,
+    ) {
         use axum::routing::get;
         use axum::{Router, extract::DefaultBodyLimit};
         use o3k_native_api::{operation, resource};
@@ -501,6 +607,11 @@ mod native_compute_tests {
             network_external_realm_id: None,
             attachment_workflow: None,
             storage_provider: Some(Arc::new(FakeStorageProvider::default())),
+            volume_workflow: enable_volume_workflow.then(|| {
+                Arc::new(FakeNativeVolumeWorkflow {
+                    store: store.clone(),
+                }) as Arc<dyn o3k_api::NativeVolumeWorkflow>
+            }),
             metering: None,
         };
 
@@ -1021,7 +1132,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_volume_create_replay_with_changed_semantics_conflicts() {
-        let (router, store, _, _) = setup().await;
+        let (router, store, _, _, _) = setup_with_network_and_volume_workflow(true).await;
         let router = &router;
         let volume_spec = |size: u64, name: &str| {
             serde_json::json!({

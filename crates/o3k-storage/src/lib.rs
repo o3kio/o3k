@@ -9,19 +9,399 @@
 use async_trait::async_trait;
 use o3k_domain::{
     AttachmentAccessMode, SnapshotConsistency, SnapshotId, StorageCapabilities,
-    StorageProviderReference, VolumeAttachmentId, VolumeId,
+    StorageCommandEnvelope, StorageObservation, StorageOperationState, StorageProviderReference,
+    VolumeAttachmentId, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 use tokio::process::Command;
+
+pub fn storage_payload_fingerprint<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(payload)?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Durable local acceptance journal used by the storage executor boundary.
+/// The controller remains authoritative; this journal only fences replay and
+/// records executor outcomes before a process restart can lose them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalRecord {
+    envelope: StorageCommandEnvelope,
+    observation: StorageObservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalSnapshot {
+    format_version: u16,
+    controller_epoch: u64,
+    #[serde(default)]
+    fencing_token: u64,
+    records: Vec<JournalRecord>,
+}
+
+#[derive(Debug, Error)]
+pub enum StorageJournalError {
+    #[error("storage journal I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("storage journal encoding failed: {0}")]
+    Encoding(#[from] serde_json::Error),
+    #[error("storage command conflicts with an existing idempotency record")]
+    Conflict,
+    #[error("storage journal record was not found")]
+    NotFound,
+    #[error("storage command is stale for the executor")]
+    Stale,
+    #[error("storage journal commit is visible but directory durability is uncertain: {0}")]
+    DurabilityUncertain(#[source] std::io::Error),
+}
+
+#[derive(Debug)]
+pub struct StorageJournal {
+    path: std::path::PathBuf,
+    records: std::sync::Mutex<Vec<JournalRecord>>,
+    controller_epoch: std::sync::Mutex<u64>,
+    fencing_token: std::sync::Mutex<u64>,
+}
+
+impl StorageJournal {
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageJournalError> {
+        let path = path.into();
+        let journal = Self {
+            path,
+            records: std::sync::Mutex::new(Vec::new()),
+            controller_epoch: std::sync::Mutex::new(0),
+            fencing_token: std::sync::Mutex::new(0),
+        };
+        let _lock = acquire_journal_lock(&journal_lock_path(&journal.path))?;
+        journal.reload_locked()?;
+        Ok(journal)
+    }
+
+    pub fn accept(
+        &self,
+        envelope: StorageCommandEnvelope,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Result<StorageObservation, StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
+        envelope
+            .validate()
+            .map_err(|_| StorageJournalError::Stale)?;
+        if envelope.target_agent_id != agent_id || envelope.target_agent_epoch != agent_epoch {
+            return Err(StorageJournalError::Stale);
+        }
+        if envelope.fencing_token == 0 {
+            return Err(StorageJournalError::Stale);
+        }
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let mut current_epoch = self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let mut current_token = self
+            .fencing_token
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        // ControllerEpoch identifies the process session, but is not the
+        // takeover fence.  Durable WorkLease fencing_token is authoritative;
+        // a restarted controller may present a new session epoch.
+        // Reject stale-fence replays before the idempotency fast path. A
+        // replaced controller must not revive an old command by reusing its
+        // key.
+        if *current_token != 0 && envelope.fencing_token < *current_token {
+            return Err(StorageJournalError::Stale);
+        }
+        if let Some(existing) = records
+            .iter()
+            .find(|record| record.envelope.idempotency_key == envelope.idempotency_key)
+        {
+            return if existing.envelope == envelope {
+                Ok(existing.observation.clone())
+            } else {
+                Err(StorageJournalError::Conflict)
+            };
+        }
+        let observation = StorageObservation {
+            agent_id: agent_id.to_owned(),
+            agent_epoch: agent_epoch.to_owned(),
+            resource_id: envelope.resource_id.clone(),
+            provider_resource_id: None,
+            operation_id: envelope.operation_id,
+            resource_generation: envelope.resource_generation,
+            observation_sequence: 1,
+            observed_at: acceptance_time(),
+            operation_state: StorageOperationState::Accepted,
+            resource_state: "accepted".to_owned(),
+            error_category: None,
+            redacted_message: None,
+            device_path: None,
+        };
+        let next_controller_epoch = envelope.controller_epoch;
+        let next_fencing_token = envelope.fencing_token;
+        let mut candidate = records.clone();
+        candidate.push(JournalRecord {
+            envelope,
+            observation: observation.clone(),
+        });
+        match persist_journal(
+            &self.path,
+            next_controller_epoch,
+            next_fencing_token,
+            &candidate,
+        ) {
+            Ok(()) => {}
+            Err(error @ StorageJournalError::DurabilityUncertain(_)) => {
+                *records = candidate;
+                drop(records);
+                *current_epoch = next_controller_epoch;
+                *current_token = next_fencing_token;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+        *records = candidate;
+        *current_epoch = next_controller_epoch;
+        *current_token = next_fencing_token;
+        Ok(observation)
+    }
+
+    pub fn get(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<StorageObservation>, StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        Ok(records
+            .iter()
+            .find(|record| record.envelope.idempotency_key == idempotency_key)
+            .map(|record| record.observation.clone()))
+    }
+
+    pub fn get_envelope(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<StorageCommandEnvelope>, StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        Ok(records
+            .iter()
+            .find(|r| r.envelope.idempotency_key == idempotency_key)
+            .map(|r| r.envelope.clone()))
+    }
+
+    /// Persist an executor observation after the bounded provider has run.
+    /// The caller must retain the envelope identity and monotonically advance
+    /// the observation sequence; the journal never invents controller state.
+    pub fn record_observation(
+        &self,
+        idempotency_key: &str,
+        observation: StorageObservation,
+    ) -> Result<(), StorageJournalError> {
+        let _lock = acquire_journal_lock(&journal_lock_path(&self.path))?;
+        self.reload_locked()?;
+        observation
+            .validate()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.envelope.idempotency_key == idempotency_key)
+            .ok_or(StorageJournalError::NotFound)?;
+        if observation.agent_id != record.observation.agent_id
+            || observation.agent_epoch != record.observation.agent_epoch
+            || observation.operation_id != record.observation.operation_id
+            || observation.resource_generation != record.observation.resource_generation
+            || observation.observation_sequence <= record.observation.observation_sequence
+            || observation.resource_id != record.envelope.resource_id
+        {
+            return Err(StorageJournalError::Conflict);
+        }
+        let mut candidate = records.clone();
+        let index = candidate
+            .iter()
+            .position(|item| item.envelope.idempotency_key == idempotency_key)
+            .ok_or(StorageJournalError::NotFound)?;
+        candidate[index].observation = observation;
+        let epoch = *self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        let token = *self
+            .fencing_token
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)?;
+        match persist_journal(&self.path, epoch, token, &candidate) {
+            Ok(()) => {}
+            Err(error @ StorageJournalError::DurabilityUncertain(_)) => {
+                *records = candidate;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+        *records = candidate;
+        Ok(())
+    }
+
+    fn reload_locked(&self) -> Result<(), StorageJournalError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let bytes = std::fs::read(&self.path)?;
+        let (epoch, token, records, migrated) =
+            match serde_json::from_slice::<JournalSnapshot>(&bytes) {
+                Ok(snapshot) if snapshot.format_version == 1 => (
+                    snapshot.controller_epoch,
+                    snapshot.fencing_token,
+                    snapshot.records,
+                    false,
+                ),
+                Ok(_) => return Err(StorageJournalError::Conflict),
+                Err(_) => (
+                    0,
+                    0,
+                    serde_json::from_slice::<Vec<JournalRecord>>(&bytes)?,
+                    true,
+                ),
+            };
+        if migrated {
+            match persist_journal(&self.path, epoch, token, &records) {
+                Ok(()) => {}
+                Err(StorageJournalError::DurabilityUncertain(error)) => {
+                    *self
+                        .records
+                        .lock()
+                        .map_err(|_| StorageJournalError::Conflict)? = records;
+                    *self
+                        .controller_epoch
+                        .lock()
+                        .map_err(|_| StorageJournalError::Conflict)? = epoch;
+                    *self
+                        .fencing_token
+                        .lock()
+                        .map_err(|_| StorageJournalError::Conflict)? = token;
+                    return Err(StorageJournalError::DurabilityUncertain(error));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        *self
+            .records
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = records;
+        *self
+            .controller_epoch
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = epoch;
+        *self
+            .fencing_token
+            .lock()
+            .map_err(|_| StorageJournalError::Conflict)? = token;
+        Ok(())
+    }
+}
+
+fn journal_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!(
+            ".{}.lock",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("journal")
+        ))
+}
+
+fn persist_journal(
+    path: &std::path::Path,
+    controller_epoch: u64,
+    fencing_token: u64,
+    records: &[JournalRecord],
+) -> Result<(), StorageJournalError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("journal has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".journal-{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec(&JournalSnapshot {
+        format_version: 1,
+        controller_epoch,
+        fencing_token,
+        records: records.to_vec(),
+    })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        return Err(StorageJournalError::DurabilityUncertain(error));
+    }
+    Ok(())
+}
+
+struct JournalLock {
+    _file: std::fs::File,
+}
+fn acquire_journal_lock(path: &std::path::Path) -> Result<JournalLock, StorageJournalError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(std::io::Error::from)?;
+    Ok(JournalLock { _file: file })
+}
+
+fn acceptance_time() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!("unix-ms:{millis}")
+}
 
 mod ceph;
 #[cfg(all(test, unix))]
 mod command_drain_tests;
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod command_allowlist_tests {
     use super::*;
 
@@ -59,12 +439,210 @@ mod command_allowlist_tests {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod journal_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn envelope(key: &str, fingerprint: &str) -> StorageCommandEnvelope {
+        StorageCommandEnvelope {
+            protocol_version: 1,
+            command_id: uuid::Uuid::new_v4(),
+            operation_id: uuid::Uuid::new_v4(),
+            idempotency_key: key.to_owned(),
+            resource_id: "volume-1".to_owned(),
+            resource_generation: 1,
+            project_id: "project-1".to_owned(),
+            controller_epoch: 1,
+            fencing_token: 1,
+            target_agent_id: "storage-a".to_owned(),
+            target_agent_epoch: "7".into(),
+            deadline: "2099-01-01T00:00:00Z".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: o3k_domain::StorageAction::CreateVolume,
+            canonical_payload_fingerprint: fingerprint.to_owned(),
+        }
+    }
+
+    fn path() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("o3k-storage-journal-{nanos}.json"))
+    }
+
+    #[test]
+    fn acceptance_replays_after_restart_and_rejects_conflicts() {
+        let journal_path = path();
+        let command = envelope("op-1", &"a".repeat(64));
+        let accepted = StorageJournal::open(&journal_path)
+            .expect("journal opens")
+            .accept(command.clone(), "storage-a", "7")
+            .expect("command accepted");
+        let journal = StorageJournal::open(&journal_path).expect("journal reloads");
+        assert_eq!(journal.get("op-1").expect("lookup"), Some(accepted.clone()));
+        assert_eq!(
+            journal.accept(command, "storage-a", "7").expect("replay"),
+            accepted
+        );
+        assert!(matches!(
+            journal.accept(envelope("op-1", &"b".repeat(64)), "storage-a", "7"),
+            Err(StorageJournalError::Conflict)
+        ));
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn stale_agent_epoch_is_rejected() {
+        let journal_path = path();
+        let result = StorageJournal::open(&journal_path)
+            .expect("journal opens")
+            .accept(envelope("op-2", &"c".repeat(64)), "storage-a", "8");
+        assert!(matches!(result, Err(StorageJournalError::Stale)));
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn fencing_token_rejects_stale_and_accepts_takeover() {
+        let journal_path = path();
+        let journal = StorageJournal::open(&journal_path).expect("open");
+        journal
+            .accept(envelope("fence-a", &"a".repeat(64)), "storage-a", "7")
+            .expect("initial token");
+        let mut stale = envelope("fence-b", &"b".repeat(64));
+        stale.fencing_token = 0;
+        assert!(matches!(
+            journal.accept(stale, "storage-a", "7"),
+            Err(StorageJournalError::Stale)
+        ));
+        let mut successor = envelope("fence-b", &"b".repeat(64));
+        successor.fencing_token = 2;
+        successor.controller_epoch = 99;
+        journal
+            .accept(successor, "storage-a", "7")
+            .expect("higher token takeover");
+        drop(journal);
+        let journal = StorageJournal::open(&journal_path).expect("reopen after takeover");
+        let mut old_duplicate = envelope("fence-a", &"a".repeat(64));
+        old_duplicate.fencing_token = 1;
+        assert!(matches!(
+            journal.accept(old_duplicate, "storage-a", "7"),
+            Err(StorageJournalError::Stale)
+        ));
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn terminal_observation_is_durable_and_sequence_fenced() {
+        let journal_path = path();
+        let command = envelope("op-3", &"d".repeat(64));
+        let journal = StorageJournal::open(&journal_path).expect("journal opens");
+        let accepted = journal.accept(command, "storage-a", "7").expect("accepted");
+        let mut terminal = accepted.clone();
+        terminal.observation_sequence = 2;
+        terminal.operation_state = StorageOperationState::Succeeded;
+        terminal.resource_state = "available".to_owned();
+        journal
+            .record_observation("op-3", terminal.clone())
+            .expect("recorded");
+        assert_eq!(
+            StorageJournal::open(&journal_path)
+                .expect("reload")
+                .get("op-3")
+                .expect("lookup"),
+            Some(terminal)
+        );
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn independent_instances_preserve_overlapping_updates() {
+        let journal_path = path();
+        let first = StorageJournal::open(&journal_path).expect("journal");
+        let second = StorageJournal::open(&journal_path).expect("journal");
+        first
+            .accept(envelope("op-a", &"e".repeat(64)), "storage-a", "7")
+            .expect("first");
+        second
+            .accept(envelope("op-b", &"f".repeat(64)), "storage-a", "7")
+            .expect("second");
+        let reloaded = StorageJournal::open(&journal_path).expect("reload");
+        assert!(reloaded.get("op-a").expect("lookup").is_some());
+        assert!(reloaded.get("op-b").expect("lookup").is_some());
+        let _ = std::fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn legacy_record_vector_is_migrated_before_mutation() {
+        let journal_path = path();
+        let command = envelope("legacy-op", &"a".repeat(64));
+        let old = JournalRecord {
+            envelope: command.clone(),
+            observation: StorageObservation {
+                agent_id: "storage-a".to_owned(),
+                agent_epoch: "7".into(),
+                resource_id: command.resource_id.clone(),
+                provider_resource_id: None,
+                operation_id: command.operation_id,
+                resource_generation: command.resource_generation,
+                observation_sequence: 1,
+                observed_at: acceptance_time(),
+                operation_state: StorageOperationState::Accepted,
+                resource_state: "accepted".to_owned(),
+                error_category: None,
+                redacted_message: None,
+                device_path: None,
+            },
+        };
+        std::fs::write(
+            &journal_path,
+            serde_json::to_vec(&vec![old]).expect("encode legacy"),
+        )
+        .expect("write legacy journal");
+
+        let journal = StorageJournal::open(&journal_path).expect("migrate legacy on open");
+        assert!(
+            journal
+                .get("legacy-op")
+                .expect("read legacy record")
+                .is_some()
+        );
+        journal
+            .accept(envelope("new-op", &"b".repeat(64)), "storage-a", "7")
+            .expect("mutation succeeds after migration");
+        let migrated: JournalSnapshot =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read migrated"))
+                .expect("snapshot format");
+        assert_eq!(migrated.format_version, 1);
+        assert_eq!(migrated.records.len(), 2);
+        let _ = std::fs::remove_file(&journal_path);
+    }
+
+    #[test]
+    fn reads_refresh_records_written_by_another_journal_instance() {
+        let journal_path = path();
+        let first = StorageJournal::open(&journal_path).expect("first journal");
+        let second = StorageJournal::open(&journal_path).expect("second journal");
+        first
+            .accept(
+                envelope("cross-instance", &"c".repeat(64)),
+                "storage-a",
+                "7",
+            )
+            .expect("accept command");
+        assert!(second.get("cross-instance").expect("fresh read").is_some());
+        let _ = std::fs::remove_file(&journal_path);
+    }
+}
+
 pub use ceph::{
     CephCommandError, CephCommandOutput, CephCommandRunner, CephRbdConfig, CephRbdStorageProvider,
     SystemCephCommandRunner,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageVolumeRequest {
     pub volume_id: VolumeId,
     pub project_id: String,
@@ -88,6 +666,10 @@ pub struct StorageAttachmentRequest {
     pub volume_generation: u64,
     pub host_id: String,
     pub access_mode: AttachmentAccessMode,
+}
+#[derive(Debug, Clone)]
+pub struct StorageExecutionContext {
+    pub envelope: o3k_domain::StorageCommandEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,10 +777,41 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<(), StorageProviderError>;
+    /// Context-bound volume mutation hooks.  Durable controller workflows use
+    /// these hooks so command identity, idempotency and fencing come from the
+    /// persisted envelope rather than being synthesized by a provider.
+    async fn create_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        self.create_volume(request).await
+    }
+    async fn inspect_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        self.inspect_volume(request).await
+    }
+    async fn delete_volume_with_context(
+        &self,
+        request: &StorageVolumeRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<(), StorageProviderError> {
+        self.delete_volume(request).await
+    }
     async fn prepare_attachment(
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<PreparedAttachment, StorageProviderError>;
+    async fn prepare_attachment_with_context(
+        &self,
+        request: &StorageAttachmentRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<PreparedAttachment, StorageProviderError> {
+        self.prepare_attachment(request).await
+    }
     /// Observe the bounded storage-side attachment state without retrying a
     /// mutation. A controller uses this after an unknown outcome before it
     /// may issue another command.
@@ -210,6 +823,13 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<StorageAttachmentObservation, StorageProviderError>;
+    async fn terminate_attachment_with_context(
+        &self,
+        request: &StorageAttachmentRequest,
+        _context: &StorageExecutionContext,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        self.terminate_attachment(request).await
+    }
     async fn create_snapshot(
         &self,
         request: &StorageSnapshotRequest,

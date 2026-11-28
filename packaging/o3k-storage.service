@@ -1,0 +1,39 @@
+[Unit]
+Description=O3K restricted native storage executor
+After=network-online.target o3kd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/o3k/storage/o3k-storage.env
+ExecStart=/usr/local/bin/o3k-storage-bin
+Restart=on-failure
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+# LVM needs the dedicated journal plus its bounded metadata archive/backup,
+# lock, and runtime hint directories. ProtectSystem keeps every other path
+# read-only for the executor.
+ReadWritePaths=/var/lib/o3k/storage /etc/lvm/archive /etc/lvm/backup /run/lock/lvm /run/lvm
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+PrivateDevices=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+DevicePolicy=closed
+# The installer must add explicit rules for configured VG backing devices.
+DeviceAllow=/dev/mapper/control rw
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -44,6 +44,8 @@ use o3k_store::{
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod native_volume_workflow;
+pub mod storage_volume_workflow;
 pub mod storage_workflow;
 
 /// Test-only fault pause (issue #87): sleeps the configured duration when the

@@ -1,5 +1,6 @@
 use ed25519_dalek::SigningKey;
 use o3k_database_example::{ChildLifecycleActions, DatabaseControllerHandler, InstanceSpec};
+use o3k_domain::VolumeState;
 use o3k_kernel::{ActionId, Controller, ManifestRegistry, OwnershipScope, ScopeId};
 use o3k_kernel::{ActionPolicy, PrincipalKind};
 use o3k_kernel::{LimitKey, LimitValue};
@@ -15,12 +16,90 @@ use o3k_store::{
     CanonicalOperationRecord, DurableStore, IdempotencyReservationRequest, O3kStore,
     OperationRecord, OperationState, ResourceRecord, ResourceRelationshipRecord,
 };
-use o3k_store::{NetworkRepository, QuotaRepository};
+use o3k_store::{NetworkRepository, QuotaRepository, StorageRepository};
 use std::{collections::HashMap, sync::Arc};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
 struct ProcessTokenIssuer;
+
+/// Explicit volume execution boundary for C1 composition fixtures. These
+/// tests exercise composition, delegation, and mTLS; volume provider
+/// semantics are covered by the native storage workflow tests. The fixture
+/// still performs the canonical lifecycle transition so the composition
+/// contract does not rely on the removed direct provider bypass.
+struct C1VolumeWorkflow {
+    store: Arc<O3kStore>,
+}
+
+#[async_trait::async_trait]
+impl o3k_api::NativeVolumeWorkflow for C1VolumeWorkflow {
+    async fn create(&self, volume_id: uuid::Uuid) -> Result<(), String> {
+        let current = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "volume missing".to_owned())?;
+        let mut creating = current.volume.clone();
+        creating.state = VolumeState::Creating;
+        creating.generation = creating.generation.saturating_add(1);
+        let creating = current
+            .volume
+            .clone()
+            .transition(creating)
+            .map_err(|e| e.to_string())?;
+        let record = self
+            .store
+            .update_volume(
+                current.volume.generation,
+                &o3k_store::VolumeRecord {
+                    volume: creating,
+                    created_at: current.created_at,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut available = record.volume.clone();
+        available.state = VolumeState::Available;
+        available.generation = available.generation.saturating_add(1);
+        available.provider_reference = Some(o3k_domain::StorageProviderReference {
+            provider: "lvm".to_owned(),
+            resource_id: format!("o3k-v-{}", volume_id.simple()),
+        });
+        self.store
+            .update_volume(
+                record.volume.generation,
+                &o3k_store::VolumeRecord {
+                    volume: record
+                        .volume
+                        .transition(available)
+                        .map_err(|e| e.to_string())?,
+                    created_at: record.created_at,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn delete(&self, project_id: &str, volume_id: uuid::Uuid) -> Result<(), String> {
+        let current = self
+            .store
+            .get_volume(volume_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "volume missing".to_owned())?;
+        if current.volume.project_id != project_id {
+            return Err("volume owner mismatch".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 fn process_auth_context(project: &str) -> o3k_kernel::AuthContext {
     o3k_kernel::AuthContext::new(
@@ -160,6 +239,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                store: store.clone(),
+            })),
             metering: None,
         });
     let mut manifests = ManifestRegistry::new();
@@ -265,6 +347,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                store: store.clone(),
+            })),
             metering: None,
         });
     manifests.register_controller("database-example", controller.session().clone())?;
@@ -789,6 +874,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                store: store.clone(),
+            })),
             metering: None,
         });
     let independent_dispatcher =
@@ -1321,6 +1409,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 public_allocator: None,
                 network_external_realm_id: None,
                 attachment_workflow: None,
+                volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                    store: store.clone(),
+                })),
                 metering: None,
             });
         let dispatcher =
@@ -1547,6 +1638,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                store: store_b.clone(),
+            })),
             metering: None,
         });
     let dispatcher_b =
@@ -1810,6 +1904,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                store: left_store.clone(),
+            })),
             metering: None,
         });
     let right_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
@@ -1834,6 +1931,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            volume_workflow: Some(Arc::new(C1VolumeWorkflow {
+                store: right_store.clone(),
+            })),
             metering: None,
         });
     let mut child_registry = ManifestRegistry::new();

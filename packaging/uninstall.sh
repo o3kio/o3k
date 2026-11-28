@@ -66,7 +66,7 @@ while IFS= read -r line; do
   [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
   [[ "$line" == "$MANIFEST_HEADER" ]] && continue
   case "$line" in
-    bin/o3kd|bin/o3k|bin/o3k-compute|bin/o3k-network|bin/o3k-enrollment-issuer|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/o3k-network.service|share/o3k/o3k-enrollment-issuer@.service|share/o3k/o3k-enrollment-issuer.socket|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/backup-trust.example.json|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
+    bin/o3kd|bin/o3k|bin/o3k-compute|bin/o3k-network|bin/o3k-storage|bin/o3k-enrollment-issuer|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/o3k-network.service|share/o3k/o3k-storage.service|share/o3k/o3k-enrollment-issuer@.service|share/o3k/o3k-enrollment-issuer.socket|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/backup-trust.example.json|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
       MANIFEST_FILES+=("$line")
       ;;
     *)
@@ -211,6 +211,9 @@ if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   fi
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3kd.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
+  command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-storage.service 2>/dev/null || true
+  if [[ -f /usr/local/libexec/o3k-sync-storage-epoch ]] && [[ "$(stat -c '%u:%a' /usr/local/libexec/o3k-sync-storage-epoch 2>/dev/null)" == "0:755" ]]; then rm -f /usr/local/libexec/o3k-sync-storage-epoch; fi
+  if [[ -f /etc/sudoers.d/o3k-sync-storage-epoch ]] && [[ "$(stat -c '%u:%a' /etc/sudoers.d/o3k-sync-storage-epoch 2>/dev/null)" == "0:440" ]] && grep -Fqx 'o3k ALL=(root) NOPASSWD: /usr/local/libexec/o3k-sync-storage-epoch *' /etc/sudoers.d/o3k-sync-storage-epoch; then rm -f /etc/sudoers.d/o3k-sync-storage-epoch; fi
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
 remove_owned_system_file() {
@@ -310,10 +313,13 @@ if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   remove_owned_system_file "$PREFIX/share/o3k/o3k-compute.service" /etc/systemd/system/o3k-compute.service
   remove_owned_system_file "$PREFIX/share/o3k/o3k-network.service" /etc/systemd/system/o3k-network.service
   if printf '%s\n' "${MANIFEST_FILES[@]}" | grep -Fqx 'share/o3k/o3k-enrollment-issuer.socket'; then
-    remove_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" \
-      /etc/systemd/system/o3k-enrollment-issuer@.service
-    remove_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" \
-      /etc/systemd/system/o3k-enrollment-issuer.socket
+    remove_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer@.service" /etc/systemd/system/o3k-enrollment-issuer@.service
+    remove_owned_system_file "$PREFIX/share/o3k/o3k-enrollment-issuer.socket" /etc/systemd/system/o3k-enrollment-issuer.socket
+  fi
+  remove_owned_system_file "$PREFIX/share/o3k/o3k-storage.service" /etc/systemd/system/o3k-storage.service
+  if [[ -f /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf ]]; then
+    rm -f -- /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
+    rmdir --ignore-fail-on-non-empty /etc/systemd/system/o3k-storage.service.d 2>/dev/null || true
   fi
 fi
 for relative in "${MANIFEST_FILES[@]}"; do

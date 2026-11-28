@@ -9,7 +9,6 @@ pub mod backup;
 
 use o3k_kernel::{Clock, Controller};
 use o3k_provider::ComputeProvider;
-use o3k_storage::StorageProvider;
 use o3k_store::{
     BootstrapRepository, ComputeRepository, FederatedBindingRecord, IdentityRepository,
     OperatorAssignmentRecord,
@@ -234,7 +233,7 @@ use self::network::{
 use self::runtime::{control_shutdown_signal, spawn_console_event_consumer};
 use self::storage::{
     LocalComputeAttachmentExecutor, LocalStorageFence, NativeStorageAttachmentWorkflow,
-    storage_intent_epoch,
+    NativeStorageVolumeWorkflow, storage_intent_epoch,
 };
 
 fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String> {
@@ -255,38 +254,6 @@ fn unix_time_millis() -> u64 {
 }
 
 /// Resolve the native LVM provider configuration from the three `O3K_LVM_*`
-/// environment values. Unset and set-but-empty values both mean "provider not
-/// configured"; a partial configuration (some values set, others unset or
-/// empty) is rejected so a misconfigured host fails closed instead of
-/// silently running without storage. Values that are set but invalid are
-/// rejected by `LvmConfig::validate`.
-fn resolve_native_lvm_config(
-    volume_group: Option<String>,
-    thin_pool: Option<String>,
-    provider_namespace: Option<String>,
-) -> Result<Option<o3k_storage::LvmConfig>, Box<dyn std::error::Error>> {
-    let volume_group = volume_group.filter(|value| !value.is_empty());
-    let thin_pool = thin_pool.filter(|value| !value.is_empty());
-    let provider_namespace = provider_namespace.filter(|value| !value.is_empty());
-    match (volume_group, thin_pool, provider_namespace) {
-        (None, None, None) => Ok(None),
-        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => {
-            let config = o3k_storage::LvmConfig {
-                volume_group,
-                thin_pool,
-                provider_namespace,
-            };
-            config.validate()?;
-            Ok(Some(config))
-        }
-        _ => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "partial O3K_LVM_* configuration: set all of O3K_LVM_VOLUME_GROUP, \
-             O3K_LVM_THIN_POOL and O3K_LVM_PROVIDER_NAMESPACE, or none",
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod drain_test_support;
 #[cfg(test)]
@@ -1726,28 +1693,26 @@ pub async fn build_composition_with_guard(
         native_manifest_registry.update_controller_health(service_id, health)?;
     }
 
-    let native_lvm_config = resolve_native_lvm_config(
-        std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
-        std::env::var("O3K_LVM_THIN_POOL").ok(),
-        std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
-    )?;
-    let native_lvm_provider = native_lvm_config
-        .map(|config| o3k_storage::LvmStorageProvider::new(config).map(Arc::new))
-        .transpose()?;
+    // Native EA storage always crosses the dedicated mTLS executor boundary.
+    // Missing executor identity is a fail-closed configuration error.
+    let storage_fencing_token = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let native_lvm_provider: Option<Arc<o3k_storage::LvmStorageProvider>> = None;
     let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
-        match native_lvm_provider.clone() {
-            Some(provider) => match provider.capabilities().await {
-                Ok(capabilities) if capabilities.create_volume => Some(provider as _),
-                Ok(_) => {
-                    tracing::warn!("native storage provider lacks volume-create capability");
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "native storage provider readiness probe failed");
-                    None
-                }
-            },
-            None => None,
+        if std::env::var_os("O3K_STORAGE_ENDPOINT").is_some() {
+            Some(Arc::new(
+                crate::composition::storage::RemoteStorageProvider::from_env(
+                    std::env::var("O3K_STORAGE_AGENT_ID").map_err(|_| {
+                        "O3K_STORAGE_AGENT_ID is required for storage executor".to_owned()
+                    })?,
+                    std::env::var("O3K_STORAGE_AGENT_EPOCH").map_err(|_| {
+                        "O3K_STORAGE_AGENT_EPOCH is required for storage executor".to_owned()
+                    })?,
+                    storage_intent_epoch(&controller_epoch),
+                    storage_fencing_token.clone(),
+                )?,
+            ) as Arc<dyn o3k_storage::StorageProvider>)
+        } else {
+            None
         };
 
     // Metering authority: the durable authority window is anchored once at
@@ -1882,7 +1847,7 @@ pub async fn build_composition_with_guard(
     let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
     let mut storage_fence_for_drain = None;
     let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
-        native_lvm_provider.as_ref().map(|provider| {
+        native_storage_provider.as_ref().map(|provider| {
             let storage_fence = LocalStorageFence {
                 coordination: coordination_store.clone(),
                 controller_id: controller_id.clone(),
@@ -1891,6 +1856,7 @@ pub async fn build_composition_with_guard(
                 execution_lock_path: config.data_dir.join("storage.execution.lock"),
                 attempt: Arc::new(tokio::sync::Mutex::new(None)),
                 quiescing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                fencing_token: storage_fencing_token.clone(),
             };
             storage_fence_for_drain = Some(storage_fence.clone());
             let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
@@ -1907,6 +1873,25 @@ pub async fn build_composition_with_guard(
                 workflow,
             }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
         });
+    let native_volume_workflow: Option<Arc<dyn o3k_api::NativeVolumeWorkflow>> =
+        native_storage_provider.as_ref().and_then(|provider| {
+            let storage_fence = storage_fence_for_drain.clone()?;
+            let target_agent_id = std::env::var("O3K_STORAGE_AGENT_ID").ok()?;
+            let target_agent_epoch = std::env::var("O3K_STORAGE_AGENT_EPOCH").ok()?;
+            let workflow = o3k_reconciler::native_volume_workflow::NativeVolumeWorkflow::new(
+                store.clone(),
+                provider.clone(),
+                Arc::new(storage_fence),
+            );
+            Some(Arc::new(NativeStorageVolumeWorkflow {
+                store: store.clone(),
+                metering: Some(metering_observer.clone()),
+                workflow,
+                controller_epoch: storage_intent_epoch,
+                target_agent_id,
+                target_agent_epoch,
+            }) as Arc<dyn o3k_api::NativeVolumeWorkflow>)
+        });
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(crate::native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
@@ -1918,6 +1903,7 @@ pub async fn build_composition_with_guard(
             }),
             store: native_api_store.clone(),
             storage_provider: native_storage_provider.clone(),
+            volume_workflow: native_volume_workflow.clone(),
             server: server_reader
                 .clone()
                 .ok_or("generic native application requires compute reader")?,
@@ -2133,7 +2119,13 @@ pub async fn build_composition_with_guard(
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);
     }
-    o3k_api::recover_native_volumes(&state).await;
+    if let Some(workflow) = native_volume_workflow {
+        workflow
+            .recover()
+            .await
+            .map_err(|error| format!("native volume recovery required before startup: {error}"))?;
+        state = state.with_native_volume_workflow(workflow);
+    }
     let native_storage_recovery_task = if let Some(workflow) = native_attachment_workflow.clone() {
         state = state.with_native_attachment_workflow(workflow.clone());
         if let Err(error) = workflow.recover().await {
@@ -2455,7 +2447,7 @@ mod pp4_endpoint_lifecycle;
 mod tests {
     use super::{
         DaemonCreateResolver, NetworkBindingProjector, locations_from_declarations,
-        placement_consumer_ids, resolve_native_lvm_config,
+        placement_consumer_ids,
     };
     use crate::composition::compute::validate_inspect_probe_paths;
     use o3k_compute::PortBindingProjector;
@@ -2529,40 +2521,6 @@ mod tests {
     }
 
     #[test]
-    fn lvm_config_unset_and_empty_env_means_provider_not_configured() -> Result<(), String> {
-        assert!(
-            resolve_native_lvm_config(None, None, None)
-                .map_err(|error| error.to_string())?
-                .is_none()
-        );
-        assert!(
-            resolve_native_lvm_config(
-                Some(String::new()),
-                Some(String::new()),
-                Some(String::new())
-            )
-            .map_err(|error| error.to_string())?
-            .is_none()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn lvm_config_all_values_set_resolves_to_config() -> Result<(), String> {
-        let config = resolve_native_lvm_config(
-            Some("vg-o3k".to_owned()),
-            Some("pool-o3k".to_owned()),
-            Some("o3k".to_owned()),
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "complete values should produce a config".to_owned())?;
-        assert_eq!(config.volume_group, "vg-o3k");
-        assert_eq!(config.thin_pool, "pool-o3k");
-        assert_eq!(config.provider_namespace, "o3k");
-        Ok(())
-    }
-
-    #[test]
     fn location_config_parses_region_topology_deterministically() -> Result<(), String> {
         let raw = r#"[{"id":"region-b","availability_domains":[{"id":"az-2"},{"id":"az-1"}]},
                           {"id":"region-a","availability_domains":[{"id":"az-3"}]}]"#
@@ -2601,44 +2559,6 @@ mod tests {
             .map(|_| "ok".to_owned())
             .unwrap_or_else(|error| error.to_string());
         assert!(text.contains("ambiguous"), "unexpected: {text}");
-    }
-
-    #[test]
-    fn lvm_config_partial_env_fails_closed() {
-        for values in [
-            (Some("vg-o3k".to_owned()), None, None),
-            (Some("vg-o3k".to_owned()), Some(String::new()), None),
-            (
-                Some("vg-o3k".to_owned()),
-                Some("pool-o3k".to_owned()),
-                Some(String::new()),
-            ),
-        ] {
-            assert!(
-                resolve_native_lvm_config(values.0, values.1, values.2).is_err(),
-                "partial LVM configuration must fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn lvm_config_complete_but_invalid_values_are_rejected() {
-        assert!(
-            resolve_native_lvm_config(
-                Some("vg-o3k".to_owned()),
-                Some("vg-o3k".to_owned()),
-                Some("o3k".to_owned()),
-            )
-            .is_err()
-        );
-        assert!(
-            resolve_native_lvm_config(
-                Some("vg o3k".to_owned()),
-                Some("pool-o3k".to_owned()),
-                Some("o3k".to_owned()),
-            )
-            .is_err()
-        );
     }
 
     #[test]

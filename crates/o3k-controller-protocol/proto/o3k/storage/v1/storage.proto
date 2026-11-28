@@ -1,0 +1,7 @@
+syntax = "proto3";
+package o3k.storage.v1;
+
+message StorageCommand { bytes envelope_json = 1; bytes payload_json = 2; }
+message StorageObservation { bytes observation_json = 1; }
+message ExecuteResponse { StorageObservation observation = 1; string error = 2; }
+service StorageExecutor { rpc Execute(StorageCommand) returns (ExecuteResponse); }

@@ -59,8 +59,7 @@ pub use compute::ComputeErrorDiagnostic;
 
 pub use volume::{
     VOLUME_ALLOCATION_METER, observe_volume_allocation, observe_volume_open_if_consuming,
-    realize_native_volume_create, recover_native_volumes, remove_native_volume,
-    repair_volume_metering, volume_state_consumes,
+    recover_native_volumes, repair_volume_metering, volume_state_consumes,
 };
 
 #[doc(hidden)]
@@ -149,6 +148,7 @@ pub struct AppState {
     storage_store: Option<Arc<dyn o3k_store::StorageRepository>>,
     storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     native_attachment_workflow: Option<Arc<dyn NativeAttachmentWorkflow>>,
+    native_volume_workflow: Option<Arc<dyn NativeVolumeWorkflow>>,
     native_api: Option<NativeApiState>,
     /// Optional metering projection used by canonical volume recovery. Volume
     /// create/delete already observe through the native adapter; startup
@@ -183,6 +183,7 @@ impl Default for AppState {
             storage_store: None,
             storage_provider: None,
             native_attachment_workflow: None,
+            native_volume_workflow: None,
             native_api: None,
             metering_observer: None,
             backup_admission: backup_admission::BackupAdmission::default(),
@@ -197,6 +198,14 @@ impl Default for AppState {
 pub trait NativeAttachmentWorkflow: Send + Sync {
     async fn attach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
     async fn detach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+    async fn recover(&self) -> Result<(), String>;
+}
+
+/// Durable native volume execution supplied by the composition root.
+#[async_trait]
+pub trait NativeVolumeWorkflow: Send + Sync {
+    async fn create(&self, volume_id: uuid::Uuid) -> Result<(), String>;
+    async fn delete(&self, project_id: &str, volume_id: uuid::Uuid) -> Result<(), String>;
     async fn recover(&self) -> Result<(), String>;
 }
 
@@ -396,6 +405,12 @@ impl AppState {
         workflow: Arc<dyn NativeAttachmentWorkflow>,
     ) -> Self {
         self.native_attachment_workflow = Some(workflow);
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_volume_workflow(mut self, workflow: Arc<dyn NativeVolumeWorkflow>) -> Self {
+        self.native_volume_workflow = Some(workflow);
         self
     }
 

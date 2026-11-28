@@ -259,17 +259,22 @@ fn volume_not_found() -> Response {
     keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found").into_response()
 }
 
-/// Shared provider-backed native Volume lifecycle used by both the Cinder
-/// projection and the native `volume:volume` adapter.  Compatibility wire
-/// formats remain outside this function; canonical persistence, provider
-/// observation, and the metering projection are deliberately single-sourced
-/// here so no caller can durably create a volume without opening its meter.
-pub async fn realize_native_volume_create(
-    store: Arc<dyn o3k_store::StorageRepository>,
-    provider: Arc<dyn o3k_storage::StorageProvider>,
-    record: VolumeRecord,
-    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
-) -> Result<VolumeRecord, String> {
+fn volume_observation_matches(
+    record: &VolumeRecord,
+    observation: &o3k_storage::StorageVolumeObservation,
+) -> bool {
+    observation.owned && observation.size_bytes == record.volume.size_bytes
+}
+
+fn available_volume_observation_matches(
+    record: &VolumeRecord,
+    observation: &o3k_storage::StorageVolumeObservation,
+) -> bool {
+    volume_observation_matches(record, observation) && observation.available
+}
+
+/* Native volume mutations are owned by NativeVolumeWorkflow in the controller. */
+/*
     let mut creating = record.clone();
     creating.volume.state = VolumeState::Creating;
     creating.volume.generation = record
@@ -357,7 +362,7 @@ fn available_volume_observation_matches(
 /// `Deleting` until an explicit provider absence observation succeeds. The
 /// allocation meter is closed at that same durable point so every caller
 /// (Cinder projection and native adapter) closes exactly once.
-pub async fn remove_native_volume(
+async fn remove_native_volume_legacy(
     store: Arc<dyn o3k_store::StorageRepository>,
     provider: Arc<dyn o3k_storage::StorageProvider>,
     project_id: &str,
@@ -430,6 +435,7 @@ pub async fn remove_native_volume(
         Err(error) => Err(error.to_string()),
     }
 }
+*/
 
 async fn scoped_store(
     state: &AppState,
@@ -566,21 +572,20 @@ pub(crate) async fn create(
         volume,
         created_at: now_rfc3339(),
     };
-    let Some(provider) = state.storage_provider.clone() else {
+    if state.storage_provider.is_none() {
         return unavailable();
-    };
+    }
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let record = match realize_native_volume_create(
-                store.clone(),
-                provider,
-                record,
-                state.metering_observer.as_ref(),
-            )
-            .await
-            {
-                Ok(record) => record,
-                Err(_) => return unavailable(),
+            let Some(workflow) = state.native_volume_workflow.as_ref() else {
+                return unavailable();
+            };
+            if workflow.create(record.volume.id.as_uuid()).await.is_err() {
+                return unavailable();
+            }
+            let record = match store.get_volume(record.volume.id.as_uuid()).await {
+                Ok(Some(record)) => record,
+                _ => return unavailable(),
             };
             (
                 StatusCode::ACCEPTED,
@@ -708,21 +713,14 @@ pub(crate) async fn delete(
         )
         .into_response();
     }
-    let Some(provider) = state.storage_provider.clone() else {
-        // Do not remove canonical state while a provider is unavailable: the
-        // durable row is the recovery inventory for an owned provider volume.
+    if state.storage_provider.is_none() {
         return unavailable();
     };
-    match remove_native_volume(
-        store.clone(),
-        provider,
-        &project_id,
-        id,
-        None,
-        state.metering_observer.as_ref(),
-    )
-    .await
-    {
+    let Some(workflow) = state.native_volume_workflow.as_ref() else {
+        return unavailable();
+    };
+    let deletion = workflow.delete(&project_id, id).await;
+    match deletion {
         Ok(()) => match store.delete_volume(&project_id, id).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(_) => unavailable(),
@@ -876,54 +874,10 @@ pub async fn recover_native_volumes(state: &AppState) {
                         VolumeState::Requested | VolumeState::Creating | VolumeState::Unknown
                     ) =>
                 {
-                    match provider.create_volume(&request).await {
-                        Ok(observation)
-                            if available_volume_observation_matches(&record, &observation) =>
-                        {
-                            if !observe_recovered_volume(state, &record, true).await {
-                                continue;
-                            }
-                            let mut available = record.clone();
-                            available.volume.state = VolumeState::Available;
-                            available.volume.generation =
-                                match record.volume.generation.checked_add(1) {
-                                    Some(generation) => generation,
-                                    None => continue,
-                                };
-                            available.volume.provider_reference =
-                                Some(o3k_domain::StorageProviderReference {
-                                    provider: observation.provider_reference.provider,
-                                    resource_id: observation.provider_reference.resource_id,
-                                });
-                            let _ = store
-                                .update_volume(record.volume.generation, &available)
-                                .await;
-                        }
-                        Ok(_) => {
-                            tracing::warn!(volume_id = %record.volume.id, "native volume recovery rejected mismatched provider create observation");
-                        }
-                        Err(error) if error.is_unknown_outcome() => {
-                            if record.volume.state != VolumeState::Requested {
-                                let mut unknown = record.clone();
-                                unknown.volume.state = VolumeState::Unknown;
-                                unknown.volume.generation =
-                                    unknown.volume.generation.saturating_add(1);
-                                let _ = store
-                                    .update_volume(record.volume.generation, &unknown)
-                                    .await;
-                            }
-                        }
-                        Err(_) => {
-                            if record.volume.state != VolumeState::Requested {
-                                let mut failed = record.clone();
-                                failed.volume.state = VolumeState::Error;
-                                failed.volume.generation =
-                                    failed.volume.generation.saturating_add(1);
-                                let _ =
-                                    store.update_volume(record.volume.generation, &failed).await;
-                            }
-                        }
-                    }
+                    // Recovery is observation-only. A missing provider object
+                    // is not authorization to allocate a new object outside
+                    // the durable operation workflow.
+                    tracing::warn!(volume_id = %record.volume.id, "native volume recovery found no owned provider object; awaiting durable workflow replay");
                 }
                 Err(error) if error.is_unknown_outcome() => {
                     if record.volume.state != VolumeState::Requested {
@@ -949,27 +903,14 @@ pub async fn recover_native_volumes(state: &AppState) {
                     }
                 }
                 Ok(observation) if volume_observation_matches(&record, &observation) => {
-                    match provider.delete_volume(&request).await {
-                        Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
-                            if matches!(
-                                provider.inspect_volume(&request).await,
-                                Err(o3k_storage::StorageProviderError::NotFound)
-                            ) {
-                                if !observe_recovered_volume(state, &record, false).await {
-                                    continue;
-                                }
-                                if finalize_recovered_native_delete(store, &record).await {
-                                    let _ = store
-                                        .delete_volume(
-                                            &record.volume.project_id,
-                                            record.volume.id.as_uuid(),
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        Err(_) => {}
-                    }
+                    // Startup recovery is observation-only. The durable
+                    // NativeVolumeWorkflow owns the subsequent delete and
+                    // its observe-before-retry/fencing semantics.
+                    tracing::info!(
+                        volume_id = %record.volume.id,
+                        provider_reference = %observation.provider_reference.resource_id,
+                        "native volume deletion remains pending durable workflow replay"
+                    );
                 }
                 Ok(_) => {
                     tracing::warn!(volume_id = %record.volume.id, "native volume deletion rejected mismatched provider observation");

@@ -195,6 +195,9 @@ pub struct AgentConfig {
     pub server_name: String,
     pub tls: TlsFiles,
     pub identity_file: PathBuf,
+    /// A canonical enrollment epoch supplied by `o3k join`. When absent the
+    /// agent creates a fresh process epoch for portable development setups.
+    pub agent_epoch: Option<String>,
     pub host_label: String,
     pub software_version: String,
     pub heartbeat_interval: Duration,
@@ -220,6 +223,17 @@ impl AgentConfig {
         {
             return Err(AgentError::InvalidConfiguration(
                 "version and retry intervals must be set",
+            ));
+        }
+        if self.agent_epoch.as_deref().is_some_and(|epoch| {
+            epoch.is_empty()
+                || epoch.len() > 128
+                || !epoch
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        }) {
+            return Err(AgentError::InvalidConfiguration(
+                "agent epoch contains invalid characters",
             ));
         }
         let _ = self.tls.read()?;

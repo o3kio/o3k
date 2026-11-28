@@ -224,6 +224,7 @@ impl Harness {
                 storage_provider: Some(Arc::new(
                     o3k_storage::testkit::InMemoryStorageProvider::default(),
                 )),
+                volume_workflow: None,
                 server: server_reader.clone(),
                 network: network_reader.clone(),
                 external_controllers: Arc::new(Default::default()),

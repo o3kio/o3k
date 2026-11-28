@@ -94,16 +94,40 @@ binary_builder = (root / "scripts/build-release-binaries-debian12.sh").read_text
 assert 'baseline binary is missing: $BINARIES_DIR/o3k-enrollment-issuer' in release_builder
 assert 'install -m 0755 "$BINARIES_DIR/o3k-enrollment-issuer" "$OUT_DIR/bin/o3k-enrollment-issuer"' in release_builder
 assert 'cargo build --release --locked --bin o3k-enrollment-issuer' in binary_builder
-assert 'o3k-enrollment-issuer > SHA256SUMS' in binary_builder
+assert 'o3k-enrollment-issuer o3k-storage > SHA256SUMS' in binary_builder
 qualification = (root / "tests/ea-qualification/ea-testlab.sh").read_text()
-assert '"ubuntu@$ip" "$@"' in qualification
-assert '- name: ubuntu' in qualification
+assert '"ea@$ip" "$@"' in qualification
+assert '- name: ea' in qualification
 assert '- name: o3k\n' not in qualification
 PY
 bash "$ROOT/packaging/get-o3k-worker/sync.sh" --check
 
 grep -Fq 'O3K_ENROLLMENT_LISTEN_ADDR=127.0.0.1:19443' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_ENROLLMENT_SIGNER' "$ROOT/packaging/install.sh"
+grep -Fq 'O3K_STORAGE_CONTROLLER_IDENTITY=' "$ROOT/packaging/install.sh"
+grep -Fq 'controller-client-key.pem' "$ROOT/packaging/install.sh"
+grep -Fq 'o3k-sync-storage-epoch' "$ROOT/packaging/install.sh" "$ROOT/bins/o3k/src/native_cli.rs"
+grep -Fq 'install -d -o root -g root -m 0755 /usr/local/libexec' "$ROOT/packaging/install.sh"
+grep -Fq 'install -o o3k -g o3k -m 0640' "$ROOT/packaging/install.sh"
+! grep -Fq 'O3K_STORAGE_TLS_KEY=$TLS_DIR/agent-key.pem' "$ROOT/packaging/install.sh"
+grep -Fq 'o3k-storage.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh" "$ROOT/packaging/make-release.sh"
+grep -Fq 'check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-storage-bin' "$ROOT/packaging/make-release.sh"
+grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
+grep -Fq 'DeviceAllow=/dev/mapper/control rw' "$ROOT/packaging/o3k-storage.service"
+grep -Fq 'ReadWritePaths=/var/lib/o3k/storage /etc/lvm/archive /etc/lvm/backup /run/lock/lvm /run/lvm' "$ROOT/packaging/o3k-storage.service"
+grep -Fq 'update_storage_epoch "$AGENT_EPOCH"' "$WRAPPER"
+python3 - "$WRAPPER" <<'PY'
+from pathlib import Path
+import sys
+
+wrapper = Path(sys.argv[1]).read_text()
+join = wrapper.index("if [ \"$join_ok\" -ne 1 ]; then")
+epoch = wrapper.index('update_storage_epoch "$AGENT_EPOCH"', join)
+compute = wrapper.index('systemctl start o3k-compute.service')
+assert join < epoch < compute
+assert 'O3K_STORAGE_AGENT_EPOCH=$epoch' in wrapper
+assert '/usr/local/libexec/o3k-sync-storage-epoch "$epoch"' in wrapper
+PY
 grep -Fq 'o3k-enrollment-issuer" --export-ca' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_COMPUTE_CLIENT_CA=$COMPUTE_CLIENT_CA' "$ROOT/packaging/install.sh"
 grep -Fq 'O3K_COMPUTE_CONTROL_ENDPOINT=https://127.0.0.1:50051' "$ROOT/packaging/install.sh"
@@ -119,7 +143,24 @@ installer = Path(sys.argv[1]).read_text()
 assert installer.index('o3k_verify_config_ledger "$CONFIG_DIR"') < installer.index('bash "$ROOT_DIR/scripts/generate-passwords.sh"')
 PY
 grep -Fq 'share/o3k/o3k-enrollment-issuer@.service' "$ROOT/packaging/install.sh" "$ROOT/packaging/uninstall.sh"
+grep -Fq '"$ROOT_DIR/packaging/o3k-enrollment-issuer@.service"' "$ROOT/packaging/make-release.sh"
+grep -Fq '"$ROOT_DIR/packaging/o3k-enrollment-issuer.socket"' "$ROOT/packaging/make-release.sh"
 grep -Fq 'systemctl disable --now o3k-enrollment-issuer.socket' "$ROOT/packaging/uninstall.sh"
+grep -Fq 'DirectoryMode=0711' "$ROOT/packaging/o3k-enrollment-issuer.socket"
+grep -Fq 'SocketUser=o3k' "$ROOT/packaging/o3k-enrollment-issuer.socket"
+grep -Fq 'SocketMode=0600' "$ROOT/packaging/o3k-enrollment-issuer.socket"
+grep -Fq 'O3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json' "$ROOT/packaging/install.sh"
+grep -Fq 'install -d -o root -g o3k -m 0750 "$CONFIG_DIR/storage"' "$ROOT/packaging/install.sh"
+python3 - "$ROOT/packaging/install.sh" <<'PY'
+from pathlib import Path
+import sys
+installer = Path(sys.argv[1]).read_text()
+recursive_chown = installer.index('chown -R o3k:o3k-compute "$DATA_DIR"')
+storage_restore = installer.index('chown root:root "$DATA_DIR/storage"')
+assert recursive_chown < storage_restore
+assert 'chmod 0700 "$DATA_DIR/storage"' in installer[storage_restore:storage_restore + 160]
+PY
+grep -Fq 'unwrap_or_else(|_| "/var/lib/o3k/storage/journal.json".into())' "$ROOT/bins/o3k-storage/src/main.rs"
 grep -Fq 'if [[ "$EA_INSTALL" == 1 ]]; then' "$ROOT/packaging/install.sh"
 ! grep -Fq 'O3K_ENROLLMENT_SIGNER=/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
 grep -Fq '/run/o3k/enrollment-issuer.sock' "$ROOT/packaging/install.sh"
