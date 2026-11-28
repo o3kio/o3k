@@ -310,6 +310,10 @@ fi
 STORAGE_ENABLED=0
 if [[ "$EA_INSTALL" == 1 && "$PROFILE" == libvirt && -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" ]]; then
   STORAGE_ENABLED=1
+  [[ "$O3K_LVM_VOLUME_GROUP" =~ ^[A-Za-z0-9_.+~-]+$ && "$O3K_LVM_THIN_POOL" =~ ^[A-Za-z0-9_.+~-]+$ ]] || {
+    echo "LVM volume group and thin pool names contain unsupported characters" >&2
+    exit 2
+  }
   if [[ -z "$STORAGE_BINARY" ]]; then
     if [[ -x "$ROOT_DIR/bin/o3k-storage" ]]; then STORAGE_BINARY="$ROOT_DIR/bin/o3k-storage";
     elif [[ "$RELEASE_BUNDLE" == 1 ]]; then bundle_missing_binary "$ROOT_DIR/bin/o3k-storage (o3k-storage)";
@@ -731,9 +735,20 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
     install -d -o root -g root -m 0750 "$CONFIG_DIR/storage"
     if [[ ! -f "$CONFIG_DIR/storage/o3k-storage.env" ]]; then
       umask 077
-      printf 'O3K_STORAGE_LISTEN=127.0.0.1:9444\nO3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json\nO3K_STORAGE_AGENT_ID=%s\nO3K_STORAGE_AGENT_EPOCH=1\nO3K_STORAGE_VOLUME_GROUP=%s\nO3K_STORAGE_THIN_POOL=%s\nO3K_STORAGE_NAMESPACE=o3k\nO3K_STORAGE_TLS_CERT=%s/server.pem\nO3K_STORAGE_TLS_KEY=%s/server-key.pem\nO3K_STORAGE_TLS_CLIENT_CA=%s/ca.pem\nO3K_STORAGE_TLS_EXPECTED_CLIENT_URI=urn:o3k:controller:installation-local\n' "$(cat "$TLS_DIR/agent-id")" "$O3K_LVM_VOLUME_GROUP" "$O3K_LVM_THIN_POOL" "$TLS_DIR" "$TLS_DIR" "$TLS_DIR" >"$CONFIG_DIR/storage/o3k-storage.env"
+      printf 'O3K_STORAGE_LISTEN=127.0.0.1:9444\nO3K_STORAGE_JOURNAL=/var/lib/o3k/storage/journal.json\nO3K_STORAGE_AGENT_ID=%s\nO3K_STORAGE_AGENT_EPOCH=1\nO3K_STORAGE_VOLUME_GROUP=%s\nO3K_STORAGE_THIN_POOL=%s\nO3K_STORAGE_NAMESPACE=o3k\nO3K_STORAGE_TLS_CERT=%s/server.pem\nO3K_STORAGE_TLS_KEY=%s/server-key.pem\nO3K_STORAGE_TLS_CLIENT_CA=%s/ca.pem\nO3K_STORAGE_CONTROLLER_IDENTITY=urn:o3k:controller:installation-local\n' "$(cat "$TLS_DIR/agent-id")" "$O3K_LVM_VOLUME_GROUP" "$O3K_LVM_THIN_POOL" "$TLS_DIR" "$TLS_DIR" "$TLS_DIR" >"$CONFIG_DIR/storage/o3k-storage.env"
       chmod 0600 "$CONFIG_DIR/storage/o3k-storage.env"
     fi
+    # Keep the executor's device access limited to the operator-selected VG;
+    # the service's closed device policy otherwise denies all block devices.
+    # The mapper glob covers thin LVs created after installation.
+    install -d -o root -g root -m 0755 /etc/systemd/system/o3k-storage.service.d
+    cat > /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf <<EOF
+[Service]
+DeviceAllow=/dev/$O3K_LVM_VOLUME_GROUP/* rw
+DeviceAllow=/dev/mapper/${O3K_LVM_VOLUME_GROUP}-* rw
+EOF
+    chmod 0644 /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
+    systemctl daemon-reload
   fi
 fi
 MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
