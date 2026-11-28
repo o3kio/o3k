@@ -3,8 +3,7 @@ use o3k_controller_protocol::storage::{
     storage_executor_server::{StorageExecutor, StorageExecutorServer},
 };
 use o3k_domain::{
-    StorageAction, StorageAttachmentCommandPayload, StorageCommandEnvelope, StorageCommandPayload,
-    StorageVolumeCommandPayload, storage_payload_fingerprint,
+    StorageAction, StorageCommandEnvelope, StorageCommandPayload, storage_payload_fingerprint,
 };
 use o3k_storage::{
     LvmConfig, LvmStorageProvider, StorageAttachmentRequest, StorageJournal, StorageProvider,
@@ -184,7 +183,7 @@ impl StorageExecutor for Executor {
                 match action {
                     StorageAction::PrepareAttachment => {
                         self.provider.prepare_attachment(&request).await.map(|o| {
-                            provider_resource_id = Some(o.provider_reference.resource_id);
+                            provider_resource_id = Some(o.provider_reference.resource_id.clone());
                             device_path = Some(o.device_path().to_owned());
                             resource_state = "attached".to_owned();
                         })
