@@ -12,7 +12,7 @@
 //! The underlying protocol is O3K native HTTP API (ADR-0173/SPEC-0030).
 
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::HttpClient;
@@ -36,6 +36,80 @@ const INIT_MAX_ATTEMPTS: usize = 3;
 const INIT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// Total deadline across all `bootstrap/init` attempts and backoffs.
 const INIT_TOTAL_DEADLINE: Duration = Duration::from_secs(12);
+
+fn sync_storage_epoch_at(
+    storage_env: &Path,
+    daemon_env: &Path,
+    epoch: &str,
+) -> Result<bool, String> {
+    if !storage_env.exists() {
+        return Ok(false);
+    }
+    if epoch.is_empty()
+        || !epoch
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("enrolled agent epoch is invalid".to_owned());
+    }
+    let daemon = std::fs::read_to_string(daemon_env)
+        .map_err(|e| format!("cannot read controller environment: {e}"))?;
+    let storage = std::fs::read_to_string(storage_env)
+        .map_err(|e| format!("cannot read storage environment: {e}"))?;
+    let replace = |content: &str| {
+        let mut output = String::new();
+        let mut replaced = false;
+        for line in content.lines() {
+            if line.starts_with("O3K_STORAGE_AGENT_EPOCH=") {
+                output.push_str("O3K_STORAGE_AGENT_EPOCH=");
+                output.push_str(epoch);
+                replaced = true;
+            } else {
+                output.push_str(line);
+            }
+            output.push('\n');
+        }
+        if replaced { Some(output) } else { None }
+    };
+    let daemon =
+        replace(&daemon).ok_or_else(|| "controller environment lacks storage epoch".to_owned())?;
+    let storage =
+        replace(&storage).ok_or_else(|| "storage environment lacks agent epoch".to_owned())?;
+    for (path, data) in [(daemon_env, daemon), (storage_env, storage)] {
+        let tmp = path.with_extension(format!("epoch-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, data).map_err(|e| format!("cannot stage epoch update: {e}"))?;
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot commit epoch update: {error}"));
+        }
+    }
+    Ok(true)
+}
+
+fn sync_storage_epoch_after_join(epoch: &str) -> Result<(), String> {
+    let storage = PathBuf::from("/etc/o3k/storage/o3k-storage.env");
+    if !storage.exists() {
+        return Ok(());
+    }
+    let changed = sync_storage_epoch_at(&storage, Path::new("/etc/o3k/o3kd.env"), epoch)?;
+    if changed {
+        let status = std::process::Command::new("systemctl")
+            .args(["restart", "o3k-storage.service"])
+            .status()
+            .map_err(|e| format!("cannot restart storage executor: {e}"))?;
+        if !status.success() {
+            return Err("storage executor restart failed".to_owned());
+        }
+        let status = std::process::Command::new("systemctl")
+            .args(["restart", "o3kd.service"])
+            .status()
+            .map_err(|e| format!("cannot restart controller: {e}"))?;
+        if !status.success() {
+            return Err("controller restart failed".to_owned());
+        }
+    }
+    Ok(())
+}
 
 /// Returns the effective API base URL from environment or default.
 fn api_base() -> String {
@@ -450,6 +524,7 @@ pub fn join(
     if response.status != 200 {
         return Err(format!("API returned status {}", response.status));
     }
+    sync_storage_epoch_after_join(agent_epoch)?;
     println!("{}", response.body);
     Ok(())
 }
@@ -648,7 +723,10 @@ pub fn print_help() {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{DEFAULT_ENROLLMENT_TLS_SERVER_NAME, secret_from, validate_persisted_identity};
+    use super::{
+        DEFAULT_ENROLLMENT_TLS_SERVER_NAME, secret_from, sync_storage_epoch_at,
+        validate_persisted_identity,
+    };
     use o3k_compute_agent::types::EnrollmentIdentity;
     use std::io::Write;
     use std::path::PathBuf;
@@ -662,6 +740,38 @@ mod tests {
         let mut file = std::fs::File::create(&path).expect("fixture create");
         file.write_all(contents.as_bytes()).expect("fixture write");
         path
+    }
+
+    #[test]
+    fn storage_epoch_sync_persists_replacement_epoch() {
+        let root = std::env::temp_dir().join(format!("o3k-join-epoch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let storage = root.join("storage.env");
+        let daemon = root.join("o3kd.env");
+        std::fs::write(&storage, "O3K_STORAGE_AGENT_EPOCH=1\n").expect("storage");
+        std::fs::write(&daemon, "O3K_STORAGE_AGENT_EPOCH=1\n").expect("daemon");
+        assert!(sync_storage_epoch_at(&storage, &daemon, "replacement-epoch").expect("sync"));
+        assert!(
+            std::fs::read_to_string(&storage)
+                .expect("read")
+                .contains("replacement-epoch")
+        );
+        assert!(
+            std::fs::read_to_string(&daemon)
+                .expect("read")
+                .contains("replacement-epoch")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn storage_epoch_sync_skips_compute_only_hosts() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-join-no-storage-{}", uuid::Uuid::new_v4()));
+        assert!(
+            !sync_storage_epoch_at(&root.join("missing"), &root.join("daemon"), "epoch")
+                .expect("sync")
+        );
     }
 
     #[test]
