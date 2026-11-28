@@ -2,7 +2,10 @@ use o3k_controller_protocol::storage::{
     ExecuteResponse, StorageCommand, StorageObservation as WireObservation,
     storage_executor_server::{StorageExecutor, StorageExecutorServer},
 };
-use o3k_domain::{StorageCommandEnvelope, StorageCommandPayload, storage_payload_fingerprint};
+use o3k_domain::{
+    StorageAction, StorageAttachmentCommandPayload, StorageCommandEnvelope, StorageCommandPayload,
+    StorageVolumeCommandPayload, storage_payload_fingerprint,
+};
 use o3k_storage::{
     LvmConfig, LvmStorageProvider, StorageAttachmentRequest, StorageJournal, StorageProvider,
     StorageVolumeRequest,
@@ -51,12 +54,32 @@ impl StorageExecutor for Executor {
         let command = request.into_inner();
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.envelope_json)
             .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
+        envelope
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid storage command envelope"))?;
         let payload: StorageCommandPayload = serde_json::from_slice(&command.payload_json)
             .map_err(|_| Status::invalid_argument("invalid storage payload"))?;
         if storage_payload_fingerprint(&payload)
             .map_err(|_| Status::invalid_argument("invalid storage payload"))?
             != envelope.canonical_payload_fingerprint
-            || envelope.validate().is_err()
+        {
+            return Err(Status::invalid_argument(
+                "storage payload does not match command envelope",
+            ));
+        }
+        let (resource_id, project_id, generation) = match &payload {
+            StorageCommandPayload::Volume(p) => {
+                (p.volume_id.to_string(), p.project_id.as_str(), p.generation)
+            }
+            StorageCommandPayload::Attachment(p) => (
+                p.attachment_id.to_string(),
+                p.project_id.as_str(),
+                p.volume_generation,
+            ),
+        };
+        if resource_id != envelope.resource_id
+            || project_id != envelope.project_id
+            || generation != envelope.resource_generation
         {
             return Err(Status::invalid_argument(
                 "storage payload does not match command envelope",
@@ -67,16 +90,6 @@ impl StorageExecutor for Executor {
             .get(&envelope.idempotency_key)
             .map_err(|_| Status::internal("journal lookup failed"))?
         {
-            let stored = self
-                .journal
-                .get_envelope(&envelope.idempotency_key)
-                .map_err(|_| Status::internal("journal lookup failed"))?
-                .ok_or_else(|| Status::failed_precondition("journal record disappeared"))?;
-            if stored != envelope {
-                return Err(Status::failed_precondition(
-                    "idempotency key conflicts with command envelope",
-                ));
-            }
             // Accepted/Running means the provider side effect may have happened
             // before this process lost the response.  Never replay a mutation
             // blindly: return an explicit unknown outcome for controller
@@ -114,62 +127,82 @@ impl StorageExecutor for Executor {
             .journal
             .accept(envelope.clone(), &self.agent_id, self.agent_epoch)
             .map_err(|_| Status::failed_precondition("storage command fenced or conflicting"))?;
+        let mut provider_resource_id = None;
         let mut device_path = None;
+        let mut resource_state = "available".to_owned();
         let result = match (envelope.action, payload) {
-            (o3k_domain::StorageAction::CreateVolume, StorageCommandPayload::Volume(p))
-            | (o3k_domain::StorageAction::InspectVolume, StorageCommandPayload::Volume(p))
-            | (o3k_domain::StorageAction::DeleteVolume, StorageCommandPayload::Volume(p)) => {
-                let req = StorageVolumeRequest {
+            (StorageAction::CreateVolume, StorageCommandPayload::Volume(p)) => self
+                .provider
+                .create_volume(&StorageVolumeRequest {
                     volume_id: p.volume_id,
                     project_id: p.project_id,
                     size_bytes: p.size_bytes,
                     generation: p.generation,
-                };
-                match envelope.action {
-                    o3k_domain::StorageAction::CreateVolume => {
-                        self.provider.create_volume(&req).await.map(|_| ())
-                    }
-                    o3k_domain::StorageAction::InspectVolume => {
-                        self.provider.inspect_volume(&req).await.map(|_| ())
-                    }
-                    o3k_domain::StorageAction::DeleteVolume => {
-                        self.provider.delete_volume(&req).await
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            (action, StorageCommandPayload::Attachment(p)) => {
-                if envelope.resource_id != p.attachment_id.to_string()
-                    || envelope.project_id != p.project_id
-                    || envelope.resource_generation == 0
-                {
-                    Err(o3k_storage::StorageProviderError::InvalidRequest)
-                } else {
-                    let req = StorageAttachmentRequest {
-                        attachment_id: p.attachment_id,
+                })
+                .await
+                .map(|o| {
+                    provider_resource_id = Some(o.provider_reference.resource_id);
+                }),
+            (StorageAction::InspectVolume, StorageCommandPayload::Volume(p)) => self
+                .provider
+                .inspect_volume(&StorageVolumeRequest {
+                    volume_id: p.volume_id,
+                    project_id: p.project_id,
+                    size_bytes: p.size_bytes,
+                    generation: p.generation,
+                })
+                .await
+                .map(|o| {
+                    provider_resource_id = Some(o.provider_reference.resource_id);
+                }),
+            (StorageAction::DeleteVolume, StorageCommandPayload::Volume(p)) => {
+                self.provider
+                    .delete_volume(&StorageVolumeRequest {
                         volume_id: p.volume_id,
                         project_id: p.project_id,
-                        volume_generation: p.volume_generation,
-                        host_id: p.server_id.to_string(),
-                        access_mode: p.access_mode,
-                    };
-                    match action {
-                        o3k_domain::StorageAction::PrepareAttachment => self
-                            .provider
-                            .prepare_attachment(&req)
-                            .await
-                            .map(|prepared| {
-                                device_path = Some(prepared.device_path().to_owned());
-                                ()
-                            }),
-                        o3k_domain::StorageAction::TerminateAttachment => {
-                            self.provider.terminate_attachment(&req).await.map(|_| ())
-                        }
-                        o3k_domain::StorageAction::Reconcile => {
-                            self.provider.inspect_attachment(&req).await.map(|_| ())
-                        }
-                        _ => Err(o3k_storage::StorageProviderError::InvalidRequest),
+                        size_bytes: p.size_bytes,
+                        generation: p.generation,
+                    })
+                    .await
+            }
+            (action, StorageCommandPayload::Attachment(p))
+                if matches!(
+                    action,
+                    StorageAction::PrepareAttachment
+                        | StorageAction::TerminateAttachment
+                        | StorageAction::Reconcile
+                ) =>
+            {
+                let request = StorageAttachmentRequest {
+                    attachment_id: p.attachment_id,
+                    volume_id: p.volume_id,
+                    project_id: p.project_id,
+                    volume_generation: p.volume_generation,
+                    host_id: p.server_id.to_string(),
+                    access_mode: p.access_mode,
+                };
+                match action {
+                    StorageAction::PrepareAttachment => {
+                        self.provider.prepare_attachment(&request).await.map(|o| {
+                            provider_resource_id = Some(o.provider_reference.resource_id);
+                            device_path = Some(o.device_path().to_owned());
+                            resource_state = "attached".to_owned();
+                        })
                     }
+                    StorageAction::TerminateAttachment => {
+                        self.provider.terminate_attachment(&request).await.map(|o| {
+                            provider_resource_id = Some(o.provider_reference.resource_id);
+                            resource_state = "available".to_owned();
+                        })
+                    }
+                    StorageAction::Reconcile => {
+                        self.provider.inspect_attachment(&request).await.map(|o| {
+                            provider_resource_id = Some(o.provider_reference.resource_id);
+                            resource_state =
+                                if o.attached { "attached" } else { "available" }.to_owned();
+                        })
+                    }
+                    _ => unreachable!(),
                 }
             }
             _ => Err(o3k_storage::StorageProviderError::InvalidRequest),
@@ -188,15 +221,11 @@ impl StorageExecutor for Executor {
             o3k_domain::StorageOperationState::Failed
         };
         terminal.resource_state = if result.is_ok() {
-            if device_path.is_some() {
-                "attached"
-            } else {
-                "available"
-            }
+            resource_state
         } else {
-            "unknown"
-        }
-        .to_owned();
+            "unknown".to_owned()
+        };
+        terminal.provider_resource_id = provider_resource_id;
         terminal.device_path = device_path;
         self.journal
             .record_observation(&envelope.idempotency_key, terminal.clone())
