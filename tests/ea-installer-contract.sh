@@ -116,6 +116,8 @@ grep -Fq 'DevicePolicy=closed' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'DeviceAllow=/dev/mapper/control rw' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'pvs --noheadings --options pv_name --select' "$ROOT/packaging/install.sh"
 grep -Fq 'DeviceAllow=%s rw' "$ROOT/packaging/install.sh"
+grep -Fq 'dmsetup info --noheadings --columns --options name' "$ROOT/packaging/install.sh"
+grep -Fq 'storage_pool_mapper}_tmeta' "$ROOT/packaging/install.sh"
 grep -Fq 'ReadWritePaths=/var/lib/o3k/storage /etc/lvm/archive /etc/lvm/backup /run/lock/lvm /run/lvm' "$ROOT/packaging/o3k-storage.service"
 grep -Fq 'update_storage_epoch "$AGENT_EPOCH"' "$WRAPPER"
 python3 - "$WRAPPER" <<'PY'

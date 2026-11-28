@@ -784,6 +784,24 @@ EOF
     while IFS= read -r storage_pv_path; do
       printf 'DeviceAllow=%s rw\n' "$storage_pv_path" >> /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
     done <<<"$storage_pv_paths"
+    # Thin-pool activation also opens its exact dm mapper nodes. Resolve the
+    # escaped mapper name from dmsetup and authorize only this pool plus its
+    # data/metadata devices; never authorize the dm major globally.
+    storage_pool_mapper="$(dmsetup info --noheadings --columns --options name "$O3K_LVM_VOLUME_GROUP/$O3K_LVM_THIN_POOL" 2>/dev/null | awk 'NF {print $1}')" || {
+      echo "storage installer: unable to resolve thin-pool mapper device" >&2
+      exit 1
+    }
+    [[ -n "$storage_pool_mapper" ]] || {
+      echo "storage installer: configured thin pool is not active" >&2
+      exit 1
+    }
+    for storage_mapper in "$storage_pool_mapper" "${storage_pool_mapper}-tpool" "${storage_pool_mapper}_tdata" "${storage_pool_mapper}_tmeta"; do
+      [[ -b "/dev/mapper/$storage_mapper" ]] || {
+        echo "storage installer: thin-pool mapper device is unavailable" >&2
+        exit 1
+      }
+      printf 'DeviceAllow=/dev/mapper/%s rw\n' "$storage_mapper" >> /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
+    done
     chmod 0644 /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
     systemctl daemon-reload
   fi
