@@ -754,7 +754,10 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
     fi
     # Keep the executor's device access limited to the operator-selected VG;
     # the service's closed device policy otherwise denies all block devices.
-    # The mapper glob covers thin LVs created after installation.
+    # systemd DeviceAllow does not support path globs, so authorize only the
+    # exact PV nodes resolved below. LVM metadata operations use these nodes
+    # and /dev/mapper/control; guest/VM attachment never grants the executor
+    # broad access to unrelated dm devices.
     install -d -o root -g root -m 0755 /etc/systemd/system/o3k-storage.service.d
     # DevicePolicy=closed also hides the physical PV(s) that LVM must open
     # while creating/removing thin LVs. Resolve them from the operator-selected
@@ -777,8 +780,6 @@ if [[ "$STORAGE_ENABLED" == 1 ]]; then
     done <<<"$storage_pv_paths"
     cat > /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf <<EOF
 [Service]
-DeviceAllow=/dev/$O3K_LVM_VOLUME_GROUP/* rw
-DeviceAllow=/dev/mapper/${O3K_LVM_VOLUME_GROUP}-* rw
 EOF
     while IFS= read -r storage_pv_path; do
       printf 'DeviceAllow=%s rw\n' "$storage_pv_path" >> /etc/systemd/system/o3k-storage.service.d/lvm-devices.conf
